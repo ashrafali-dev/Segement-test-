@@ -112,6 +112,8 @@ internal object WebModeWriter {
       b.setAttribute('data-bg',it.bg);
       b.setAttribute('data-sf',it.sf?'1':'0');
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
+      // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
+      if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
       b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
         // If the underlying source image was cleaned, do not put an opaque box over it:
@@ -327,6 +329,21 @@ internal object WebModeWriter {
       if(boxW<8||boxH<8)return;
       var availW=Math.max(12,boxW*0.88);
       var availH=Math.max(12,boxH*0.86);
+      var hasTb=false;
+      var tbs=b.getAttribute('data-tb');
+      if(tbs){
+        var q=tbs.split(',');
+        var pl=q[0]*boxW,pt=q[1]*boxH,pr=q[2]*boxW,pb=q[3]*boxH;
+        var cW=boxW-pl-pr,cH=boxH-pt-pb;
+        if(isFinite(cW)&&isFinite(cH)&&cW>=boxW*0.25&&cH>=boxH*0.25&&cW>=8&&cH>=8){
+          // The text lives in the bubble's inscribed rectangle: padding = the cover box minus that rectangle.
+          b.style.padding=Math.max(0,pt)+'px '+Math.max(0,pr)+'px '+Math.max(0,pb)+'px '+Math.max(0,pl)+'px';
+          availW=Math.max(12,cW*0.96);
+          availH=Math.max(12,cH*0.94);
+          hasTb=true;
+        }
+      }
+      if(!hasTb)b.style.padding='3px';
       t.style.width=availW+'px';
       t.style.maxWidth=availW+'px';
       t.style.minWidth='0';
@@ -337,7 +354,9 @@ internal object WebModeWriter {
       // Start with the OCR-estimated cap, but never let an invalid estimate break fitting.
       var cap=Number(maxPx);
       if(!isFinite(cap)||cap<2)cap=4;
-      var lo=1.5,hi=Math.max(lo,cap),best=lo;
+      // With a known bubble interior the OCR font size is only a hint (it was measured on the old, often
+      // longer or shorter, lettering): let the translation grow to what the bubble really offers.
+      var lo=1.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
       function fits(){
         // Read layout after changing font size; DOM metrics account for the loaded Bengali
         // font and actual line wrapping, unlike character-count estimates.
@@ -482,7 +501,7 @@ internal object WebModeWriter {
         if(bb.style.zIndex!==zz)bb.style.zIndex=zz;
         if(bb.style.display!=='flex')bb.style.display='flex';
         var fw=String(Math.round(R.rw));
-        if(szChanged||bb.getAttribute('data-fw')!==fw){bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);fit(bb,Math.max(gg[5]*R.rw*1.5,bb.getAttribute('data-sf')==='1'?R.oh*0.8:0));}
+        if(szChanged||bb.getAttribute('data-fw')!==fw){bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);fit(bb,gg[5]*R.rw);}
       }}
     var raf=0,lastRun=0,forceNext=false,settleT=0,ro=null;
     function sched(){
@@ -898,6 +917,18 @@ internal object WebModeWriter {
                 .put("t", t).put("s", WebModeLogic.normalizeUrl(b.src))
                 .put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
                 .put("a", r5(b.angle)).put("f", r5(b.font))
+                .apply {
+                    if (b.tbw > 0f && b.tbh > 0f && b.w > 0f && b.h > 0f) {
+                        val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
+                        val tl = b.tcx - b.tbw / 2f; val tt = b.tcy - b.tbh / 2f
+                        val ml = (tl - bl) / b.w; val mt = (tt - bt) / b.h
+                        val mr = ((b.cx + b.w / 2f) - (b.tcx + b.tbw / 2f)) / b.w
+                        val mb = ((b.cy + b.h / 2f) - (b.tcy + b.tbh / 2f)) / b.h
+                        if (ml > -0.02f && mt > -0.02f && mr > -0.02f && mb > -0.02f)
+                            put("tb", JSONArray().put(r5(Math.max(0f, ml))).put(r5(Math.max(0f, mt)))
+                                .put(r5(Math.max(0f, mr))).put(r5(Math.max(0f, mb))))
+                    }
+                }
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.

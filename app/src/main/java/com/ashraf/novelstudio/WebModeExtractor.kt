@@ -1156,6 +1156,9 @@ internal class WebModeExtractor(
                         if (v.visibility != View.VISIBLE || v.alpha <= 0.02f || v.width <= 0 || v.height <= 0) return
                         if (v is ViewGroup) {
                             if (isAncestor(v, wv)) { for (i in 0 until v.childCount) walk(v.getChildAt(i)); return }
+                            // The chat / answer panel is a WebView of its own (usually without a background): its text was
+                            // being read as comic lettering and painted onto the page.
+                            if (passed && v is android.webkit.WebView) { add(v); return }
                             if (passed && v.background != null) { add(v); return }
                             for (i in 0 until v.childCount) walk(v.getChildAt(i))
                         } else if (passed) {
@@ -1270,8 +1273,10 @@ internal class WebModeExtractor(
                 val info = evalWait(wrap(LIB + forceInfoScript)) { parseJson(it) }
                 val blankBefore = forceBlank
                 val host = hostOf(meta.url).lowercase().removePrefix("www.")
-                val hideOverlayForShot = req.visibleOnly &&
-                    (host == "shonenjumpplus.com" || host.endsWith(".shonenjumpplus.com"))
+                // Always take the screenshot WITHOUT our own translation overlay, otherwise the Bengali text drawn on the
+                // page is read again as if it were lettering (and for a non-Bengali target it is even "translated").
+                val hideOverlayForShot = req.visibleOnly
+                val canvasSite = host == "shonenjumpplus.com" || host.endsWith(".shonenjumpplus.com")
                 if (hideOverlayForShot) {
                     evalWait(wrap(JS_TEMP_HIDE_OVERLAY)) { null }
                     // Wait for the visibility change to reach the WebView surface before PixelCopy.
@@ -1301,7 +1306,7 @@ internal class WebModeExtractor(
                 }
                 if (bmp != null) {
                     forceBlank = blankBefore   // a retry succeeded: this screen was not blank after all
-                    if (hideOverlayForShot && info != null) {
+                    if (canvasSite && hideOverlayForShot && info != null) {
                         try { observeCanvasPixelFingerprints(bmp, info, meta.url) }
                         catch (e: Exception) { Log.w(TAG, "Canvas fingerprint failed: ${e.javaClass.simpleName}") }
                     }
@@ -1915,6 +1920,8 @@ internal class WebModeExtractor(
             val refinedText = arrayOfNulls<String>(blocks.size)
             val refinedBox = arrayOfNulls<IntArray>(blocks.size)
             val refinedFont = arrayOfNulls<Float>(blocks.size)
+            // Box of the LETTERING of a bubble (not its outline): the seed from which the bubble shape is rebuilt.
+            val refinedSeed = arrayOfNulls<IntArray>(blocks.size)
             val consumed = BooleanArray(blocks.size)
             // Cache interiors so multi-line text in the same balloon triggers only one retry.
             val triedInteriors = HashSet<String>()
@@ -1945,6 +1952,7 @@ internal class WebModeExtractor(
                     (l - pad).coerceAtLeast(0), (t - pad).coerceAtLeast(0),
                     (r + pad).coerceAtMost(bmp.width), (bt + pad).coerceAtMost(bmp.height)
                 )
+                refinedSeed[i] = refinedBox[i]
                 refinedFont[i] = if (fonts.isEmpty()) null else fonts[fonts.size / 2]
                 for (j in grp) if (j != i) consumed[j] = true
             }
@@ -2010,6 +2018,18 @@ internal class WebModeExtractor(
                 if (joinedText.isBlank()) continue
                 refinedText[i] = joinedText
                 refinedBox[i] = inter
+                run {
+                    var sl = Int.MAX_VALUE; var st = Int.MAX_VALUE; var sr = Int.MIN_VALUE; var sb = Int.MIN_VALUE
+                    for (j in members) {
+                        val rc = rects[j]
+                        sl = Math.min(sl, rc[0]); st = Math.min(st, rc[1]); sr = Math.max(sr, rc[2]); sb = Math.max(sb, rc[3])
+                    }
+                    val sp = Math.max(4, (medFont * 0.2f).toInt())
+                    refinedSeed[i] = intArrayOf(
+                        (sl - sp).coerceAtLeast(0), (st - sp).coerceAtLeast(0),
+                        (sr + sp).coerceAtMost(bmp.width), (sb + sp).coerceAtMost(bmp.height)
+                    )
+                }
                 refinedFont[i] = medFont
                 for (j in members) if (j != i) consumed[j] = true
             }
@@ -2040,6 +2060,43 @@ internal class WebModeExtractor(
                     cx = (rb[0] + rb[2]) / 2f; cy = (rb[1] + rb[3]) / 2f
                     bw = (rb[2] - rb[0]) - 4f; bh = (rb[3] - rb[1]) - 4f
                 }
+                // Speech-bubble SHAPE (the Manga Translator idea): rebuild the bubble around the lettering and write the
+                // translation into the largest rectangle that fits INSIDE it. The cover box only has to hide the old
+                // lettering. Without this the text was fitted into the lettering's own tight box (a long translation got
+                // tiny) or into an oval's bounding box (its corners lie outside the outline: text left the bubble).
+                var tL = 0; var tT = 0; var tR = 0; var tB = 0
+                if (!rotated && !b.vertical && Prefs.bool(wv.context, "wmBubbleFit", true)) {
+                    val seedBox = refinedSeed[i] ?: rects[i]
+                    val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
+                    if (fit != null) {
+                        val sf = fit.safe
+                        val aL = Math.floor((cx - bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
+                        val aT = Math.floor((cy - bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
+                        val aR = Math.ceil((cx + bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
+                        val aB = Math.ceil((cy + bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
+                        var cL = aL; var cT = aT; var cR = aR; var cB = aB
+                        // cover = old box + safe rectangle, if that stays inside the bubble; else the lettering + safe rectangle
+                        val uL = Math.min(aL, sf[0]); val uT = Math.min(aT, sf[1])
+                        val uR = Math.max(aR, sf[2]); val uB = Math.max(aB, sf[3])
+                        if (fit.coverage(uL, uT, uR, uB) >= 0.90f) {
+                            cL = uL; cT = uT; cR = uR; cB = uB
+                        } else {
+                            val sL = Math.min(seedBox[0] - 2, sf[0]).coerceAtLeast(0)
+                            val sT = Math.min(seedBox[1] - 2, sf[1]).coerceAtLeast(0)
+                            val sR = Math.max(seedBox[2] + 2, sf[2]).coerceAtMost(bmp.width)
+                            val sB = Math.max(seedBox[3] + 2, sf[3]).coerceAtMost(bmp.height)
+                            if (fit.coverage(sL, sT, sR, sB) >= 0.90f) { cL = sL; cT = sT; cR = sR; cB = sB }
+                        }
+                        val xl = Math.max(cL, sf[0]); val xt = Math.max(cT, sf[1])
+                        val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
+                        val coverArea = (cR - cL).toLong() * (cB - cT)
+                        val textArea = (xr - xl).toLong() * (xb - xt)
+                        if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
+                            tL = xl; tT = xt; tR = xr; tB = xb
+                            cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
+                        }
+                    }
+                }
                 val nb = WmBubble(
                     src = src,
                     cx = (x0 + cx * k) / fullW, cy = (y0 + cy * k) / fullH,
@@ -2047,7 +2104,11 @@ internal class WebModeExtractor(
                     angle = if (rotated) tilt else 0f,
                     font = (refinedFont[i] ?: b.fontPx) * k / fullW,
                     bg = s.bg, fg = s.fg, fg2 = s.fg2, soft = s.soft, stroke = s.stroke,
-                    sourceText = text
+                    sourceText = text,
+                    tcx = if (tR > tL) (x0 + (tL + tR) / 2f * k) / fullW else 0f,
+                    tcy = if (tR > tL) (y0 + (tT + tB) / 2f * k) / fullH else 0f,
+                    tbw = if (tR > tL) (tR - tL) * k / fullW else 0f,
+                    tbh = if (tR > tL) (tB - tT) * k / fullH else 0f
                 )
                 // Same text seen by two overlapping slices: keep the bigger box once.
                 var dup = -1
@@ -2077,7 +2138,7 @@ internal class WebModeExtractor(
                         // A union covers the recovered lower rows too; choosing just the bigger box
                         // can leave the other slice's tail visibly untranslated.
                         out[dup] = prior.copy(sourceText = merged, cx = (l + r) / 2, cy = (t + bt) / 2,
-                            w = r - l, h = bt - t)
+                            w = r - l, h = bt - t, tcx = 0f, tcy = 0f, tbw = 0f, tbh = 0f)
                         texts[dup] = merged
                     }
                     continue
@@ -2196,7 +2257,7 @@ internal class WebModeExtractor(
                 // Selective, speed-neutral completeness audit (see OcrRescan.augmentRemote): free when nothing is
                 // uncovered, otherwise only the suspicious crops are re-read, in parallel and under a deadline.
                 if (!Prefs.bool(wv.context, "lensAudit", true) || core.blocks.isEmpty() && fastMode) return core
-                return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 1200L else 2500L) }
+                return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
                 catch (_: Exception) { core } catch (_: OutOfMemoryError) { core }
             }
             // Real-time/visible reading must return promptly. The optional uncovered-ink audit can
@@ -2354,7 +2415,7 @@ internal class WebModeExtractor(
         // If a live Lens panel's URL is not immediately readable, stop waiting and OCR the pixels already onscreen.
         private const val LENS_IMAGE_FETCH_WAIT_MS = 900L
         private const val VISIBLE_FETCH_WAIT_MS = 7_000L
-        private const val SCREEN_LENS_DEADLINE_MS = 7_000L
+        private const val SCREEN_LENS_DEADLINE_MS = 12_000L
         private const val JOB_MAX_MS = 12 * 60_000L
         private const val VALIDITY_CHECK_INTERVAL_MS = 250L
         private const val MIN_W = 120
@@ -2511,7 +2572,12 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     var im=imgs[i],src=imageSrc(im);
     if(!src)continue;
     if(/\/link-slot-|\/(?:banner|banners|promotion|promo)\//i.test(src))continue;
+    // Page furniture is not a panel: background strips (bg_viewbody.jpg is 420x19000 and 634 bytes), icons, buttons,
+    // spinners, and "images" whose address is really a web page. Reading them wasted time and made the site look
+    // like it blocked downloads.
+    if(/\/(?:bg[_-]|background[_-]|icon|logo|sprite|avatar|btn[_-]|button[_-]|loading|spinner|placeholder)[^\/]*$/i.test(src.split('?')[0])||/\.(?:html?|php|aspx?|jsp)(?:[?#]|$)/i.test(src))continue;
     var r=im.getBoundingClientRect(),nw=im.naturalWidth||0,nh=im.naturalHeight||0;
+    if(nw>0&&nh/nw>40)continue;
     if(pageCv.length&&hiddenOrCovered(im,r))continue;
     if(!((r.width>=100&&r.height>=60)||(nw>=300&&nh>=120))){
       // A lazy image that has not loaded yet is often collapsed to 0x0: use its wrapper's box instead,

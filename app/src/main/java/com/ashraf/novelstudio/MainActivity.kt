@@ -2084,7 +2084,9 @@ return t.length>=40?'TXT:'+t:'';
                 }
                 // Nothing is being read for the visible panel: use the time to OCR the next images ahead.
                 // Keep the DOM probe light enough that it does not compete with touch scrolling.
-                if (hasImages && webModeHandle == null && aheadOcrHandle == null &&
+                // Rule: the panel in front of the reader comes first. Look ahead only when the visible screen is
+                // already read (nothing new waiting) - never while a changed screen is still waiting for its turn.
+                if (hasImages && webModeHandle == null && aheadOcrHandle == null && !changed &&
                     // Keep a bounded OCR/translation pipeline: allow the next ten-panel batch
                     // to be prepared while the previous batch is still being translated.
                     rtAheadTranslationQueue.size < 4 &&
@@ -2263,8 +2265,14 @@ return t.length>=40?'TXT:'+t:'';
         when {
             reOcrBusy -> { text = "Re-reading this screen"; color = 0xFF64B5F6.toInt() }
             sending -> { text = "Sending to chatbot"; color = 0xFFFFAB40.toInt() }
-            keys.any { it == "visible-ocr" || it == "read-ahead-ocr" || it == "next-chapter-ocr" } ->
-                { text = "Reading the page"; color = 0xFFB388FF.toInt() }
+            // Say WHICH reading is running and with WHICH engine. One merged "Reading the page" label (and one
+            // timer) hid whether the 56 s were spent on the screen in front of the reader or on panels ahead.
+            keys.contains("visible-ocr") ->
+                { text = "Reading this screen · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
+            keys.contains("next-chapter-ocr") ->
+                { text = "Reading next chapter · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
+            keys.contains("read-ahead-ocr") ->
+                { text = "Reading ahead · " + shortOcrEngineName(); color = 0xFF7E57C2.toInt() }
             keys.contains("placement") -> { text = "Adding the translation"; color = 0xFF64FFDA.toInt() }
             keys.any { it == "chatbot-translation" || it == "ahead-translation" || it == "prefetch-translation" } -> {
                 val fresh = android.os.SystemClock.elapsedRealtime() - chatPhaseAtMs < 2_500L
@@ -5298,6 +5306,14 @@ return t.length>=40?'TXT:'+t:'';
 
     private fun menuOcrModelsLabel(): String =
         "🧠 OCR Engine: " + currentOcrEngineLabel() + "\nLast actually used: " + lastActuallyUsedOcrEngine()
+
+    private fun shortOcrEngineName(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
+        "paddle_small", "paddle_heavy" -> "Paddle"
+        "rapid_onnx" -> "RapidOCR"
+        "manga" -> "Manga OCR"
+        "lens" -> "Lens"
+        else -> "ML Kit"
+    }
 
     private fun currentOcrEngineLabel(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
         "paddle_small" -> "PaddleOCR Small"

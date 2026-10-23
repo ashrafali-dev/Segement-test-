@@ -26,7 +26,14 @@ internal data class WmBubble(
     /** Bengali text already translated for this position. Empty means not translated yet. */
     val translatedText: String = "",
     /** Colour of the lettering's outline (SFX / titles drawn as fill + stroke); 0 = no outline. */
-    val stroke: Int = 0
+    val stroke: Int = 0,
+    /**
+     * Where the translation may be WRITTEN, when that is smaller than the cover box ([cx]/[cy]/[w]/[h]): the
+     * largest rectangle that fits inside the speech bubble (an oval's bounding box has corners outside the
+     * outline). Centre [tcx]/[tcy] and size [tbw]/[tbh], fractions of the image like the cover box. [tbw] = 0 means
+     * "use the whole box".
+     */
+    val tcx: Float = 0f, val tcy: Float = 0f, val tbw: Float = 0f, val tbh: Float = 0f
 )
 
 /**
@@ -41,7 +48,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             .put("s", b.src).put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
             .put("a", r5(b.angle)).put("f", r5(b.font)).put("bg", b.bg).put("fg", b.fg)
             .put("fg2", b.fg2).put("sf", b.soft)
-            .put("srcText", b.sourceText).put("tr", b.translatedText).put("so", b.stroke))
+            .put("srcText", b.sourceText).put("tr", b.translatedText).put("so", b.stroke)
+            .put("tcx", r5(b.tcx)).put("tcy", r5(b.tcy)).put("tbw", r5(b.tbw)).put("tbh", r5(b.tbh)))
         return JSONObject().put("v", 2).put("to", titleOffset).put("b", a).toString()
     }
 
@@ -61,7 +69,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                     b.getDouble("a").toFloat(), b.getDouble("f").toFloat(),
                     b.getInt("bg"), b.getInt("fg"),
                     b.optInt("fg2", b.getInt("fg")), b.optBoolean("sf", false),
-                    b.optString("srcText", ""), b.optString("tr", ""), b.optInt("so", 0)
+                    b.optString("srcText", ""), b.optString("tr", ""), b.optInt("so", 0),
+                    b.optDouble("tcx", 0.0).toFloat(), b.optDouble("tcy", 0.0).toFloat(),
+                    b.optDouble("tbw", 0.0).toFloat(), b.optDouble("tbh", 0.0).toFloat()
                 ))
             }
             WebModeLayout(o.optInt("to", 1), list)

@@ -12,7 +12,7 @@ import org.json.JSONObject
  * The download route is re-checked every 15th page, because a site can change.
  */
 object SiteLearner {
-    private const val KEY = "siteLearn"
+    private const val KEY = "siteLearn2"   // new key: old data wrongly marked many sites as "downloads blocked"
     private const val MAX_HOSTS = 60
 
     private class P(
@@ -46,7 +46,9 @@ object SiteLearner {
         Prefs.put(c, KEY, all.toString())
     }
 
-    private fun blocked(p: P) = p.dFail >= 2 && p.dFail >= p.dOk
+    // Needs clear evidence: a few failures (junk URLs, one slow image, a dropped connection) must not move a whole
+    // site to screen capture, because screen capture can include the app's own interface pixels.
+    private fun blocked(p: P) = p.dFail >= 4 && p.dFail >= p.dOk * 3
     private fun screenFaster(p: P) = p.dOk >= 2 && p.sOk >= 2 && p.sMs * 10 < p.dMs * 7
 
     /** True when this site should be read straight from the screen (no download attempt). Counts as one use. */
@@ -67,7 +69,7 @@ object SiteLearner {
     fun recordDownload(c: Context, host: String, ok: Boolean, ms: Long) {
         if (host.isBlank()) return
         val p = read(c, host) ?: P()
-        if (ok) { p.dMs = if (p.dOk == 0) ms else (p.dMs * 3 + ms) / 4; p.dOk++ } else p.dFail++
+        if (ok) { p.dMs = if (p.dOk == 0) ms else (p.dMs * 3 + ms) / 4; p.dOk++; if (p.dFail > 0) p.dFail-- } else p.dFail++
         write(c, host, p)
     }
 
