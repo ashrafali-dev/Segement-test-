@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Novel Studio "Aurora Glass": dark app theme; every AlertDialog picks up GlassAlertDialog -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:colorBackground">#FF07080D</item>
+        <item name="android:statusBarColor">#FF07080D</item>
+        <item name="android:navigationBarColor">#FF07080D</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">#FF8C9CFF</item>
+        <item name="android:alertDialogTheme">@style/GlassAlertDialog</item>
+    </style>
+
+    <style name="GlassAlertDialog" parent="@android:style/Theme.DeviceDefault.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/glass_dialog_bg</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:textColorPrimary">#FFF4F6FB</item>
+        <item name="android:textColorSecondary">#FF9AA3B8</item>
+        <item name="android:textColorHint">#FF6B7488</item>
+        <item name="android:colorAccent">#FF8C9CFF</item>
+    </style>
+</resources>

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://tezgkarktyftzhejaplp.supabase.co https://*.supabase.co; img-src 'self' data:; base-uri 'none'; form-action 'self';">
+<title>NovelStudio Analytics</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{color-scheme:dark;--bg:#0b0d12;--card:#141923;--muted:#9aa5b5;--line:#273142;--accent:#9ad3b2;--bad:#ffb4ab}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#eef2f8;font:15px system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1120px;margin:auto;padding:24px}h1{font-size:24px;margin:0}h2{font-size:16px;margin:0 0 14px}p{color:var(--muted)}button,input{font:inherit;border-radius:10px;padding:11px 13px;border:1px solid var(--line)}button{cursor:pointer;background:#263245;color:#fff}button.primary{background:var(--accent);color:#092016;border-color:transparent;font-weight:700}input{width:100%;background:#0e131b;color:#fff;margin:5px 0 12px}label{color:var(--muted);font-size:13px}.panel,.metric{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}#login{max-width:420px;margin:10vh auto}#app{display:none}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}.metric .label{color:var(--muted);font-size:13px}.metric .value{font-size:30px;font-weight:750;margin-top:8px}.metric small{color:var(--muted)}.columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.rows{display:flex;gap:8px;flex-wrap:wrap}.item{display:flex;justify-content:space-between;gap:14px;padding:9px 0;border-bottom:1px solid var(--line)}.muted,#topStatus{color:var(--muted)}.error{color:var(--bad);white-space:pre-wrap}.success{color:var(--accent)}footer{padding:20px 0;color:var(--muted);font-size:12px}@media(max-width:760px){main{padding:15px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.columns{grid-template-columns:1fr}h1{font-size:20px}.metric .value{font-size:25px}}
+</style>
+</head><body><main>
+<section id="login" class="panel"><h1>NovelStudio Analytics</h1><p>Owner-only dashboard. Sign in with the authorized email.</p>
+<form id="authForm"><label for="email">Owner email</label><input id="email" type="email" autocomplete="username" required value="tanjinaashraf0@gmail.com">
+<label for="password">Password</label><input id="password" type="password" autocomplete="current-password" minlength="8" required>
+<div class="rows"><button class="primary" type="submit">Sign in</button><button type="button" id="signUp">Create owner account</button></div>
+<p id="authMessage" class="error"></p><p class="muted">Only the approved owner email can access analytics. New accounts may need email verification.</p></form></section>
+<section id="app" style="display:none"><header style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:24px"><div><h1>NovelStudio Analytics</h1><div id="topStatus">Connecting…</div></div><div class="rows"><button id="refresh">Refresh</button><button id="signOut">Sign out</button></div></header>
+<div id="message" class="error"></div><div class="grid">
+<div class="metric"><div class="label">Online now</div><div id="online" class="value">—</div><small>Heartbeat in last 90 seconds</small></div>
+<div class="metric"><div class="label">Total installs seen</div><div id="installs" class="value">—</div></div>
+<div class="metric"><div class="label">Active users · 24 hours</div><div id="dau" class="value">—</div></div>
+<div class="metric"><div class="label">Active users · 30 days</div><div id="mau" class="value">—</div></div>
+<div class="metric"><div class="label">Events · 24 hours</div><div id="events24" class="value">—</div></div>
+<div class="metric"><div class="label">Events · 30 days</div><div id="events30" class="value">—</div></div>
+<div class="metric"><div class="label">Translations completed · 30 days</div><div id="done" class="value">—</div></div>
+<div class="metric"><div class="label">Translations failed · 30 days</div><div id="failed" class="value">—</div></div></div>
+<div class="columns"><div class="panel"><h2>Mode usage · 30 days</h2><div id="modes" class="muted">No data yet</div></div><div class="panel"><h2>Target languages · 30 days</h2><div id="languages" class="muted">No data yet</div></div><div class="panel"><h2>OCR models · 30 days</h2><div id="ocr" class="muted">No data yet</div></div><div class="panel"><h2>App versions · 30 days</h2><div id="versions" class="muted">No data yet</div></div></div>
+<footer>Privacy-conscious analytics. No novel text or translation content is collected. Auto-refresh every 15 seconds.</footer></section></main>
+<script>
+(() => {
+ const URL = "https://tezgkarktyftzhejaplp.supabase.co";
+ const KEY = "sb_publishable_Y_MafVNuqKfCJ1KJh-aB9w_wHyfGije";
+ const ADMIN_EMAIL = "tanjinaashraf0@gmail.com";
+ const el = id => document.getElementById(id);
+ if (!window.supabase) { el("authMessage").textContent = "Could not load the authentication library. Reload and try again."; return; }
+ const client = window.supabase.createClient(URL, KEY);
+ let timer = null, busy = false;
+
+ function setMessage(message, isSuccess = false) {
+   el("authMessage").textContent = message;
+   el("authMessage").className = isSuccess ? "success" : "error";
+ }
+ function showLogin(message = "") {
+   if (timer) clearInterval(timer);
+   timer = null;
+   el("login").style.display = "block";
+   el("app").style.display = "none";
+   if (message) setMessage(message);
+ }
+ async function showApp() {
+   el("login").style.display = "none";
+   el("app").style.display = "block";
+   await loadStats();
+   if (timer) clearInterval(timer);
+   timer = setInterval(loadStats, 15000);
+ }
+ function list(id, items, key) {
+   const root = el(id); root.replaceChildren();
+   if (!items || !items.length) { root.textContent = "No data yet"; return; }
+   for (const item of items) {
+     const row = document.createElement("div"); row.className = "item";
+     const a = document.createElement("span"), b = document.createElement("strong");
+     a.textContent = item[key] ?? "Unknown";
+     b.textContent = Number(item.count || 0).toLocaleString();
+     row.append(a, b); root.append(row);
+   }
+ }
+ async function loadStats() {
+   if (busy) return;
+   busy = true;
+   el("topStatus").textContent = "Refreshing…";
+   try {
+     const { data, error } = await client.functions.invoke("novelstudio-admin-stats", { method: "GET" });
+     if (error) throw error;
+     if (data?.error) throw new Error(data.error);
+     const d = data?.data || {};
+     el("message").textContent = "";
+     const set = (id, v) => el(id).textContent = Number(v ?? 0).toLocaleString();
+     set("online", d.online_now); set("installs", d.total_installs);
+     set("dau", d.active_users_24h); set("mau", d.active_users_30d);
+     set("events24", d.events_24h); set("events30", d.events_30d);
+     set("done", d.translations_completed_30d); set("failed", d.translations_failed_30d);
+     list("modes", d.modes_30d, "mode");
+     list("languages", d.languages_30d, "language");
+     list("ocr", d.ocr_models_30d, "model");
+     list("versions", d.app_versions_30d, "version");
+     el("topStatus").textContent = "Updated " + new Date(d.generated_at || Date.now()).toLocaleString();
+   } catch (e) {
+     el("message").textContent = "Could not load analytics. Sign in with the approved owner account. " + (e?.message || "");
+     el("topStatus").textContent = "Access denied or connection failed";
+   } finally {
+     busy = false;
+   }
+ }
+ el("authForm").addEventListener("submit", async e => {
+   e.preventDefault();
+   const email = el("email").value.trim().toLowerCase();
+   const password = el("password").value;
+   if (email !== ADMIN_EMAIL) { setMessage("This email is not authorized."); return; }
+   setMessage("Signing in…", true);
+   const { data, error } = await client.auth.signInWithPassword({ email, password });
+   if (error) { setMessage(error.message); return; }
+   if (data.user?.email?.toLowerCase() !== ADMIN_EMAIL) { await client.auth.signOut(); setMessage("This account is not authorized."); return; }
+   setMessage("");
+   await showApp();
+ });
+ el("signUp").addEventListener("click", async () => {
+   const email = el("email").value.trim().toLowerCase();
+   const password = el("password").value;
+   if (email !== ADMIN_EMAIL) { setMessage("Only the approved owner email can create this account."); return; }
+   if (password.length < 8) { setMessage("Use a password with at least 8 characters."); return; }
+   setMessage("Creating owner account…", true);
+   const { data, error } = await client.auth.signUp({ email, password });
+   if (error) { setMessage(error.message); return; }
+   if (data.session && data.user?.email?.toLowerCase() === ADMIN_EMAIL) {
+     setMessage("");
+     await showApp();
+   } else {
+     setMessage("Account created. Check the owner email inbox and verify it, then sign in.", true);
+   }
+ });
+ el("refresh").addEventListener("click", loadStats);
+ el("signOut").addEventListener("click", async () => { if (timer) clearInterval(timer); timer = null; await client.auth.signOut(); showLogin("Signed out."); });
+ client.auth.getSession().then(({ data }) => {
+   if (data.session?.user?.email?.toLowerCase() === ADMIN_EMAIL) showApp();
+   else if (data.session) { client.auth.signOut(); showLogin("This account is not authorized."); }
+ });
+})();
+</script></body></html>

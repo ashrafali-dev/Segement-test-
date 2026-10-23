@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>NovelStudio Japanese Manga OCR</title>
+<style>html,body{margin:0;background:#10131c;color:#d9deeb;font:14px sans-serif}#state{padding:8px}</style>
+<script src="https://appassets.androidplatform.net/manga-engine/ort.wasm.min.js"></script>
+</head>
+<body><div id="state">Initializing optional manga OCR runtime…</div>
+<script>
+(function () {
+  'use strict';
+  const BASE = 'https://appassets.androidplatform.net/manga-engine/';
+  let detector = null, recognizer = null, dictionary = null, busy = false, readySignalled = false;
+  const state = document.getElementById('state');
+  function bridge(name, id, message) {
+    try {
+      const b = window.NsJapaneseMangaBridge;
+      if (b && typeof b[name] === 'function') {
+        if (message === undefined) b[name](String(id || ''));
+        else b[name](String(id || ''), String(message));
+      }
+    } catch (_) {}
+  }
+
+  // 'all' optimisation keeps a second copy of the weights and the arena pre-allocates; on phones with a
+  // small WebView/WASM heap that failed with "failed to allocate a buffer". Lean options use far less memory.
+  const SESSION_OPTS = { executionProviders: ['wasm'], graphOptimizationLevel: 'disabled', enableCpuMemArena: false, enableMemPattern: false };
+
+  async function loadModels() {
+    if (!window.ort) throw new Error('ONNX Runtime WASM could not load');
+    ort.env.wasm.wasmPaths = {
+      mjs: BASE + 'ort-wasm-simd-threaded.mjs',
+      wasm: BASE + 'ort-wasm-simd-threaded.wasm'
+    };
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.proxy = false;
+    if (!detector) detector = await ort.InferenceSession.create(BASE + 'det/manga_det_v0.2.onnx', SESSION_OPTS);
+    if (!recognizer) recognizer = await ort.InferenceSession.create(BASE + 'rec/manga_rec_v0.2.onnx', SESSION_OPTS);
+    if (!dictionary) {
+      const response = await fetch(BASE + 'ppocrv6_dict.txt');
+      if (!response.ok) throw new Error('Character dictionary unavailable (' + response.status + ')');
+      const rows = (await response.text()).replace(/^\uFEFF/, '').split(/\r?\n/);
+      while (rows.length && rows[rows.length - 1] === '') rows.pop();
+      dictionary = [''];
+      for (const row of rows) dictionary.push(row.replace(/\r$/, ''));
+      dictionary.push(' ');
+      if (dictionary.length < 10000) throw new Error('Character dictionary is incomplete');
+    }
+    state.textContent = 'Japanese manga OCR ready';
+    if (!readySignalled) {
+      readySignalled = true;
+      try { if (window.NsJapaneseMangaBridge) window.NsJapaneseMangaBridge.onReady(); } catch (_) {}
+    }
+  }
+
+  function canvasOf(width, height) {
+    const c = document.createElement('canvas'); c.width = width; c.height = height; return c;
+  }
+
+  function detectorInput(image) {
+    const W = image.naturalWidth, H = image.naturalHeight;
+    const longStrip = Math.max(H, W) / Math.max(1, Math.min(H, W)) > 2;
+    const ratio = longStrip ? Math.min(1, Math.sqrt(0.75 * 960 * 960 / (H * W))) : 960 / Math.max(H, W);
+    const rh = Math.max(32, Math.round(H * ratio / 32) * 32);
+    const rw = Math.max(32, Math.round(W * ratio / 32) * 32);
+    const canvas = canvasOf(rw, rh);
+    const ctx = canvas.getContext('2d', {willReadFrequently:true});
+    ctx.drawImage(image, 0, 0, rw, rh);
+    const rgba = ctx.getImageData(0, 0, rw, rh).data;
+    const plane = rw * rh, data = new Float32Array(3 * plane);
+    // The model's reference path reads BGR pixels and applies these per-channel statistics.
+    const mean = [0.485,0.456,0.406], std = [0.229,0.224,0.225];
+    for (let i=0,p=0; i<rgba.length; i+=4,p++) {
+      data[p] = (rgba[i+2]/255-mean[0])/std[0];
+      data[plane+p] = (rgba[i+1]/255-mean[1])/std[1];
+      data[2*plane+p] = (rgba[i]/255-mean[2])/std[2];
+    }
+    return {tensor:new ort.Tensor('float32', data, [1,3,rh,rw]), rw,rh,W,H};
+  }
+
+  function toArgb(r,g,b) {
+    return (0xFF000000 | (Math.round(r)<<16) | (Math.round(g)<<8) | Math.round(b)) | 0;
+  }
+
+  // Sample the pixels immediately around the detected lettering. Bubble pages are usually
+  // black ink on white paper; sampled colour helps the overlay cover the original glyphs.
+  function sampleColors(image, box) {
+    const iw=image.naturalWidth, ih=image.naturalHeight;
+    const pad=Math.max(3,Math.min(14,Math.round(Math.min(box.w,box.h)*0.16)));
+    const x0=Math.max(0,Math.floor(box.x)-pad), y0=Math.max(0,Math.floor(box.y)-pad);
+    const x1=Math.min(iw,Math.ceil(box.x+box.w)+pad), y1=Math.min(ih,Math.ceil(box.y+box.h)+pad);
+    const cw=Math.max(1,x1-x0), ch=Math.max(1,y1-y0);
+    const canvas=canvasOf(cw,ch),ctx=canvas.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(image,x0,y0,cw,ch,0,0,cw,ch);
+    const pixels=ctx.getImageData(0,0,cw,ch).data;
+    const left=Math.max(0,Math.min(cw-1,Math.floor(box.x)-x0));
+    const top=Math.max(0,Math.min(ch-1,Math.floor(box.y)-y0));
+    const right=Math.max(left,Math.min(cw-1,Math.ceil(box.x+box.w)-x0));
+    const bottom=Math.max(top,Math.min(ch-1,Math.ceil(box.y+box.h)-y0));
+    const border=[];
+    function addBorder(x,y) {
+      x=Math.round(x);y=Math.round(y);
+      if(x<0||y<0||x>=cw||y>=ch)return;
+      const at=(y*cw+x)*4;
+      border.push([pixels[at],pixels[at+1],pixels[at+2]]);
+    }
+    for(let k=0;k<=6;k++){
+      const fx=k/6;
+      addBorder(left+(right-left)*fx,top-pad/2);
+      addBorder(left+(right-left)*fx,bottom+pad/2);
+      addBorder(left-pad/2,top+(bottom-top)*fx);
+      addBorder(right+pad/2,top+(bottom-top)*fx);
+    }
+    function medianChannel(at) {
+      if(!border.length)return 255;
+      const values=border.map(p=>p[at]).sort((a,b)=>a-b);
+      return values[Math.floor(values.length/2)];
+    }
+    const br=medianChannel(0), bgc=medianChannel(1), bb=medianChannel(2);
+    const luma=0.2126*br+0.7152*bgc+0.0722*bb;
+    const chroma=Math.max(br,bgc,bb)-Math.min(br,bgc,bb);
+    const dark=[];
+    const strideX=Math.max(1,Math.floor((right-left)/18));
+    const strideY=Math.max(1,Math.floor((bottom-top)/18));
+    for(let y=top;y<=bottom;y+=strideY)for(let x=left;x<=right;x+=strideX){
+      const at=(y*cw+x)*4,r=pixels[at],g=pixels[at+1],b=pixels[at+2];
+      const lum=0.2126*r+0.7152*g+0.0722*b;
+      if(lum<Math.max(80,luma*0.58))dark.push([r,g,b]);
+    }
+    let fr=20,fg=20,fb=20;
+    if(dark.length){
+      fr=dark.reduce((a,p)=>a+p[0],0)/dark.length;
+      fg=dark.reduce((a,p)=>a+p[1],0)/dark.length;
+      fb=dark.reduce((a,p)=>a+p[2],0)/dark.length;
+    }
+    return {bg:toArgb(br,bgc,bb),fg:toArgb(fr,fg,fb),soft:(luma<150||chroma>38)};
+  }
+
+  function detectComponents(map, mh, mw, input) {
+    const visited = new Uint8Array(mh*mw), boxes = [];
+    for (let start=0; start<map.length && boxes.length<5000; start++) {
+      if (visited[start] || map[start]<=0.15) continue;
+      const stack=[start]; visited[start]=1;
+      let minX=mw,minY=mh,maxX=-1,maxY=-1,sum=0,count=0;
+      while (stack.length) {
+        const at=stack.pop(), y=(at/mw)|0, x=at-y*mw;
+        minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
+        sum+=map[at];count++;
+        for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++) {
+          if(!dx&&!dy) continue;
+          const nx=x+dx,ny=y+dy;
+          if(nx<0||ny<0||nx>=mw||ny>=mh) continue;
+          const ni=ny*mw+nx;
+          if(!visited[ni]&&map[ni]>0.15){visited[ni]=1;stack.push(ni);}
+        }
+      }
+      if(count<3||maxX-minX+1<3||maxY-minY+1<3||sum/count<0.25) continue;
+      // Map pixels are downsampled from detector input: coordinate scale is source dimension / map dimension.
+      const sx=input.W/mw, sy=input.H/mh;
+      let x=minX*sx,y=minY*sy,w=(maxX-minX+1)*sx,h=(maxY-minY+1)*sy;
+      // Rectangle approximation of DBPostProcess unclip: distance ~= area * ratio / perimeter.
+      const pad=Math.max(1,(w*h*0.7)/Math.max(1,w+h));
+      x=Math.max(0,x-pad);y=Math.max(0,y-pad);
+      w=Math.min(input.W-x,w+2*pad);h=Math.min(input.H-y,h+2*pad);
+      boxes.push({x,y,w,h,score:sum/count});
+    }
+    // DB threshold maps can fragment one text line into pieces. Re-join pieces ONLY along the
+    // writing direction (stacked pieces of one vertical column, side-by-side pieces of one
+    // horizontal line). Never join neighbouring columns/rows here: a bubble with several vertical
+    // columns used to collapse into one wide box that was then read as a single (garbled,
+    // reversed) line. Bubble grouping happens after recognition, see groupLines().
+    boxes.sort((a,b)=>(a.y-b.y)||(a.x-b.x));
+    let changed=true,passes=0;
+    while(changed&&passes++<50){
+      changed=false;
+      for(let i=0;i<boxes.length;i++){
+        for(let j=i+1;j<boxes.length;){
+          const a=boxes[i],b=boxes[j];
+          const gx=Math.max(0,Math.max(a.x,b.x)-Math.min(a.x+a.w,b.x+b.w));
+          const gy=Math.max(0,Math.max(a.y,b.y)-Math.min(a.y+a.h,b.y+b.h));
+          const fa=Math.max(3,Math.min(a.w,a.h)),fb=Math.max(3,Math.min(b.w,b.h)),font=Math.max(fa,fb);
+          const aH=a.w>=a.h*1.5,bH=b.w>=b.h*1.5,aV=a.h>=a.w*1.5,bV=b.h>=b.w*1.5;
+          const sameCol=Math.abs((a.x+a.w/2)-(b.x+b.w/2))<Math.max(a.w,b.w)*0.5;
+          const sameRow=Math.abs((a.y+a.h/2)-(b.y+b.h/2))<Math.max(a.h,b.h)*0.5;
+          const col=!aH&&!bH&&sameCol&&gy<font*1.2;
+          const row=!aV&&!bV&&sameRow&&gx<font*1.2;
+          if(!row&&!col){j++;continue;}
+          const x=Math.min(a.x,b.x),y=Math.min(a.y,b.y),r=Math.max(a.x+a.w,b.x+b.w),bt=Math.max(a.y+a.h,b.y+b.h);
+          boxes[i]={x,y,w:r-x,h:bt-y,score:(a.score+b.score)/2};
+          boxes.splice(j,1);changed=true;
+        }
+      }
+    }
+    return boxes.filter(b=>b.w>=4&&b.h>=4).slice(0,250);
+  }
+
+  async function detect(image) {
+    const input=detectorInput(image);
+    const out=await detector.run({[detector.inputNames[0]]:input.tensor});
+    const tensor=out[detector.outputNames[0]],dims=tensor.dims,data=tensor.data;
+    const mh=dims[dims.length-2],mw=dims[dims.length-1];
+    if(!mh||!mw||data.length<mh*mw) throw new Error('Unexpected detector output '+JSON.stringify(dims));
+    return detectComponents(data,mh,mw,input).map(b=>({...b,vertical:b.h>=b.w*1.5}));
+  }
+
+  async function recognizeCrop(image,x,y,w,h,rotate) {
+    let crop=canvasOf(w,h);
+    crop.getContext('2d').drawImage(image,x,y,w,h,0,0,w,h);
+    if(rotate){
+      // top of a vertical column -> left edge, so the column is read left-to-right
+      const rotated=canvasOf(h,w),ctx=rotated.getContext('2d');
+      ctx.translate(0,rotated.height);ctx.rotate(-Math.PI/2);ctx.drawImage(crop,0,0);crop=rotated;
+    }
+    const naturalW=Math.round(48*crop.width/Math.max(1,crop.height));
+    const tw=Math.max(16,Math.min(naturalW>2000?2400:640,naturalW));
+    const small=canvasOf(tw,48),ctx=small.getContext('2d',{willReadFrequently:true});
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,tw,48);ctx.drawImage(crop,0,0,tw,48);
+    const rgba=ctx.getImageData(0,0,tw,48).data,plane=tw*48,arr=new Float32Array(3*plane);
+    for(let i=0,p=0;i<rgba.length;i+=4,p++){
+      arr[p]=rgba[i+2]/127.5-1;arr[plane+p]=rgba[i+1]/127.5-1;arr[2*plane+p]=rgba[i]/127.5-1;
+    }
+    const out=await recognizer.run({[recognizer.inputNames[0]]:new ort.Tensor('float32',arr,[1,3,48,tw])});
+    const tensor=out[recognizer.outputNames[0]],dims=tensor.dims;
+    if(dims.length<3)throw new Error('Unexpected recognizer output '+JSON.stringify(dims));
+    const steps=dims[dims.length-2],vocab=dims[dims.length-1],values=tensor.data;
+    let prev=-1,text='',conf=0,n=0;
+    for(let t=0;t<steps;t++){
+      let best=0,bestValue=-Infinity,offset=t*vocab;
+      for(let k=0;k<vocab;k++){const v=values[offset+k];if(v>bestValue){bestValue=v;best=k;}}
+      if(best!==0&&best!==prev&&dictionary[best]!==undefined){text+=dictionary[best];conf+=bestValue;n++;}
+      prev=best;
+    }
+    return {text:text.trim(),conf:n?conf/n:0,rotated:!!rotate};
+  }
+
+  async function recognize(image, box) {
+    const x=Math.max(0,Math.floor(box.x)),y=Math.max(0,Math.floor(box.y));
+    const w=Math.min(image.naturalWidth-x,Math.max(1,Math.ceil(box.w)));
+    const h=Math.min(image.naturalHeight-y,Math.max(1,Math.ceil(box.h)));
+    if(w<2||h<2)return {text:'',conf:0,rotated:false};
+    const aspect=h/w;
+    if(aspect>=1.5)return recognizeCrop(image,x,y,w,h,true);
+    if(aspect<=0.67)return recognizeCrop(image,x,y,w,h,false);
+    // Square-ish box: orientation is a guess, so read it both ways and keep the surer reading.
+    const a=await recognizeCrop(image,x,y,w,h,false),b=await recognizeCrop(image,x,y,w,h,true);
+    const sa=a.text?a.conf:-1,sb=b.text?b.conf:-1;
+    return sb>sa?b:a;
+  }
+
+  // ---- grouping of recognised lines into speech-bubble sized blocks (pure functions) ----
+  function thickness(l){return l.vertical?l.w:l.h;}
+
+  function groupLines(lines) {
+    const parent=lines.map((_,i)=>i);
+    const find=i=>{while(parent[i]!==i){parent[i]=parent[parent[i]];i=parent[i];}return i;};
+    for(let i=0;i<lines.length;i++)for(let j=i+1;j<lines.length;j++){
+      const a=lines[i],b=lines[j];
+      if(a.vertical!==b.vertical)continue;
+      const ta=thickness(a),tb=thickness(b),t=Math.max(ta,tb);
+      if(Math.min(ta,tb)/Math.max(1,t)<0.55)continue;
+      let near;
+      if(a.vertical){        // columns side by side, sharing some height
+        const gap=Math.max(0,Math.max(a.x,b.x)-Math.min(a.x+a.w,b.x+b.w));
+        const ov=Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+        near=gap<=t*0.7&&ov>=Math.min(a.h,b.h)*0.3;
+      }else{                 // lines stacked, sharing some width
+        const gap=Math.max(0,Math.max(a.y,b.y)-Math.min(a.y+a.h,b.y+b.h));
+        const ov=Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x));
+        near=gap<=t*0.8&&ov>=Math.min(a.w,b.w)*0.3;
+      }
+      if(near)parent[find(i)]=find(j);
+    }
+    const map=new Map();
+    lines.forEach((l,i)=>{const r=find(i);if(!map.has(r))map.set(r,[]);map.get(r).push(l);});
+    return Array.from(map.values()).map(members=>{
+      const vertical=members[0].vertical;
+      // Japanese reading order inside one bubble: vertical = columns right->left (each column top->bottom);
+      // horizontal = rows top->bottom, left->right.
+      members.sort(vertical?((a,b)=>(b.x+b.w/2)-(a.x+a.w/2)):((a,b)=>{
+        const dy=(a.y+a.h/2)-(b.y+b.h/2);
+        return Math.abs(dy)>Math.min(a.h,b.h)*0.5?dy:a.x-b.x;
+      }));
+      const x=Math.min(...members.map(m=>m.x)),y=Math.min(...members.map(m=>m.y));
+      const r=Math.max(...members.map(m=>m.x+m.w)),bt=Math.max(...members.map(m=>m.y+m.h));
+      const th=members.map(thickness).sort((p,q)=>p-q);
+      return {text:members.map(m=>m.text).join(''),x,y,w:r-x,h:bt-y,vertical,
+        font:th[Math.floor(th.length/2)],score:members.reduce((s,m)=>s+(m.score||0),0)/members.length,lines:members.length};
+    });
+  }
+
+  // Page order: rows top->bottom (blocks overlapping vertically share a row), and inside a row
+  // right->left for manga (vertical text) or left->right for horizontal pages.
+  function orderGroups(groups, rtl) {
+    const parent=groups.map((_,i)=>i);
+    const find=i=>{while(parent[i]!==i){parent[i]=parent[parent[i]];i=parent[i];}return i;};
+    for(let i=0;i<groups.length;i++)for(let j=i+1;j<groups.length;j++){
+      const a=groups[i],b=groups[j];
+      const ov=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
+      if(ov>=Math.min(a.h,b.h)*0.5)parent[find(i)]=find(j);
+    }
+    const rows=new Map();
+    groups.forEach((g,i)=>{const r=find(i);if(!rows.has(r))rows.set(r,[]);rows.get(r).push(g);});
+    const list=Array.from(rows.values());
+    list.forEach(r=>{r.minY=Math.min(...r.map(g=>g.y));r.sort((a,b)=>rtl?(b.x+b.w/2)-(a.x+a.w/2):(a.x+a.w/2)-(b.x+b.w/2));});
+    list.sort((a,b)=>a.minY-b.minY);
+    return [].concat(...list);
+  }
+
+  async function run(url,id) {
+    if(busy){bridge('onOcrError',id,'একটি OCR কাজ চলছে।');return;}
+    busy=true;
+    try{
+      await loadModels();
+      const image=new Image();image.decoding='async';image.src=url;
+      await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error('Local panel image could not load'));});
+      const boxes=await detect(image),lines=[];
+      for(const b of boxes){
+        let r={text:'',conf:0,rotated:false};
+        try{r=await recognize(image,b);}catch(_){}
+        if(r.text)lines.push({text:r.text,x:b.x,y:b.y,w:b.w,h:b.h,vertical:!!r.rotated,score:b.score||0});
+      }
+      const groups=groupLines(lines);
+      const vertical=groups.filter(g=>g.vertical).length>groups.length*0.3;
+      const regions=orderGroups(groups,vertical).map((g,i)=>({order:i+1,text:g.text,
+        x:Math.round(g.x),y:Math.round(g.y),w:Math.round(g.w),h:Math.round(g.h),
+        vertical:g.vertical,font:Math.round(g.font),lines:g.lines,score:Math.round(g.score*1000)/1000,
+        ...sampleColors(image,g)}));
+      bridge('onOcrResult',id,JSON.stringify({width:image.naturalWidth,height:image.naturalHeight,verticalReading:vertical,regions:regions}));
+    }catch(e){bridge('onOcrError',id,e&&e.message?e.message:String(e));}
+    finally{busy=false;}
+  }
+
+  window.runJapaneseMangaOcr=run;
+  loadModels().catch(e=>{
+    state.textContent='Runtime/model initialization failed: '+(e&&e.message?e.message:String(e));
+    try{if(window.NsJapaneseMangaBridge)window.NsJapaneseMangaBridge.onRuntimeError(state.textContent);}catch(_){}
+  });
+})();
+</script></body></html>

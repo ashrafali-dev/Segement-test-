@@ -1,0 +1,38 @@
+name: Deploy NovelStudio Analytics dashboard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'analytics-dashboard/**'
+      - '.github/workflows/deploy-analytics-dashboard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Prepare static dashboard
+        run: |
+          mkdir -p _site/analytics
+          cp analytics-dashboard/index.html _site/analytics/index.html
+          touch _site/.nojekyll
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4

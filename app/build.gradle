@@ -1,0 +1,80 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def releaseKeystore = System.getenv("KEYSTORE_FILE")
+def releaseStorePassword = System.getenv("KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("KEY_ALIAS")
+def releaseKeyPassword = System.getenv("KEY_PASSWORD")
+
+android {
+    namespace 'com.ashraf.novelstudio'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.ashraf.novelstudio'
+        minSdk 24
+        targetSdk 33
+        versionCode 68
+        versionName '1.6.8'
+
+        // Build one ARM APK compatible with both 32-bit and 64-bit ARM devices.
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (releaseKeystore && releaseStorePassword && releaseKeyAlias && releaseKeyPassword) {
+                storeFile file(releaseKeystore)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (!releaseKeystore || !releaseStorePassword || !releaseKeyAlias || !releaseKeyPassword) {
+                throw new GradleException("Release signing is not configured. Add KEYSTORE_FILE, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD.")
+            }
+            signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs = ['src/main/assets', 'src/assets']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    implementation 'org.jsoup:jsoup:1.17.2'
+    implementation 'androidx.webkit:webkit:1.10.0'
+    implementation 'androidx.browser:browser:1.8.0'
+
+    // Web Mode OCR: on-device ML Kit, one bundled model per script (Latin / Chinese / Japanese / Korean).
+    // OCR models live in Google Play Services and are SHARED with every other app on the phone (Translate, Lens ...):
+    // nothing is bundled in this APK, nothing is loaded into this app's own memory. Same classes, same code.
+    implementation 'com.google.android.gms:play-services-mlkit-text-recognition:19.0.1'
+    implementation 'com.google.android.gms:play-services-mlkit-text-recognition-chinese:16.0.1'
+    implementation 'com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1'
+    implementation 'com.google.android.gms:play-services-mlkit-text-recognition-korean:16.0.1'
+
+    // Primary Web Mode OCR: PP-OCR style ONNX models, downloaded by the user (ML Kit is the fallback).
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.21.1'
+    implementation 'com.quickbirdstudios:opencv:4.5.3'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    testImplementation 'junit:junit:4.13.2'
+}

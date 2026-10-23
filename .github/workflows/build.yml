@@ -1,0 +1,139 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, fix/whole-bubble-translation-context, feature/stylized-multilingual-comic-ocr, fix/realtime-batch-page-identity]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Validate permanent release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for variable in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!variable:-}" ]; then
+              echo "::error::$variable GitHub Secret is missing. Refusing to create an incompatible APK."
+              exit 1
+            fi
+          done
+
+          KEYSTORE_PATH="$RUNNER_TEMP/novelstudio-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          echo "Permanent release keystore and alias validated."
+
+      - name: Build signed release APK
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/novelstudio-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: Verify APK package and permanent signing certificate
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+
+          APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          if [ -z "$APKSIGNER" ] || [ ! -x "$APKSIGNER" ]; then
+            echo "::error::Android apksigner was not found."
+            exit 1
+          fi
+
+          # This fingerprint was verified against previously published release APKs.
+          EXPECTED_CERT_SHA256="3e783739eb6e9aadf8bd9f5b23f8fb99a65c4cfabdcb8ec8fb09c2921dcbb44b"
+          SIGNATURE_REPORT="$("$APKSIGNER" verify --verbose --print-certs "$APK")"
+          printf '%s\n' "$SIGNATURE_REPORT"
+          ACTUAL_CERT_SHA256="$(printf '%s\n' "$SIGNATURE_REPORT" | awk '/certificate SHA-256 digest:/ {print tolower($NF); exit}')"
+          if [ "$ACTUAL_CERT_SHA256" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "::error::Signing certificate changed. This APK would not update the established Novel Studio release."
+            echo "::error::Expected SHA-256: $EXPECTED_CERT_SHA256"
+            echo "::error::Actual SHA-256: ${ACTUAL_CERT_SHA256:-missing}"
+            exit 1
+          fi
+
+          echo "PASS: APK uses the permanent Novel Studio release signing certificate."
+
+      - name: Upload signed release APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: NovelStudio-SIGNED-RELEASE-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish signed APK to Shonen Jump+ fix Release
+        if: github.ref == 'refs/heads/fix/shonenjumpplus-canvas-overlay'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          ASSET="NovelStudio-SIGNED-RELEASE-APK.apk"
+          TAG="fix/shonenjumpplus-canvas-overlay"
+          test -s "$APK"
+          cp "$APK" "$ASSET"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Novel Studio - Shonen Jump+ Canvas Overlay Fix" \
+              --notes "Signed APK built from fix/shonenjumpplus-canvas-overlay. Download the APK asset below." \
+              --prerelease \
+              --latest=false \
+              --target "$GITHUB_SHA"
+          fi
+
+      - name: Publish signed APK to rolling GitHub Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          ASSET="NovelStudio-SIGNED-RELEASE-APK.apk"
+          TAG="ci-latest"
+          test -s "$APK"
+          cp "$APK" "$ASSET"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Updating the rolling CI APK release..."
+            gh release upload "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "Creating the rolling CI APK prerelease..."
+            gh release create "$TAG" "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Latest signed Novel Studio APK" \
+              --notes "Automatically updated from the latest successful APK build on main. Download the signed APK asset below." \
+              --prerelease \
+              --latest=false \
+              --target "$GITHUB_SHA"
+          fi
+
+          echo "APK release page: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
