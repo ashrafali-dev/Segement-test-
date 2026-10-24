@@ -717,7 +717,7 @@ internal class WebModeExtractor(
             for ((i, p) in panels.withIndex()) {
                 if (!alive()) { onMain { req.onDone(WebModeOutcome.Failure(WebModeError.NAVIGATION_INVALIDATED, WebModeError.NAVIGATION_INVALIDATED.label, diag)) }; return }
                 if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
-                if (req.visibleOnly && req.forceOcrSrc.isNullOrBlank()) {
+                if (req.visibleOnly && req.forceOcrSrc.isNullOrBlank() && !req.forceFreshOcr) {
                     // Real-time: this panel may already have been read ahead (download + full OCR done).
                     val hitKey = WebModeLogic.normalizeUrl(p.src)
                     var hit = synchronized(aheadCache) { aheadCache[hitKey] }
