@@ -265,6 +265,12 @@ class MainActivity : Activity() {
         val rh = (bottom - ry).coerceIn(0.006f, 1f - ry)
         val region = WebModeOcrRegion(rx, ry, rw, rh)
         val source = WebModeLogic.normalizeUrl(src)
+        val currentHost = android.net.Uri.parse(url).host.orEmpty().lowercase().removePrefix("www.")
+        // Shonen Jump+ exposes link-slot promo images alongside its canvas-rendered manga. A tap/overlay
+        // can resolve to that unrelated 430x614 asset; applying manga coordinates to it yields page-header OCR.
+        // When that exact asset family is selected, ignore its URL/crop and OCR the visible WebView viewport.
+        val forceScreenOcr = (currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")) &&
+            source.lowercase().contains("/public/uploaded-content/link_slo")
         val token = navToken
 
         aheadOcrHandle?.cancel()
@@ -273,7 +279,7 @@ class MainActivity : Activity() {
         aheadOcrStage = ""
         aheadOcrPct = -1
         webModePct = 1
-        webModeStage = "Force OCR [b3]: selected area"
+        webModeStage = if (forceScreenOcr) "Force OCR: reading visible manga screen" else "Force OCR [b3]: selected area"
         updateProgressUi()
         webModeHandle = webMode.start(WebModeRequest(
             webView = novelWv,
@@ -342,8 +348,9 @@ class MainActivity : Activity() {
                 }
                 onFinished?.invoke()
             },
-            forceOcrSrc = source,
-            forceOcrRegion = region
+            forceOcrSrc = if (forceScreenOcr) null else source,
+            forceOcrRegion = if (forceScreenOcr) null else region,
+            forceScreenOcr = forceScreenOcr
         ))
     }
 
