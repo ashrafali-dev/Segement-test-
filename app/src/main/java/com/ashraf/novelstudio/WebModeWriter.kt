@@ -375,7 +375,7 @@ internal object WebModeWriter {
       if(!hasTb)b.style.padding='3px';
       t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
       t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
-      t.style.whiteSpace='normal';t.style.textOverflow='clip';t.style.maxBlockSize='none';
+      t.style.whiteSpace='normal';t.style.maxBlockSize='none';
       // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
       // as a last resort, then request a taller geometry instead of clipping the final lines.
       var cap=Number(maxPx);if(!isFinite(cap)||cap<2)cap=4;
@@ -443,7 +443,7 @@ internal object WebModeWriter {
       }
       // Seed connected collision groups from the original geometry.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
-        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s)continue;
+        var A=L[i],B=L[j];if(A.hidden||B.hidden)continue;
         if(hits(geom(A,true),geom(B,true),GAP))join(i,j);
       }
       for(var pass=0;pass<n+1;pass++){
@@ -500,7 +500,7 @@ internal object WebModeWriter {
         // and re-pack instead of letting render order decide which text disappears.
         var merged=false;
         for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
-          var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s||root(i)===root(j))continue;
+          var A=L[i],B=L[j];if(A.hidden||B.hidden||root(i)===root(j))continue;
           if(hits(geom(A,false),geom(B,false),GAP))if(join(i,j))merged=true;
         }
         if(!merged)break;
