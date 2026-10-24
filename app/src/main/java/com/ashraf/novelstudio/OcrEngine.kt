@@ -358,7 +358,7 @@ internal object OcrPost {
             val t = Math.min(a.cy - a.h / 2, b.cy - b.h / 2)
             val bt = Math.max(a.cy + a.h / 2, b.cy + b.h / 2)
             return OcrBlock(
-                rightB.text.trim() + " " + leftB.text.trim(), t.toInt(), l.toInt(),
+                rightB.text.trim() + leftB.text.trim(), t.toInt(), l.toInt(),
                 (l + r) / 2f, (t + bt) / 2f, r - l, bt - t, 0f,
                 Math.max(a.fontPx, b.fontPx), true
             )
