@@ -406,7 +406,13 @@ class MainActivity : Activity() {
                 val arr = JSONArray(decode(raw))
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { srcs.add(it) }
             } catch (_: Exception) { }
-            if (srcs.isEmpty()) { finish("⚠️ No panels found on the screen"); return@evaluateJavascript }
+            if (srcs.isEmpty()) {
+                finish(null)
+                navToken++
+                toast("🔎 No image URL found; trying fresh OCR on the visible reader")
+                startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true)
+                return@evaluateJavascript
+            }
             fun step(i: Int) {
                 whenIdle(0) {
                     if (i >= srcs.size) { finish("✅ OCR finished — other work is running again"); return@whenIdle }
@@ -6840,10 +6846,7 @@ return t.length>=40?'TXT:'+t:'';
         // Auto Real-time OFF turns Extract into an explicit fresh OCR + translation action.
         if (DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
             !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
-            if (webModeHandle != null) { toast("⏳ OCR is already running"); return }
-            navToken++
-            toast("🔎 Extracting visible panels for translation…")
-            startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true)
+            reOcrVisiblePanels()
             return
         }
         // ● is always a real extraction. Never wait for WebView.progress and
