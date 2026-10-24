@@ -402,8 +402,17 @@ internal object WebModeWriter {
       // A single long word or very long translation may need more room even at minimum size.
       // Break an over-wide word as a last resort; if height still does not fit, expand the box and
       // let collision resolution move it sideways on the next frame. The text itself is never cut.
-      t.style.overflowWrap='anywhere';t.style.wordBreak='normal';t.style.fontSize='0.5px';
+      t.style.overflowWrap='anywhere';t.style.wordBreak='normal';
+      var wrapLo=0.5,wrapHi=Math.max(wrapLo,parseFloat(t.style.fontSize)||best),wrapBest=wrapLo;
+      for(var wi=0;wi<14;wi++){
+        var wm=(wrapLo+wrapHi)/2;t.style.fontSize=wm+'px';
+        if(fits()){wrapBest=wm;wrapLo=wm;}else{wrapHi=wm;}
+      }
+      t.style.fontSize=wrapBest+'px';
       if(fits())return boxH;
+      // No font size fits even with emergency wrapping; grow the box and let the side-by-side
+      // collision pass make room. This fallback is preferable to clipping a line or glyph.
+      t.style.fontSize='0.5px';
       var rr=t.getBoundingClientRect(),requiredContentH=Math.max(rr.height,t.scrollHeight);
       var safeHeightRatio=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
       return Math.max(boxH+1,Math.ceil(requiredContentH/safeHeightRatio)+4);
