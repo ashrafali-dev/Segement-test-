@@ -793,7 +793,7 @@ internal class WebModeExtractor(
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
-                            LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true), null)
+                            LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr), null)
                         } catch (e: OcrUnavailableException) {
                             LensPanelOcrAttempt(null, e)
                         } catch (e: DecodeException) {
@@ -1455,7 +1455,7 @@ internal class WebModeExtractor(
                 if (!alive()) return false
                 val t0 = SystemClock.elapsedRealtime()
                 val result = try {
-                    recognize(bmp, st, fastMode = req.visibleOnly)
+                    recognize(bmp, st, fastMode = req.visibleOnly, forceFresh = req.forceFreshOcr)
                 } catch (e: OcrUnavailableException) {
                     OcrDiag.log("SCREEN_OCR", "engine unavailable: ${e.message}")
                     throw e
