@@ -1871,7 +1871,9 @@ internal class WebModeExtractor(
             fun finishResult(): PanelOcr {
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
-                if (crop == null && !fastMode && Prefs.bool(wv.context, "wmTextRemoval2", true) &&
+                // NOT limited to the slow pass: realtime/visible reads (fastMode) must erase the old lettering too, otherwise every
+                // visible panel keeps its Japanese text and the translation sits on a cover box.
+                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) &&
                     (src.startsWith("https://", true) || src.startsWith("http://", true))) {
                     try {
                         WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles)
