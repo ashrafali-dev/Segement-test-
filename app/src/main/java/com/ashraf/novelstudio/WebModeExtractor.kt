@@ -814,13 +814,13 @@ internal class WebModeExtractor(
                         // Some Android codecs throw while decoding a selected region. Retry with a
                         // bounded downsampled bitmap rather than aborting manual OCR.
                         try {
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted)
                         } catch (cropError: RuntimeException) {
                             Log.w(TAG, "Force OCR crop failed; retrying bitmap crop: ${cropError.javaClass.simpleName}: ${cropError.message}")
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true, forceFresh = targeted)
                         }
                     } else {
-                        ocrBytes(bytes, script, p.src, fastMode = fastPass)
+                        ocrBytes(bytes, script, p.src, fastMode = fastPass, forceFresh = targeted)
                     }
                     diag.decoded++
                     if (po == null) continue                      // too small to be a panel: ignored, not an error
@@ -1828,7 +1828,7 @@ internal class WebModeExtractor(
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
-            cropFallback: Boolean = false
+            cropFallback: Boolean = false, forceFresh: Boolean = false
         ): PanelOcr? {
             // The hidden manga WebView is unrelated to Google Lens/ML Kit. Do not initialise it for every Chinese/English panel.
             if (Prefs.get(wv.context, "ocrEngine", "mlkit") == "manga") {
@@ -1899,13 +1899,13 @@ internal class WebModeExtractor(
                 try {
                     if (cropped.width < 16 || cropped.height < 16) throw DecodeException()
                     readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
-                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false)
+                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh)
                 } finally { cropped.recycle() }
                 return finishResult()
             }
             if (h <= WebModeLogic.SLICE_H) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
-                try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode) } finally { bmp.recycle() }
+                try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh) } finally { bmp.recycle() }
             } else {
                 @Suppress("DEPRECATION")
                 val region = (try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null })
@@ -1934,7 +1934,7 @@ internal class WebModeExtractor(
                                         futs.add(if (b != null && b.width >= 32 && b.height >= 32)
                                             pool.submit(java.util.concurrent.Callable {
                                                 LENS_SLICE_SLOTS.acquire()
-                                                try { recognize(b, st, fastMode) } finally { LENS_SLICE_SLOTS.release() }
+                                                try { recognize(b, st, fastMode, forceFresh) } finally { LENS_SLICE_SLOTS.release() }
                                             }) else null)
                                     }
                                     for (o in 0 until end - at) {
@@ -1945,7 +1945,7 @@ internal class WebModeExtractor(
                                             catch (e: java.util.concurrent.TimeoutException) { throw RuntimeException("Lens slice timeout", e) }
                                         if (rec != null)
                                             readSlice(b, st, sl[j].first, sample, w, h, src, texts, bubbles, j == 0, j == sl.size - 1,
-                                                fastMode = fastMode, preRecognized = rec)
+                                                fastMode = fastMode, forceFresh = forceFresh, preRecognized = rec)
                                     }
                                 } finally {
                                     for (f in futs) f?.cancel(true)
@@ -1961,7 +1961,7 @@ internal class WebModeExtractor(
                             val bmp = region.decodeRegion(Rect(0, y0, w, y1), opts) ?: throw DecodeException()
                             try {
                                 if (bmp.width >= 32 && bmp.height >= 32)
-                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1, fastMode = fastMode)
+                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1, fastMode = fastMode, forceFresh = forceFresh)
                             } finally { bmp.recycle() }
                         }
                     }
@@ -1978,7 +1978,7 @@ internal class WebModeExtractor(
             bmp: Bitmap, st: ScriptState, y0: Int, sample: Int, fullW: Int, fullH: Int,
             src: String, texts: MutableList<String>, out: MutableList<WmBubble>,
             firstSlice: Boolean, lastSlice: Boolean, x0: Int = 0, fastMode: Boolean = false,
-            preRecognized: OcrResult? = null
+            preRecognized: OcrResult? = null, forceFresh: Boolean = false
         ) {
             val tSlice = android.os.SystemClock.elapsedRealtime()
             val outBefore = out.size
@@ -1994,7 +1994,7 @@ internal class WebModeExtractor(
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
             val blocks = OcrPost.mergeNeighbours(
-                (preRecognized ?: recognize(bmp, st, fastMode)).blocks.filter {
+                (preRecognized ?: recognize(bmp, st, fastMode, forceFresh)).blocks.filter {
                     it.text.isNotBlank() && !(dropOwnBengali && OcrPost.isMostlyBengaliScript(it.text))
                 }, bmp)
             ocrMs = android.os.SystemClock.elapsedRealtime() - tOcr
@@ -2347,10 +2347,10 @@ internal class WebModeExtractor(
          * Normal OCR, then a second look at any line-shaped ink the first pass left unread
          * (see [OcrRescan]). Any failure keeps the normal result untouched.
          */
-        private fun recognize(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false): OcrResult {
+        private fun recognize(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false, forceFresh: Boolean = false): OcrResult {
             val t0 = SystemClock.elapsedRealtime()
             return try {
-                recognizeInner(bmp, st, fastMode).also { r ->
+                recognizeInner(bmp, st, fastMode, forceFresh).also { r ->
                     val letters = r.blocks.sumOf { b -> b.text.count { ch -> ch.isLetterOrDigit() } }
                     OcrDiag.log("OCR", "script=${st.current.name} fast=$fastMode img=${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0} " +
                         "engine=${OcrEngineStatus.label.ifBlank { Prefs.get(wv.context, "ocrEngine", "mlkit") }} blocks=${r.blocks.size} letters=$letters first=[${OcrDiag.snip(r.blocks.firstOrNull()?.text)}]")
@@ -2361,11 +2361,11 @@ internal class WebModeExtractor(
             }
         }
 
-        private fun recognizeInner(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false): OcrResult {
+        private fun recognizeInner(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false, forceFresh: Boolean = false): OcrResult {
             val routing = engine as? RoutingOcrEngine
             routing?.configure(wv.context)
             val lensSelected = routing?.usesRemoteTextDetection() == true
-            val core = recognizeCore(bmp, st, fastMode)
+            val core = recognizeCore(bmp, st, fastMode, forceFresh)
             // Lens is a single-pass remote OCR engine, including when it returns no text. Never send
             // the same image through a second audit request; it only adds another upload/cache encode.
             if (lensSelected) {
@@ -2392,12 +2392,13 @@ internal class WebModeExtractor(
             }
         }
 
-        private fun recognizeCore(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false): OcrResult {
+        private fun recognizeCore(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false, forceFresh: Boolean = false): OcrResult {
             // Google Lens auto-detects the text language and returns the layout/geometry in one response.
             // Do exactly one remote OCR pass. The generic sparse-result retry and language-fallback logic
             // below is for local recognisers; here it merely re-encodes/re-uploads the same bitmap.
             if ((engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true) {
-                val lensResult = if (fastMode) engine.recognizeFast(bmp, st.current) else engine.recognize(bmp, st.current)
+                val lensResult = if (forceFresh) routing?.recognizeFresh(bmp, st.current, fastMode) ?: engine.recognize(bmp, st.current)
+                    else if (fastMode) engine.recognizeFast(bmp, st.current) else engine.recognize(bmp, st.current)
                 if (lensResult.text.count { it.isLetterOrDigit() } >= 2) st.locked = true
                 return lensResult
             }
