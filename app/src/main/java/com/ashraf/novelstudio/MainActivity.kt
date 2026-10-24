@@ -2144,6 +2144,15 @@ return t.length>=40?'TXT:'+t:'';
         val prefetchStage = webModePrefetchStage.lowercase()
         val aheadStage = aheadOcrStage.lowercase()
 
+        if (reOcrBusy) {
+            statuses.add(ActivityDotStatus(
+                "manual-extract", 0xFF64B5F6.toInt(),
+                if (webModeHandle == null) "Manual Extract: waiting for current OCR/translation to finish"
+                else "Manual Extract: reading visible panels with fresh OCR",
+                blinking = true
+            ))
+        }
+
         if (aheadOcrHandle != null) {
             val color = when {
                 aheadStage.contains("loading image") || aheadStage.contains("fetching image") -> 0xFF40C4FF.toInt()
