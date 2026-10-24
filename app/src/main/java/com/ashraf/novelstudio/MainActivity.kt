@@ -92,6 +92,9 @@ class MainActivity : Activity() {
     private lateinit var activeWv: WebView
     // Isolated, off-screen reader used only for optional next-chapter prefetch.
     private lateinit var prefetchWv: WebView
+    // Isolated full-size WebView for the chapter-link queue; does not navigate the visible reader.
+    private lateinit var chapterLinkWv: WebView
+    private var chapterLinkAutopilotRunner: ChapterLinkAutopilotRunner? = null
     private var prefetchTarget = ""
     private var prefetchToken = 0
     private var prefetchLoading = false
@@ -2443,11 +2446,12 @@ return t.length>=40?'TXT:'+t:'';
                     indicatorCycleAtMs = now
                 }
                 val status = statuses[indicatorCycleIndex.coerceIn(0, statuses.lastIndex)]
-                val jobBusy = statuses.any { it.key != "idle" }
+                val jobBusy = statuses.any { it.key != "idle" } || ChapterLinkAutopilotQueue.hasBackgroundWork(this@MainActivity)
                 // Keep chatbot timers alive while any OCR, queue, translation, placement or prefetch work exists.
                 ScanKeepAlive.sync(this@MainActivity, jobBusy)
                 if (jobBusy) {
                     try { chatWv.resumeTimers() } catch (_: Exception) { }
+                    try { if (::chapterLinkWv.isInitialized) { chapterLinkWv.onResume(); chapterLinkWv.resumeTimers() } } catch (_: Exception) { }
                 }
 
                 // The large button badge and the older tiny in-content dot mirror the same live stage.
@@ -3237,6 +3241,22 @@ return t.length>=40?'TXT:'+t:'';
         chatWv.settings.javaScriptCanOpenWindowsAutomatically = true
         chatWv.webChromeClient = ChatChrome()
         activeWv = novelWv
+        chapterLinkWv = WebView(this).apply {
+            setup(this)
+            alpha = 0.01f
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean = handleRendererGone(detail)
+                override fun onPageFinished(view: WebView?, url: String?) { super.onPageFinished(view, url); chapterLinkAutopilotRunner?.onPageFinished(url) }
+                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                    super.onReceivedError(view, request, error)
+                    if (request?.isForMainFrame == true) chapterLinkAutopilotRunner?.onPageLoadError(request.url?.toString(),error?.description?.toString().orEmpty())
+                }
+            }
+        }
         prefetchWv = WebView(this).apply {
             setup(this)
             alpha = 0.01f
@@ -3783,6 +3803,8 @@ return t.length>=40?'TXT:'+t:'';
         }
 
         content = FrameLayout(this).apply {
+            // The chapter-link WebView is attached at real size beneath the visible reader/chat panes.
+            addView(chapterLinkWv, 0, FrameLayout.LayoutParams(MP, MP))
             // Off-screen reader for prefetch: a real-size view UNDER the visible pages. A 1x1
             // WebView never triggers the lazy/IntersectionObserver rendering that WTR-LAB
             // and WebNovel use, so their chapter text never appeared.
@@ -4009,6 +4031,9 @@ return t.length>=40?'TXT:'+t:'';
             addView(floatBoltHost, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = dp(20) })
             addView(tourOverlay, FrameLayout.LayoutParams(MP, MP))
         }
+        chapterLinkAutopilotRunner = ChapterLinkAutopilotRunner(applicationContext,handler,chapterLinkWv,{ webMode },
+            { chapter -> enqueue(chapter) },
+            { ScanKeepAlive.sync(this@MainActivity,ChapterLinkAutopilotQueue.hasBackgroundWork(this@MainActivity)) })
         setContentView(root)
         applyWindowInsets(root, main, homeView, homeDock, dockWrap, chromeTopView)
         bindHomeToolbar(homeDock)
@@ -4032,6 +4057,7 @@ return t.length>=40?'TXT:'+t:'';
         Langs.applyRuntime(this)
         refreshHome()
         handleIntent(intent)
+        if (ChapterLinkAutopilotQueue.hasRunnable(this)) startChapterLinkAutopilot(showToast = false)
         NovelStudioAnalytics.track(
             this, "app_open",
             mode = analyticsReadMode(),
@@ -4577,9 +4603,22 @@ return t.length>=40?'TXT:'+t:'';
         handleIntent(intent)
     }
 
+    private fun startChapterLinkAutopilot(showToast: Boolean = true) {
+        if (!ChapterLinkAutopilotQueue.hasRunnable(this)) { if(showToast) toast("Add chapter links first, or resume the queue from Chapter Autopilot"); return }
+        val runner=chapterLinkAutopilotRunner
+        if(runner==null) { if(showToast) toast("Chapter Autopilot is not ready yet"); return }
+        runner.start(); ScanKeepAlive.sync(this,true)
+        if(showToast) toast("Chapter Autopilot started — scan and chatbot translation are queued")
+    }
+
     // Browser -> Share -> Novel Studio : open that link in the novel pane
     private fun handleIntent(i: Intent?) {
         val it = i ?: return
+        if (it.action == ChapterLinkAutopilotQueue.ACTION_START) {
+            ChapterLinkAutopilotQueue.setPaused(this,false)
+            startChapterLinkAutopilot()
+            return
+        }
         // LNReader/Taihon hub callback: open the shared novel URL in the novel pane.
         val hubUrl = Hub.urlFromIntent(it)
         if (hubUrl != null) {
@@ -8391,7 +8430,8 @@ return t.length>=40?'TXT:'+t:'';
         // Web Mode pages are image-only, so a successfully prefetched translation
         // must be reused by exact page identity even if the prefetch toggle changed later.
         if (useSavedTranslation && !livePanelBatch &&
-            (webModeOn() || Prefs.bool(this, "prefetchNextChapter") || prefetchGeneratedKeys.contains(key))) {
+            (webModeOn() || ChapterLinkAutopilotQueue.isAutopilotUrl(this,ch.url) ||
+                Prefs.bool(this, "prefetchNextChapter") || prefetchGeneratedKeys.contains(key))) {
             val saved = Store.find(this, ch)
             if (saved != null) {
                 val translated = Store.readRaw(this, saved.id)
@@ -9104,7 +9144,7 @@ merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
         val mangaSession = JapaneseMangaSession.isManaged(ch)
-        val imageMode = (webModeOn() && ch.contentSel.isBlank()) || mangaSession
+        val imageMode = ((webModeOn() || ChapterLinkAutopilotQueue.isAutopilotUrl(this,ch.url)) && ch.contentSel.isBlank()) || mangaSession
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
@@ -9483,7 +9523,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             }
             // Scanning: a reply that cannot be matched to the bubbles used to be saved as a good translation
             // (the AI always answers something). Treat it as a failure instead.
-            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank() && !JapaneseMangaSession.isManaged(ch)) {
+            if ((webModeOn() || ChapterLinkAutopilotQueue.isAutopilotUrl(this,ch.url)) &&
+                !livePanelBatch && ch.contentSel.isBlank() && !JapaneseMangaSession.isManaged(ch)) {
                 val lay = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (lay != null) {
                     val placed = WebModeLayout.align(rawTranslation, lay)
@@ -9498,6 +9539,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // A live batch is only the newly visible bubbles; saving it against the whole chapter URL
             // would overwrite the library entry with a partial translation.
             val savedTranslation = if (livePanelBatch) null else Store.save(this, ch, rawTranslation)
+            if (savedTranslation != null) chapterLinkAutopilotRunner?.onTranslationSaved(ch)
             NovelStudioAnalytics.track(
                 this, "translation_completed",
                 mode = analyticsReadMode(),
@@ -9547,6 +9589,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     // on failure: stop the queue, keep the chapter on the clipboard so you can do it by hand
     private fun failJob(tok: Int, ch: Chapter, msg: String, fallback: Boolean = false, autoRetry: Boolean = false) {
         if (tok != runToken) return
+        chapterLinkAutopilotRunner?.onTranslationFailed(ch,msg)
         NovelStudioAnalytics.track(
             this, "translation_failed",
             mode = analyticsReadMode(),
@@ -10639,7 +10682,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "💬 Join the Community (Telegram · Reddit)",
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
-            "🧹 Clear OCR Log (then reproduce the problem)"
+            "🧹 Clear OCR Log (then reproduce the problem)",
+            "🧪 Chapter Link Autopilot (Experimental)"
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -10648,13 +10692,13 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
             27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT, 39 to Ic.SPARK, 40 to Ic.TEXT,
-            41 to Ic.RELOAD, 42 to Ic.CLOCK, 43 to Ic.CLOCK, 22 to Ic.SEARCH, 44 to Ic.SEARCH, 45 to Ic.BOLT, 46 to Ic.CLOCK, 47 to Ic.SEARCH, 48 to Ic.SPARK, 49 to Ic.SPARK, 50 to Ic.BOLT, 51 to Ic.RELOAD, 52 to Ic.SEARCH, 53 to Ic.SPARK, 54 to Ic.SEARCH, 55 to Ic.SLIDERS, 56 to Ic.SPARK, 57 to Ic.BOLT, 58 to Ic.SHARE, 59 to Ic.SEARCH, 60 to Ic.SEARCH, 61 to Ic.RELOAD
+            41 to Ic.RELOAD, 42 to Ic.CLOCK, 43 to Ic.CLOCK, 22 to Ic.SEARCH, 44 to Ic.SEARCH, 45 to Ic.BOLT, 46 to Ic.CLOCK, 47 to Ic.SEARCH, 48 to Ic.SPARK, 49 to Ic.SPARK, 50 to Ic.BOLT, 51 to Ic.RELOAD, 52 to Ic.SEARCH, 53 to Ic.SPARK, 54 to Ic.SEARCH, 55 to Ic.SLIDERS, 56 to Ic.SPARK, 57 to Ic.BOLT, 58 to Ic.SHARE, 59 to Ic.SEARCH, 60 to Ic.SEARCH, 61 to Ic.RELOAD, 62 to Ic.GLOBE
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
             "COMMUNITY" to listOf(58),
             "LIBRARY" to listOf(0, 4, 1, 3),
-            "TRANSLATE" to listOf(5, 33, 56, 7),
+            "TRANSLATE" to listOf(5, 33, 56, 7, 62),
             "OCR" to listOf(55, 52, 59, 60, 61),
             "READER" to listOf(9, 20, 23),
             "APP" to listOf(57)
@@ -10873,6 +10917,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     OcrDiag.clear()
                     toast("🧹 OCR log cleared — now open the page, scan, then copy the log")
                 }
+                62 -> { dlg.dismiss(); startActivity(Intent(this,ChapterLinkAutopilotActivity::class.java)) }
                 47 -> {
                     dlg.dismiss()
                     val log = CrashLog.read().takeLast(20_000)
@@ -11928,6 +11973,8 @@ ${rows.take(220).joinToString("\n")}
     }
 
     override fun onDestroy() {
+        chapterLinkAutopilotRunner?.stopForProcessRecreation()
+        try { chapterLinkWv.stopLoading(); chapterLinkWv.destroy() } catch (_: Exception) { }
         ScanKeepAlive.stop(this)
         aheadOcrHandle?.cancel()
         webModeHandle?.cancel()
