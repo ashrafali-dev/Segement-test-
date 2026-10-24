@@ -2375,7 +2375,8 @@ internal class WebModeExtractor(
                 // Shonen Jump+ renders manga into CORS-tainted canvases. The viewport screenshot already
                 // contains the whole visible page, while the pixel audit sees artwork/UI edges as uncovered
                 // lettering and previously launched several useless 100x96 Lens requests per scroll.
-                val currentHost = hostOf(wv.url.orEmpty()).lowercase().removePrefix("www.")
+                // This OCR runs on ns-webmode. Job.startUrl was captured on the UI thread, so never read WebView.url here.
+                val currentHost = hostOf(startUrl).lowercase().removePrefix("www.")
                 val canvasReader = currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")
                 if (canvasReader || !Prefs.bool(wv.context, "lensAudit", true) || core.blocks.isEmpty() && fastMode) return core
                 return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
