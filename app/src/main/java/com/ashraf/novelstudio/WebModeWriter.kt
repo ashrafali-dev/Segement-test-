@@ -573,7 +573,11 @@ internal object WebModeWriter {
           var cw=R.x1-R.x0,ch=R.y1-R.y0;
           var key=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
           var keyChanged=bb.getAttribute('data-k')!==key;
-          var sz=Math.round(cw)+','+Math.round(ch),szChanged=bb.getAttribute('data-sz')!==sz;
+          var moved=Math.abs(R.x0-R.ox0)>1||Math.abs(R.y0-R.oy0)>1||Math.abs(cw-R.ow)>1||Math.abs(ch-R.oh)>1;
+          var movedState=moved?'1':'0',movedChanged=bb.getAttribute('data-moved')!==movedState;
+          if(moved)bb.removeAttribute('data-tb');
+          bb.setAttribute('data-moved',movedState);
+          var sz=Math.round(cw)+','+Math.round(ch),szChanged=bb.getAttribute('data-sz')!==sz||movedChanged;
           if(keyChanged){
             bb.setAttribute('data-k',key);bb.style.width=cw+'px';bb.style.height=ch+'px';
             bb.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
@@ -588,6 +592,28 @@ internal object WebModeWriter {
               cover.style.transform='translate3d('+R.ox0+'px,'+R.oy0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
             }
             if(cover.style.display!=='block')cover.style.display='block';
+          }
+          // If the text moved away from its source bubble, retain the source cover AND add a
+          // matching card under the relocated text so it stays readable over artwork.
+          // Every card lives in coverLayer, below textLayer, so it cannot occlude another label.
+          if(moved){
+            var labelCover=bb.__nsLabelCover;
+            if(!labelCover){
+              labelCover=document.createElement('div');labelCover.className='__ns_label_cover';
+              var labelBg=bb.getAttribute('data-bg')||'#fff',labelSfx=bb.getAttribute('data-sf')==='1';
+              labelCover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+                +'pointer-events:none;will-change:transform;background:'+labelBg+';border-radius:'+(labelSfx?'12px':'4px')+';'
+                +'box-shadow:'+(labelSfx?'0 0 7px 5px '+labelBg:'0 0 0 3px '+labelBg)+';';
+              coverLayer.appendChild(labelCover);bb.__nsLabelCover=labelCover;
+            }
+            var labelKey=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch)+','+R.angle;
+            if(labelCover.getAttribute('data-k')!==labelKey){
+              labelCover.setAttribute('data-k',labelKey);labelCover.style.width=cw+'px';labelCover.style.height=ch+'px';
+              labelCover.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
+            }
+            if(labelCover.style.display!=='block')labelCover.style.display='block';
+          }else if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none'){
+            bb.__nsLabelCover.style.display='none';
           }
           // All background paints are below this layer; z-order no longer resolves collisions.
           if(bb.style.zIndex!=='')bb.style.zIndex='';
