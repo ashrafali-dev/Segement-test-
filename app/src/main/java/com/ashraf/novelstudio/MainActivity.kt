@@ -815,7 +815,7 @@ class MainActivity : Activity() {
     private val REALTIME_AHEAD_COLLECT_FLUSH_MS: Long get() = if (lensRealtimeFastPath()) 450L else longArrayOf(2000L, 3500L, 6000L, 9000L)[rtBatchLevel()]
 
     private fun startAheadOcr() {
-        if (rtPausedForReOcr) return
+        if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val n = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
         deepSeekAheadAtMs = System.currentTimeMillis()
         if (n == 0) return
@@ -850,7 +850,7 @@ class MainActivity : Activity() {
             webView = novelWv,
             visibleOnly = true,
             isOccluded = { mode == Mode.CHAT },
-            isValid = { token == navToken && DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() },
+            isValid = { token == navToken && DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() && Prefs.bool(this, "rtAutoOcrEnabled", true) },
             onProgress = { stage, pct ->
                 if (seq == aheadOcrSeq) {
                     aheadOcrStage = stage
@@ -1130,7 +1130,7 @@ class MainActivity : Activity() {
 
     private fun queueRealtimeAheadTranslations(pageUrl: String, panels: List<WebModeAheadPanel>, force: Boolean = false) {
         refreshRtScroll()
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this)) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val page = cleanUrl(pageUrl)
         if (page != rtAheadHoldPage) { rtAheadHold.clear(); rtAheadHoldPage = page }
         if (page.isBlank() || page != cleanUrl(novelWv.url.orEmpty()) ||
@@ -1838,7 +1838,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     private var deepSeekStallBlockedSignature = ""
     private val deepSeekVisiblePoll = object : Runnable {
         override fun run() {
-            if (!DeepSeekRealtimeTranslation.isEnabled(this@MainActivity) || !webModeOn()) {
+            if (!DeepSeekRealtimeTranslation.isEnabled(this@MainActivity) || !webModeOn() || !Prefs.bool(this@MainActivity, "rtAutoOcrEnabled", true)) {
                 deepSeekPollBusy = false
                 return
             }
@@ -5036,6 +5036,40 @@ return t.length>=40?'TXT:'+t:'';
         scheduleDeepSeekAutoTranslation(novelWv.url.orEmpty())
     }
 
+    /** Toggle auto page/panel detection separately from the overall Real-time reading mode. */
+    private fun setRealtimeAutoOcrEnabled(enabled: Boolean) {
+        Prefs.putBool(this, "rtAutoOcrEnabled", enabled)
+        if (enabled) {
+            deepSeekVisibleSignature = ""
+            deepSeekLastOcrAtMs = 0L
+            scheduleDeepSeekAutoTranslation(novelWv.url.orEmpty())
+            scheduleRealtimeAheadPump(0L)
+            toast("⚡ Auto Real-time OCR ON — new visible panels will be read automatically")
+        } else {
+            handler.removeCallbacks(deepSeekVisiblePoll)
+            deepSeekPollBusy = false
+            deepSeekProbeInFlight = false
+            deepSeekPollEvalSeq++
+            aheadOcrHandle?.cancel()
+            aheadOcrHandle = null
+            aheadOcrSeq++
+            aheadOcrStage = ""
+            aheadOcrPct = -1
+            cancelRealtimeAheadWorker(requeue = false)
+            rtAheadTranslationQueue.clear()
+            rtAheadTranslationQueuedIds.clear()
+            rtAheadTranslationTasksByJobKey.clear()
+            rtAheadTranslationCache.clear()
+            rtAheadTranslationSuppressedIds.clear()
+            rtAheadHold.clear()
+            rtAheadHoldFlushRunnable?.let { handler.removeCallbacks(it) }
+            rtAheadHoldFlushRunnable = null
+            rtAheadHoldSince = 0L
+            toast("⚡ Auto Real-time OCR OFF — tap Extract to read and translate visible panels")
+        }
+        updateProgressUi()
+    }
+
     /** Same work the menu's "AI Real-time Translation" row did when turning it off. */
     private fun disableRealtimeMode() {
         deepSeekPollEvalSeq++
@@ -5297,6 +5331,9 @@ return t.length>=40?'TXT:'+t:'';
             "en" -> "English only"; "ko" -> "Korean only"; "ja" -> "Japanese only"; "zh" -> "Chinese only"
             else -> "Auto (guess from page)"
         }
+
+    private fun menuRealtimeAutoOcrLabel(): String =
+        (if (Prefs.bool(this, "rtAutoOcrEnabled", true)) "✅" else "⬜") + " ⚡ Auto Real-time OCR"
 
     private fun menuOcrRescanLabel(): String =
         (if (Prefs.bool(this, "ocrRescan", true)) "✅" else "⬜") + " 🩹 OCR rescan (find missed lines)"
@@ -6774,7 +6811,7 @@ return t.length>=40?'TXT:'+t:'';
      * remains responsible for sending the OCR result to the chatbot and applying the reply.
      */
     private fun scheduleDeepSeekAutoTranslation(pageUrl: String) {
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val url = pageUrl.trim()
         if (!url.startsWith("http", ignoreCase = true)) return
         val host = Uri.parse(url).host.orEmpty().lowercase()
@@ -6793,6 +6830,12 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     private fun extractCopy() {
+        // Auto Real-time OFF turns Extract into an explicit fresh OCR + translation action.
+        if (DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
+            !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
+            reOcrVisiblePanels()
+            return
+        }
         // ● is always a real extraction. Never wait for WebView.progress and
         // never turn it into the original/translation toggle.
         // Tapping again after a failed translation sends the very same text again (no new OCR / extraction).
@@ -9441,7 +9484,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
             "🧹 Clear OCR Log (then reproduce the problem)",
-            menuYoloLabel()
+            menuYoloLabel(), menuRealtimeAutoOcrLabel()
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -9450,7 +9493,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
             27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT,
-            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH
+            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH, 61 to Ic.BOLT
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
@@ -9463,7 +9506,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         )
         val advanced = listOf(
             "TRANSLATION" to listOf(47, 12, 19, 14, 26, 30, 39, 40, 44, 46),
-            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 37, 38, 41, 43, 48, 49, 51),
+            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 37, 38, 41, 43, 48, 49, 51, 61),
             "BROWSER" to listOf(15, 16, 21, 24, 29, 35),
             "DIAGNOSTICS" to listOf(22, 27, 28, 42, 45, 52)
         )
@@ -9664,6 +9707,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
                 60 -> { yoloDialog { refresh(i, menuYoloLabel()) } }
+                61 -> { setRealtimeAutoOcrEnabled(!Prefs.bool(this, "rtAutoOcrEnabled", true)); refresh(i, menuRealtimeAutoOcrLabel()) }
                 59 -> {
                     OcrDiag.clear()
                     toast("🧹 OCR log cleared — now open the page, scan, then copy the log")
