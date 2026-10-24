@@ -13,6 +13,12 @@ assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploade
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
 assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
+const forceInfoAt = extractor.indexOf("val forceInfoScript = if (req.visibleOnly)");
+const forceInfoEnd = extractor.indexOf("else JS_FORCE_INFO", forceInfoAt);
+assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canvas-crop path");
+const forceInfoBlock = extractor.slice(forceInfoAt, forceInfoEnd);
+assert.ok(forceInfoBlock.includes("cands(sc,true,true,true)"), "manual screen OCR must retain actual canvas bounds");
+assert.ok(!forceInfoBlock.includes("c=[]"), "manual screen OCR must not scan unrelated whole-WebView UI text");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
