@@ -345,6 +345,13 @@ internal class RoutingOcrEngine : OcrEngine {
                 failure = (e.message ?: "unavailable").take(160)
                 // "cancelled" = a newer scan replaced this one (scroll/page change): expected, not a Lens fault.
                 if (!failure.endsWith("cancelled")) OcrEngineStatus.toastOnce(appContext, "Google Lens request failed\n$failure")
+            } catch (e: InterruptedException) {
+                // A newer viewport owns the screen. Do not turn a cancelled OCR job into a slow ML Kit retry.
+                Thread.currentThread().interrupt()
+                OcrEngineStatus.lastError = "Google Lens request cancelled"
+                lensThread.set(false)
+                report("lens(cancelled)", false)
+                return OcrResult(emptyList())
             } catch (e: Exception) {
                 failure = (e.javaClass.simpleName + ": " + (e.message ?: "")).take(160)
                 Log.w("NovelStudioOCR", "lens failed unexpectedly", e)
@@ -361,7 +368,11 @@ internal class RoutingOcrEngine : OcrEngine {
                 }
                 // Lens is an unofficial online endpoint; keep the reading flow alive with on-device OCR.
                 report("mlkit(lens-error-fallback)", true)
-                return try { run(mlKit) } catch (fallback: Exception) {
+                return try { run(mlKit) } catch (fallback: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    Log.i("NovelStudioOCR", "ML Kit fallback cancelled after Lens error; newer OCR job owns the viewport")
+                    OcrResult(emptyList())
+                } catch (fallback: Exception) {
                     Log.w("NovelStudioOCR", "ML Kit fallback also failed after Lens error", fallback)
                     OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
                     OcrResult(emptyList())
@@ -395,7 +406,11 @@ internal class RoutingOcrEngine : OcrEngine {
             Log.w("NovelStudioOCR", OcrEngineStatus.lastError)
             report("mlkit(lens-empty-fallback)", true)
             lensThread.set(false)
-            return try { run(mlKit) } catch (fallback: Exception) {
+            return try { run(mlKit) } catch (fallback: InterruptedException) {
+                Thread.currentThread().interrupt()
+                Log.i("NovelStudioOCR", "ML Kit fallback cancelled after empty Lens result; newer OCR job owns the viewport")
+                OcrResult(emptyList())
+            } catch (fallback: Exception) {
                 Log.w("NovelStudioOCR", "ML Kit fallback failed after empty Lens result", fallback)
                 OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
                 OcrResult(emptyList())
