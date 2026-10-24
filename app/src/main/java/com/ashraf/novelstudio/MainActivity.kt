@@ -109,7 +109,11 @@ class MainActivity : Activity() {
     private var prefetchSourceChapter: Chapter? = null
     private val prefetchGapMs = 4000L
     // Web Mode (OCR for image chapters). Off by default; the menu switch only picks the extraction strategy.
-    private val webModeLazy = lazy { WebModeExtractor(handler, UA) }
+    private val webModeLazy = lazy {
+        // The writer reads placement toggles (outline fit) while building the in-page script.
+        WebModeWriter.ctx = applicationContext
+        WebModeExtractor(handler, UA)
+    }
     private val webMode: WebModeExtractor get() = webModeLazy.value
     private var webModeHandle: WebModeExtractor.Handle? = null
     private var webModePrefetchHandle: WebModeExtractor.Handle? = null
@@ -525,54 +529,144 @@ class MainActivity : Activity() {
         }
     }
 
-    // ------------------------------------------------------------------ glossary of the chapter on screen
-
     private fun chapterGlossaryDialog() {
         val key = pageKey(novelWv.url.orEmpty())
         val items = ChapterGlossary.list(this, key)
-        val labels = items.map { it.type + ": " + it.source + "  →  " + it.value }
-        val b = AlertDialog.Builder(this)
-            .setTitle("Glossary — this chapter")
-            .setPositiveButton("Add") { _, _ -> chapterGlossaryAdd(key) }
-            .setNegativeButton("Close", null)
-        if (labels.isEmpty()) b.setMessage("Names, places and pronouns saved here are added to the prompt only for this chapter.")
-        else b.setItems(labels.toTypedArray()) { _, i ->
-            AlertDialog.Builder(this)
-                .setMessage("Delete \"" + items[i].source + "\"?")
-                .setPositiveButton("Delete") { _, _ -> ChapterGlossary.remove(this, key, i); chapterGlossaryDialog() }
-                .setNegativeButton("Cancel", null)
-                .show()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), dp(16))
+            background = Sheets.sheetBackground(this@MainActivity)
         }
-        b.show()
+        box.addView(Sheets.handle(this))
+        box.addView(TextView(this).apply {
+            text = "Chapter glossary"
+            textSize = Type.heading
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+        })
+        box.addView(TextView(this).apply {
+            text = if (items.isEmpty()) "Names, places and pronouns you add here are sent to the chatbot only for this chapter."
+            else items.size.toString() + " term" + (if (items.size == 1) "" else "s") + " for this chapter"
+            textSize = Type.caption
+            setTextColor(UiTheme.role(UiTheme.Role.DIM))
+            setPadding(0, dp(4), 0, dp(10))
+        })
+        if (items.isNotEmpty()) {
+            val g = sheetGroup()
+            items.forEachIndexed { i, e ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = dp(56)
+                    setPadding(dp(14), dp(8), dp(6), dp(8))
+                    addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(TextView(this@MainActivity).apply {
+                            text = e.source + "  →  " + e.value
+                            textSize = Type.body
+                            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+                        })
+                        addView(TextView(this@MainActivity).apply {
+                            text = e.type
+                            textSize = Type.overline
+                            setTextColor(UiTheme.role(UiTheme.Role.FAINT))
+                        })
+                    }, LinearLayout.LayoutParams(0, WC, 1f))
+                    addView(iconButton(Ic.TRASH, "Delete " + e.source, 18, 44, UiTheme.role(UiTheme.Role.DIM)) {
+                        Sheets.confirm(
+                            this@MainActivity, "Delete term?",
+                            "\"" + e.source + "\" will no longer be sent with this chapter.",
+                            confirm = "Delete", danger = true
+                        ) {
+                            ChapterGlossary.remove(this@MainActivity, key, i)
+                            chapterGlossaryDialog()
+                        }
+                    })
+                }
+                if (i != items.lastIndex) g.addView(View(this@MainActivity).apply { setBackgroundColor(UiTheme.role(UiTheme.Role.HAIRLINE)) },
+                    LinearLayout.LayoutParams(MP, dp(1)).also { it.marginStart = dp(14) })
+                g.addView(row, LinearLayout.LayoutParams(MP, WC))
+            }
+            box.addView(g, LinearLayout.LayoutParams(MP, WC))
+        }
+        val add = Buttons.make(this, "Add a term", Buttons.Style.FILLED, Ic.PLUS, 46) { chapterGlossaryAdd(key) }
+        box.addView(add, LinearLayout.LayoutParams(MP, dp(46)).also { it.topMargin = dp(14) })
+        val close = Buttons.make(this, "Close", Buttons.Style.TEXT, heightDp = 46) { }
+        box.addView(close, LinearLayout.LayoutParams(MP, dp(46)))
+        val dlg = Sheets.create(this, box)
+        close.setOnClickListener { dlg.dismiss() }
+        dlg.show()
     }
 
     private fun chapterGlossaryAdd(key: String) {
-        AlertDialog.Builder(this)
-            .setTitle("What are you adding?")
-            .setItems(ChapterGlossary.TYPES.toTypedArray()) { _, ti ->
-                val type = ChapterGlossary.TYPES[ti]
-                val pronoun = type.startsWith("Pronoun")
-                val col = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(20), dp(8), dp(20), 0)
-                }
-                val src = EditText(this).apply { hint = if (pronoun) "Character name" else "Original text, as it appears"; setSingleLine() }
-                val dst = EditText(this).apply { hint = if (pronoun) "he / she / they" else "Translate as"; setSingleLine() }
-                col.addView(src); col.addView(dst)
-                AlertDialog.Builder(this)
-                    .setTitle(type)
-                    .setView(col)
-                    .setPositiveButton("Save") { _, _ ->
-                        val a = src.text.toString().trim()
-                        val v = dst.text.toString().trim()
-                        if (a.isEmpty() || v.isEmpty()) toast("Fill in both fields")
-                        else { ChapterGlossary.add(this, key, ChapterGlossary.Entry(type, a, v)); toast("✅ Added to this chapter's glossary") }
-                        chapterGlossaryDialog()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+        fun addTerm(type: String, source: String, value: String) {
+            if (source.isBlank() || value.isBlank()) { toast("Fill in both fields"); return }
+            ChapterGlossary.add(this, key, ChapterGlossary.Entry(type, source, value))
+            toast("✅ Added to this chapter's glossary")
+        }
+        fun form(type: String) {
+            val pronoun = type.startsWith("Pronoun")
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(18), dp(10), dp(18), dp(16))
+                background = Sheets.sheetBackground(this@MainActivity)
             }
-            .show()
+            box.addView(Sheets.handle(this))
+            box.addView(TextView(this).apply {
+                text = type
+                textSize = Type.heading
+                typeface = boldMedium
+                setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            })
+            fun field(hint: String): EditText = EditText(this).apply {
+                this.hint = hint
+                setSingleLine()
+                textSize = Type.body
+                setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+                setHintTextColor(UiTheme.role(UiTheme.Role.FAINT))
+                setPadding(dp(14), 0, dp(14), 0)
+                minimumHeight = dp(48)
+                background = Glass.field(this@MainActivity, 14, false)
+                onFocusChangeListener = View.OnFocusChangeListener { _, has ->
+                    background = Glass.field(this@MainActivity, 14, has)
+                }
+            }
+            val src = field(if (pronoun) "Character name" else "Original text, as it appears")
+            val dst = field(if (pronoun) "he / she / they" else "Translate as")
+            box.addView(src, LinearLayout.LayoutParams(MP, dp(48)).also { it.topMargin = dp(12) })
+            box.addView(dst, LinearLayout.LayoutParams(MP, dp(48)).also { it.topMargin = dp(8) })
+            val save = Buttons.make(this, "Save", Buttons.Style.FILLED, heightDp = 46) { }
+            box.addView(save, LinearLayout.LayoutParams(MP, dp(46)).also { it.topMargin = dp(16) })
+            val dlg = Sheets.create(this, box)
+            save.setOnClickListener {
+                addTerm(type, src.text.toString().trim(), dst.text.toString().trim())
+                dlg.dismiss()
+            }
+            dlg.show()
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), dp(16))
+            background = Sheets.sheetBackground(this@MainActivity)
+        }
+        box.addView(Sheets.handle(this))
+        box.addView(TextView(this).apply {
+            text = "Add to the chapter glossary"
+            textSize = Type.heading
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            setPadding(0, 0, 0, dp(8))
+        })
+        val g = sheetGroup()
+        box.addView(g, LinearLayout.LayoutParams(MP, WC))
+        val dlg = Sheets.create(this, box)
+        ChapterGlossary.TYPES.forEachIndexed { i, t ->
+            g.addView(sheetRow(Ic.TEXT, t, i == ChapterGlossary.TYPES.lastIndex) {
+                dlg.dismiss()
+                form(t)
+            }.view)
+        }
+        dlg.show()
     }
 
     // ------------------------------------------------------------------ community
@@ -601,13 +695,11 @@ class MainActivity : Activity() {
             handler.postDelayed({ maybeAskCommunity(attempt + 1) }, 8_000L)
             return
         }
-        Prefs.putBool(this, "communityAsked", true)
-        AlertDialog.Builder(this)
-            .setTitle("Join the Novel Studio community?")
-            .setMessage("Get help, share prompts and glossaries, and hear about updates in our Telegram group and on Reddit.")
-            .setPositiveButton("Join now") { _, _ -> showCommunityChooser() }
-            .setNegativeButton("Later", null)
-            .show()
+        Sheets.confirm(
+            this, "Join the community?",
+            "Get help, share prompts and glossaries, and hear about updates in our Telegram group and on Reddit.",
+            confirm = "Join now", cancel = "Later"
+        ) { showCommunityChooser() }
     }
 
     // ------------------------------------------------------------------ community update notice
@@ -1154,6 +1246,24 @@ class MainActivity : Activity() {
         val seenInBatch = HashSet<String>()
         val batch = ArrayList<WmBubble>()
         val batchTop = ArrayList<Int>()
+        // Already translated in an earlier pass? Put those bubbles on the page NOW (no chatbot request),
+        // then send whatever is still missing in page order. Read-ahead used to walk its own OCR order,
+        // so a panel far below could take the chatbot's turn while the visible bubble stayed untranslated.
+        val cachedBubbles = ArrayList<WmBubble>()
+        val cachedValues = ArrayList<String>()
+        for (panel in panels.sortedBy { it.top }) {
+            for (bubble in panel.bubbles.sortedWith(compareBy<WmBubble>({ it.cy }, { it.cx }))) {
+                if (bubble.sourceText.isBlank()) continue
+                val hit = rtAheadTranslationCache[rtAheadBubbleCacheKey(bubble)] ?: continue
+                cachedBubbles.add(bubble); cachedValues.add(hit)
+            }
+        }
+        if (cachedBubbles.isNotEmpty()) {
+            placeCachedBubbles(
+                page, cachedBubbles, cachedValues,
+                cachedBubbles.mapTo(HashSet()) { WebModeLayout.fingerprint(it) }
+            )
+        }
         for (panel in panels.sortedBy { it.top }) {
             val ordered = panel.bubbles
                 .filter { it.sourceText.isNotBlank() && !isRealtimeUiChromeText(it.sourceText) }
@@ -1777,6 +1887,27 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                     rtAheadTranslationCache[rtAheadBubbleCacheKey(task.layout.bubbles[i])] = value
                 }
             }
+            // Panels the reader can already see get their translation the moment it arrives instead of
+            // waiting for the next OCR round (the picture used to stay untranslated on screen while its
+            // Bengali text sat in the cache).
+            if (cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
+                val placedBubbles = ArrayList<WmBubble>()
+                val placedValues = ArrayList<String>()
+                for (i in task.layout.bubbles.indices) {
+                    val value = aligned.getOrNull(i)?.trim().orEmpty()
+                    if (value.isNotBlank()) {
+                        placedBubbles.add(task.layout.bubbles[i]); placedValues.add(value)
+                    }
+                }
+                if (placedBubbles.isNotEmpty()) {
+                    // Off-screen bubbles are simply hidden by the overlay script until their image
+                    // enters the viewport, so placing the whole batch here is safe and cheap.
+                    placeCachedBubbles(
+                        cleanUrl(task.pageUrl), placedBubbles, placedValues,
+                        placedBubbles.mapTo(HashSet()) { WebModeLayout.fingerprint(it) }
+                    )
+                }
+            }
         }
         rtAheadTranslationTasksByJobKey.remove(jobKey)
         rtAheadTranslationQueuedIds.remove(task.id)
@@ -2084,9 +2215,7 @@ return t.length>=40?'TXT:'+t:'';
                 }
                 // Nothing is being read for the visible panel: use the time to OCR the next images ahead.
                 // Keep the DOM probe light enough that it does not compete with touch scrolling.
-                // Rule: the panel in front of the reader comes first. Look ahead only when the visible screen is
-                // already read (nothing new waiting) - never while a changed screen is still waiting for its turn.
-                if (hasImages && webModeHandle == null && aheadOcrHandle == null && !changed &&
+                if (hasImages && webModeHandle == null && aheadOcrHandle == null &&
                     // Keep a bounded OCR/translation pipeline: allow the next ten-panel batch
                     // to be prepared while the previous batch is still being translated.
                     rtAheadTranslationQueue.size < 4 &&
@@ -2265,14 +2394,8 @@ return t.length>=40?'TXT:'+t:'';
         when {
             reOcrBusy -> { text = "Re-reading this screen"; color = 0xFF64B5F6.toInt() }
             sending -> { text = "Sending to chatbot"; color = 0xFFFFAB40.toInt() }
-            // Say WHICH reading is running and with WHICH engine. One merged "Reading the page" label (and one
-            // timer) hid whether the 56 s were spent on the screen in front of the reader or on panels ahead.
-            keys.contains("visible-ocr") ->
-                { text = "Reading this screen · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
-            keys.contains("next-chapter-ocr") ->
-                { text = "Reading next chapter · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
-            keys.contains("read-ahead-ocr") ->
-                { text = "Reading ahead · " + shortOcrEngineName(); color = 0xFF7E57C2.toInt() }
+            keys.any { it == "visible-ocr" || it == "read-ahead-ocr" || it == "next-chapter-ocr" } ->
+                { text = "Reading the page"; color = 0xFFB388FF.toInt() }
             keys.contains("placement") -> { text = "Adding the translation"; color = 0xFF64FFDA.toInt() }
             keys.any { it == "chatbot-translation" || it == "ahead-translation" || it == "prefetch-translation" } -> {
                 val fresh = android.os.SystemClock.elapsedRealtime() - chatPhaseAtMs < 2_500L
@@ -2386,8 +2509,10 @@ return t.length>=40?'TXT:'+t:'';
     private lateinit var shortcutScroll: HorizontalScrollView
     private lateinit var addressBox: LinearLayout
     private lateinit var progressPct: TextView
-    private lateinit var snackView: TextView
-    private var snackHide: Runnable? = null
+    private lateinit var snack: Snackbar
+    private lateinit var snackSlot: FrameLayout
+    private lateinit var dockRowHost: FrameLayout
+    private var insetsApplied = false
     private var progressShown = false
     private var pulse: ValueAnimator? = null
 
@@ -2399,6 +2524,8 @@ return t.length>=40?'TXT:'+t:'';
     private var hasTr = false                 // a translation is currently shown on the novel page
     private var shownTranslated = false
     private var jobMarkers = 0                 // number of [NNN] paragraph markers sent in the running job
+    /** How many times the current reply was re-read because only UI chrome was visible (bounded). */
+    private var replyReReads = 0
     private var lastFastWhy = ""               // why the fast extractor failed (shown in the failure toast)
     private var shownTrRaw: String? = null     // translation text currently on the page (for font/size re-apply)
     private val handler = Handler(Looper.getMainLooper())
@@ -2623,11 +2750,10 @@ return t.length>=40?'TXT:'+t:'';
         Prefs.put(this, "tipCount", (shown + 1).toString())
         AlertDialog.Builder(this)
             .setTitle("Quick tip")
-            .setMessage("If translation fails, text is not placed on the page, or the reading page keeps running for a long time, close the app completely and open it again. That fixes most stuck states.")
-            .setPositiveButton("Got it", null)
-            .show()
-    }
-
+        Sheets.info(
+            this, "Quick tip",
+            "If translation fails, text is not placed on the page, or the reading page keeps running for a long time, close the app completely and open it again. That fixes most stuck states."
+        )
     // ---- "reading the page" that never ends: point new users to the search (re-scan) button
     private var readingSinceMs = 0L
 
@@ -2641,11 +2767,11 @@ return t.length>=40?'TXT:'+t:'';
         if (shown >= 2 || usage > 180) return
         readingSinceMs = now + 600_000L   // not again for 10 minutes
         Prefs.put(this, "ocrTipCount", (shown + 1).toString())
-        AlertDialog.Builder(this)
-            .setTitle("Taking a long time?")
-            .setMessage("If the reading animation keeps running, tap the search button on the right side of the screen and frame the bubble, so the model can find it. Not every text sits in a bubble — sometimes it is plain text on the image.")
-            .setPositiveButton("Got it", null)
-            .show()
+        Sheets.info(
+            this, "Taking a long time?",
+            "If the reading animation keeps running, tap the re-scan button on the right side of the screen and frame the bubble, so the model can find it. Not every text sits in a bubble — sometimes it is plain text on the image.",
+            icon = Ic.INFO
+        )
     }
     private val communityTelegram = "https://t.me/c/4373541125/2"
     private val communityReddit = "https://www.reddit.com/r/NovelStudio/s/BWuOYCZSUe"
@@ -2852,20 +2978,50 @@ return t.length>=40?'TXT:'+t:'';
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    // ================================================================== theme ("Aurora Glass", see Ui.kt)
+    // ================================================================== theme ("Calm", see Ui.kt)
     private val cBg = UiTheme.bg
-    private val cSurface = 0xFF0C0E15.toInt()
-    private val cPill = 0xFF171A24.toInt()
-    private val cChip = 0xFF1D2130.toInt()
-    private val cField = 0xFF141722.toInt()
-    private val cFieldStroke = 0xFF2A2F42.toInt()
-    private val cStroke = 0xFF262B3C.toInt()
-    private val cCard = 0xFF141722.toInt()
-    private val cCardActive = 0xFF1C2238.toInt()
+    private val cSurface = UiTheme.surface
+    private val cPill = UiTheme.surfaceRaised
+    private val cChip = UiTheme.surfaceRaised
+    private val cField = UiTheme.surface
+    private val cFieldStroke = 0x1AFFFFFF
+    private val cStroke = 0x17FFFFFF
+    private val cCard = UiTheme.surface
+    private val cCardActive = 0xFF20202A.toInt()
     private val cTxt = UiTheme.text
     private val cDim = UiTheme.dim
     private val cAccent = UiTheme.accent
     private val cSheet = UiTheme.sheet
+
+    // ---- app appearance (Night / Paper). See UiTheme.Role: screens ask for roles, so one switch recolours
+    // every surface that was built with roles. Screens built before a switch keep the old look until recreated;
+    // this helper rebuilds the ones that can be rebuilt in place and re-applies all window-level chrome.
+    private var homeViewRefreshPending = false
+
+    private fun appearanceLabel(): String = if (UiTheme.dark) "Night" else "Paper (light)"
+
+    private fun setAppAppearance(light: Boolean) {
+        Prefs.put(this, "appTheme", if (light) "light" else "dark")
+        UiTheme.dark = !light
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyAppAppearance() {
+        val lightChrome = !UiTheme.dark
+        val flags = window.decorView.systemUiVisibility
+        window.decorView.systemUiVisibility =
+            if (lightChrome) flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            else flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+        if (::contentHolderView.isInitialized) contentHolderView.setBackgroundColor(UiTheme.role(UiTheme.Role.BG))
+        if (::chromeTopView.isInitialized) applyReaderChrome(currentReadMode())
+        if (::dockBar.isInitialized) dockBar.background = floatingBarBg(34)
+        if (::homeView.isInitialized) {
+            homeView.setBackground(appBackground())
+            refreshHome()
+        }
+        if (!::homeView.isInitialized) homeViewRefreshPending = true
+        activityChip?.let { chip -> chip.background = Glass.panel(this, 20) }
+    }
 
     private fun pillBg(color: Int, radiusDp: Int, stroke: Int = 0, strokeColor: Int = 0): GradientDrawable =
         GradientDrawable().apply {
@@ -2937,12 +3093,50 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     /** Icon slot of the bottom dock. */
-    private fun dockBtn(ic: Ic, desc: String, onClick: () -> Unit): ImageView =
-        iconButton(ic, desc, 22, 46, UiTheme.iconIdle, onClick).also {
+    private fun dockBtn(ic: Ic, desc: String, sizeDp: Int = 22, onClick: () -> Unit): ImageView =
+        iconButton(ic, desc, sizeDp, 46, UiTheme.role(UiTheme.Role.ICON), onClick).also {
             it.layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
         }
 
+    /**
+     * Edge-to-edge: transparent system bars, the app draws its own surfaces. Every top-level surface is
+     * pushed clear of the status bar (top) and the navigation bar / gesture inset (bottom).
+     */
+    @Suppress("DEPRECATION")
+    private fun applyWindowInsets(vararg views: View) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            window.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        }
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+        // Dark theme: light (white) status bar glyphs.
+        window.decorView.systemUiVisibility =
+            (window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()) or
+                (if (UiTheme.dark) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR)
+        val apply = {
+            Insets.capture(this)
+            if (Insets.top + Insets.bottom > 0) {
+                for (v in views) {
+                    v.setPadding(v.paddingLeft, Insets.top + if (v === homeView) dp(2) else 0, v.paddingRight, Insets.bottom)
+                }
+                insetsApplied = true
+            }
+        }
+        apply()
+        window.decorView.setOnApplyWindowInsetsListener { _, i ->
+            apply()
+            i
+        }
+        // A second pass once the first frame is measured (insets are not always dispatched before that).
+        window.decorView.post { if (!insetsApplied) apply() }
+    }
+
     private fun appBackground(): Drawable {
+        if (!UiTheme.dark) return ColorDrawable(UiTheme.role(UiTheme.Role.BG))
         fun glow(cx: Float, cy: Float, color: Int, radiusDp: Int) = GradientDrawable().apply {
             gradientType = GradientDrawable.RADIAL_GRADIENT
             gradientRadius = dp(radiusDp).toFloat()
@@ -2957,30 +3151,58 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     // ---- floating message (replaces the system Toast, which cannot be styled)
+    /** State of a short status message, inferred from its leading glyph. */
+    private fun snackKind(msg: String): Snackbar.Kind = when {
+        msg.startsWith("✅") || msg.startsWith("💾") || msg.startsWith("🔖") -> Snackbar.Kind.SUCCESS
+        msg.startsWith("❌") || msg.startsWith("⚠") || msg.startsWith("🚫") -> Snackbar.Kind.ERROR
+        msg.startsWith("⏳") || msg.startsWith("⟳") || msg.startsWith("⏹") || msg.startsWith("🔄") -> Snackbar.Kind.PROGRESS
+        msg.startsWith("🧪") || msg.startsWith("🎌") || msg.startsWith("🖼") -> Snackbar.Kind.WARN
+        else -> Snackbar.Kind.INFO
+    }
+
+    /** Strip the leading emoji/symbol used only to signal state; the state is shown by the icon instead. */
+    private fun snackText(msg: String): String {
+        val m = msg.replace(Regex("^(?:[\\u2190-\\u21FF\\u2600-\\u27BF\\uD83C-\\uDBFF\\uDC00-\\uDFFF\\u2B00-\\u2BFF\\uFE0F\\u200D]+ ?)+"), "").trim()
+        return m.ifEmpty { msg }
+    }
+
     private fun showSnack(msg: String) {
         runOnUiThread {
-            if (!::snackView.isInitialized || !hasWindowFocus()) {
-                // a dialog/sheet is on top of the app window: the system toast is still visible there
+            if (!::snackSlot.isInitialized) {
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 return@runOnUiThread
             }
-            snackHide?.let { handler.removeCallbacks(it) }
-            snackView.animate().cancel()
-            snackView.text = msg
-            snackView.visibility = View.VISIBLE
-            snackView.alpha = 0f
-            snackView.translationY = dp(16).toFloat()
-            snackView.animate().alpha(1f).translationY(0f).setDuration(190).start()
-            val r = Runnable { hideSnack() }
-            snackHide = r
-            handler.postDelayed(r, (2200L + msg.length * 28L).coerceAtMost(6500L))
+            val kind = snackKind(msg)
+            val text = snackText(msg)
+            if (!hasWindowFocus()) {
+                // a dialog/sheet is on top of the app window: the system toast is still visible there
+                Toast.makeText(this, text, Toast.LENGTH_LONG).show()
+                return@runOnUiThread
+            }
+            snackKindLast = kind
+            if (::homeView.isInitialized && homeView.visibility == View.VISIBLE) {
+                homeView.showNotice(text, kind)
+                return@runOnUiThread
+            }
+            snack.show(text, kind, autoHideMs = (2600L + text.length * 24L).coerceIn(2600L, 6000L))
+            updateDockVisibility()
         }
     }
 
     private fun hideSnack() {
-        if (!::snackView.isInitialized) return
-        snackView.animate().alpha(0f).translationY(dp(10).toFloat()).setDuration(170)
-            .withEndAction { snackView.visibility = View.GONE }.start()
+        if (::snack.isInitialized) snack.dismiss()
+        updateDockVisibility()
+    }
+
+    private var snackKindLast: Snackbar.Kind = Snackbar.Kind.INFO
+
+    /** The dock controls are swapped for the notification strip while a message is visible. */
+    private fun updateDockVisibility() {
+        if (!::snackSlot.isInitialized || !::dockRowHost.isInitialized) return
+        if (::homeView.isInitialized && homeView.visibility == View.VISIBLE) return   // home has its own dock
+        val showing = ::snack.isInitialized && snack.shown
+        snackSlot.visibility = if (showing) View.VISIBLE else View.GONE
+        dockRowHost.visibility = if (showing) View.INVISIBLE else View.VISIBLE
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -3012,6 +3234,9 @@ return t.length>=40?'TXT:'+t:'';
         applyForceLoadImages()
         Js.sendHoldMs = sendHoldPref()
         CrashLog.install(this)
+        // Finish or undo what a previous process left half-done (an interrupted model download or a
+        // native model load that killed the process). Loads nothing native, so it cannot crash start-up.
+        try { WebModeInpainter.restore(this) } catch (_: Throwable) { }
         chatWv.webViewClient = ChatClient()
         chatWv.settings.setSupportMultipleWindows(true)
         chatWv.settings.javaScriptCanOpenWindowsAutomatically = true
@@ -3279,8 +3504,8 @@ return t.length>=40?'TXT:'+t:'';
             imeOptions = EditorInfo.IME_ACTION_GO
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setPadding(0, 0, 0, 0)
-            setTextColor(UiTheme.text)
-            setHintTextColor(UiTheme.faint)
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            setHintTextColor(UiTheme.role(UiTheme.Role.FAINT))
             background = ColorDrawable(Color.TRANSPARENT)
             setSelectAllOnFocus(true)
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -3295,13 +3520,14 @@ return t.length>=40?'TXT:'+t:'';
                 override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
                 override fun afterTextChanged(s: Editable?) {
                     val secure = s?.startsWith("https://") == true
-                    addrIcon.setImageDrawable(IconDrawable(if (secure) Ic.LOCK else Ic.GLOBE, if (secure) UiTheme.ok else UiTheme.dim))
+                    addrIcon.setImageDrawable(IconDrawable(if (secure) Ic.LOCK else Ic.GLOBE,
+                        if (secure) UiTheme.role(UiTheme.Role.OK) else UiTheme.role(UiTheme.Role.DIM)))
                 }
             })
             setOnLongClickListener { showTabGrid(); true }
         }
 
-        val reloadBtn = iconButton(Ic.RELOAD, "Reload", 19, 36, UiTheme.iconIdle) { reloadPage() }.apply {
+        val reloadBtn = iconButton(Ic.RELOAD, "Reload", 19, 44, UiTheme.role(UiTheme.Role.ICON)) { reloadPage() }.apply {
             setOnLongClickListener { novelWv.reload(); chatWv.reload(); toast("🔄 Reloading both pages"); true }
         }
 
@@ -3309,11 +3535,11 @@ return t.length>=40?'TXT:'+t:'';
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(13), 0, dp(2), 0)
-            background = Glass.field(this@MainActivity, 19, false)
+            background = Glass.field(this@MainActivity, 22, false)
             addView(addrIcon)
             addView(urlBar, LinearLayout.LayoutParams(0, MP, 1f))
-            addView(reloadBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
-            layoutParams = LinearLayout.LayoutParams(0, dp(38), 1f).also {
+            addView(reloadBtn, LinearLayout.LayoutParams(dp(44), dp(44)))
+            layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f).also {
                 it.marginStart = dp(8)
                 it.marginEnd = dp(4)
             }
@@ -3324,25 +3550,107 @@ return t.length>=40?'TXT:'+t:'';
             gravity = Gravity.CENTER
             textSize = 13.5f
             typeface = boldMedium
-            setTextColor(UiTheme.text)
-            background = Glass.ripple(this@MainActivity, Glass.solid(this@MainActivity, 0x00000000, 11, UiTheme.accent, 2), 11)
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            background = Glass.ripple(this@MainActivity,
+                Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.CONTROL), 21, UiTheme.role(UiTheme.Role.STROKE)), null)
             contentDescription = "Open tabs"
             setOnClickListener { showTabGrid() }
             setOnLongClickListener { newBrowserTab("https://www.google.com/"); true }
         }
 
+        // ---- Reader ("Calm") top pill: [back] [title + status] | [re-scan] [facts] [tabs] [reload] [⋯]
+        // Shown in Scan / Live in place of the browser address field. Every icon is 44dp, grouped by a thin
+        // divider into navigation (left) and the two readers' actions (right), so the row scans at a glance.
+        expandIcon = ImageView(this).apply {
+            setImageDrawable(IconDrawable(Ic.BACK, UiTheme.role(UiTheme.Role.TEXT), 1.9f))
+            val p = dp(12)
+            setPadding(p, p, p, p)
+            background = Glass.ripple(this@MainActivity, null)
+            contentDescription = "Back — previous page"
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            isClickable = true
+            setOnClickListener { if (novelWv.canGoBack()) novelWv.goBack() else showHome() }
+            setOnLongClickListener { showTabGrid(); true }
+        }
+        expandLabel = TextView(this).apply {
+            text = "Novel Studio"
+            textSize = 14f
+            typeface = medium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(4), 0, dp(4), 0)
+            isClickable = true
+            contentDescription = "Page title. Tap to go to the top; long press for tabs"
+            setOnLongClickListener { showTabGrid(); true }
+            setOnClickListener { novelWv.evaluateJavascript("try{window.scrollTo({top:0,behavior:'smooth'})}catch(e){window.scrollTo(0,0)}", null) }
+        }
+        readerStatusDot = View(this).apply {
+            background = Glass.oval(UiTheme.role(UiTheme.Role.FAINT))
+            visibility = View.GONE
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        readerStatusText = TextView(this).apply {
+            textSize = Type.overline
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.DIM))
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            visibility = View.GONE
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        readerTitleColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            setOnClickListener { expandLabel.performClick() }
+            setOnLongClickListener { showTabGrid(); true }
+            addView(expandLabel, LinearLayout.LayoutParams(MP, WC))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(readerStatusDot, LinearLayout.LayoutParams(dp(6), dp(6)).also { it.marginEnd = dp(6) })
+                addView(readerStatusText)
+            }, LinearLayout.LayoutParams(MP, WC))
+        }
+        val pillDivider = View(this).apply { setBackgroundColor(UiTheme.role(UiTheme.Role.STROKE)) }
+        expandBarPill = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), 0, dp(2), 0)
+            background = Glass.floating(this@MainActivity, 26)
+            elevation = dp(8).toFloat()
+            visibility = View.GONE
+            addView(expandIcon, LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(readerTitleColumn, LinearLayout.LayoutParams(0, WC, 1f))
+            addView(pillDivider, LinearLayout.LayoutParams(dp(1), dp(20)).also { it.marginStart = dp(4); it.marginEnd = dp(6) })
+            addView(iconButton(Ic.SCAN, "Read this page again", 19, 44, UiTheme.role(UiTheme.Role.ICON)) { reScanReaderPage() },
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(iconButton(Ic.CLOCK, "Reader activity and status", 19, 44, UiTheme.role(UiTheme.Role.ICON)) { showReaderStatusSheet() },
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(tabCountBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+            addView(iconButton(Ic.RELOAD, "Reload page", 19, 44, UiTheme.role(UiTheme.Role.ICON)) { reloadPage() },
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(iconButton(Ic.DOTS, "Reader controls and settings", 20, 44, UiTheme.role(UiTheme.Role.ICON)) { readerControlsSheet() },
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+        }
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(9), 0, dp(6), 0)
-            background = floatingBarBg(26)
+            setPadding(dp(5), 0, dp(5), 0)
+            background = Glass.floating(this@MainActivity, 26)
             elevation = dp(8).toFloat()
-            addView(tabCountBtn, LinearLayout.LayoutParams(dp(34), dp(34)))
+            addView(tabCountBtn, LinearLayout.LayoutParams(dp(40), dp(40)))
             addView(addressBox)
+        }
+        topBarOuter = topBar
+        val topStack = FrameLayout(this).apply {
+            addView(topBar, FrameLayout.LayoutParams(MP, dp(52)))
+            addView(expandBarPill, FrameLayout.LayoutParams(MP, dp(50), Gravity.CENTER))
         }
         val topWrap = FrameLayout(this).apply {
             setPadding(dp(10), dp(8), dp(10), dp(4))
-            addView(topBar, FrameLayout.LayoutParams(MP, dp(52)))
+            addView(topStack, FrameLayout.LayoutParams(MP, dp(52)))
         }
 
         // tab rail (only visible with 2+ tabs) and quick-site shortcuts (only while typing an address)
@@ -3401,76 +3709,72 @@ return t.length>=40?'TXT:'+t:'';
         // ================= translation status card (floats over the page)
         progressBar = BookwormProgress(this)
         progressTv = TextView(this).apply {
-            textSize = 13.5f
-            typeface = medium
-            setTextColor(UiTheme.text)
+            textSize = Type.label
+            typeface = Type.medium()
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         progressPct = TextView(this).apply {
-            textSize = 13.5f
-            typeface = boldMedium
-            setTextColor(0xFFCFD5FF.toInt())
+            textSize = Type.label
+            typeface = Type.bold()
+            setTextColor(UiTheme.role(UiTheme.Role.ACCENT))
+            // Fixed slot so the label does not jitter as the number changes width.
+            gravity = Gravity.CENTER
+            minimumWidth = dp(44)
         }
-        val progStop = iconButton(Ic.CLOSE, "Stop translation", 13, 28, UiTheme.iconIdle) { cancelAll() }.apply {
-            background = Glass.ripple(this@MainActivity, Glass.oval(0x1FFFFFFF))
+        val progStop = iconButton(Ic.CLOSE, "Stop translating this chapter", 15, 40, UiTheme.role(UiTheme.Role.DIM)) { cancelAll() }.apply {
+            background = Glass.ripple(this@MainActivity, null)
         }
-        val progIcon = ImageView(this).apply { setImageDrawable(IconDrawable(Ic.GLOBE, UiTheme.accent)) }
+        val progIcon = ImageView(this).apply {
+            setImageDrawable(IconDrawable(Ic.SPARK, UiTheme.role(UiTheme.Role.ACCENT)))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
         val progRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(progIcon, LinearLayout.LayoutParams(dp(18), dp(18)))
+            addView(progIcon, LinearLayout.LayoutParams(dp(16), dp(16)))
             addView(progressTv, LinearLayout.LayoutParams(0, WC, 1f).also { it.marginStart = dp(9) })
-            addView(progressPct, LinearLayout.LayoutParams(WC, WC).also { it.marginStart = dp(8) })
-            addView(progStop, LinearLayout.LayoutParams(dp(28), dp(28)).also { it.marginStart = dp(8) })
+            addView(progressPct, LinearLayout.LayoutParams(WC, WC).also { it.marginStart = dp(6) })
+            addView(progStop, LinearLayout.LayoutParams(dp(40), dp(40)).also { it.marginStart = dp(2) })
         }
         progressBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             clipChildren = false // lets the mascot's sparkles overshoot the bar a little
-            setPadding(dp(14), dp(10), dp(10), dp(6))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xF2282C3E.toInt(), 0xF2181B28.toInt())
-            ).apply {
-                cornerRadius = dp(20).toFloat()
-                setStroke(dp(1), 0x668C9CFF)
-            }
+            setPadding(dp(14), dp(6), dp(6), dp(8))
+            background = Glass.panel(this@MainActivity, 18, strong = true)
             elevation = dp(10).toFloat()
             addView(progRow, LinearLayout.LayoutParams(MP, WC))
             addView(progressBar, LinearLayout.LayoutParams(MP, dp(44)).also { it.topMargin = dp(2) })
         }
 
         togglePill = TextView(this).apply {
-            textSize = 12.5f
-            typeface = boldMedium
-            setTextColor(Color.WHITE)
+            textSize = Type.label
+            typeface = Type.bold()
+            setTextColor(UiTheme.role(UiTheme.Role.ON_ACCENT))
             gravity = Gravity.CENTER
-            setPadding(dp(14), 0, dp(17), 0)
+            minimumHeight = dp(40)
+            setPadding(dp(16), 0, dp(18), 0)
             compoundDrawablePadding = dp(8)
-            val gi = IconDrawable(Ic.GLOBE, Color.WHITE)
+            val gi = IconDrawable(Ic.GLOBE, UiTheme.role(UiTheme.Role.ON_ACCENT))
             gi.setBounds(0, 0, dp(16), dp(16))
             setCompoundDrawablesRelative(gi, null, null, null)
             visibility = View.GONE
-            background = GradientDrawable(
-                GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(0xEB7B8CFF.toInt(), 0xEBB27CFF.toInt())
-            ).apply { cornerRadius = dp(19).toFloat() }
+            background = Glass.ripple(this@MainActivity, Glass.accent(this@MainActivity, 20), 20)
             elevation = dp(8).toFloat()
             setOnClickListener { toggleView() }
         }
 
         // Small always-visible switch for "translate the next chapter ahead of time" (Novel + Scanning only).
         prefetchChip = TextView(this).apply {
-            textSize = 11f
-            typeface = boldMedium
-            setTextColor(Color.WHITE)
+            textSize = Type.overline
+            typeface = Type.bold()
             gravity = Gravity.CENTER
-            setPadding(dp(10), 0, dp(12), 0)
-            compoundDrawablePadding = dp(5)
-            val bi = IconDrawable(Ic.BOLT, Color.WHITE)
-            bi.setBounds(0, 0, dp(12), dp(12))
-            setCompoundDrawablesRelative(bi, null, null, null)
+            minimumHeight = dp(36)
+            setPadding(dp(12), 0, dp(12), 0)
+            compoundDrawablePadding = dp(6)
             elevation = dp(8).toFloat()
             contentDescription = "Translate next chapter ahead"
             setOnClickListener { setPrefetchEnabled(!Prefs.bool(this@MainActivity, "prefetchNextChapter")) }
@@ -3492,54 +3796,46 @@ return t.length>=40?'TXT:'+t:'';
             addView(chatBox, FrameLayout.LayoutParams(MP, MP))
             addView(modeTransitionCover, FrameLayout.LayoutParams(MP, MP))
             addView(progressBox, FrameLayout.LayoutParams(MP, WC, Gravity.TOP).also { it.setMargins(dp(10), dp(10), dp(10), 0) })
-            addView(togglePill, FrameLayout.LayoutParams(WC, dp(38), Gravity.BOTTOM or Gravity.END).also { it.setMargins(0, 0, dp(12), dp(12)) })
-            addView(prefetchChip, FrameLayout.LayoutParams(WC, dp(28), Gravity.BOTTOM or Gravity.START).also { it.setMargins(dp(12), 0, 0, dp(12)) })
+            addView(togglePill, FrameLayout.LayoutParams(WC, dp(40), Gravity.BOTTOM or Gravity.END).also { it.setMargins(0, 0, dp(12), dp(12)) })
+            addView(prefetchChip, FrameLayout.LayoutParams(WC, dp(36), Gravity.BOTTOM or Gravity.START).also { it.setMargins(dp(12), 0, 0, dp(12)) })
             scanDot = View(this@MainActivity).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(0xFF69F0AE.toInt())
-                }
+                // A stop-motion light: the reader's smallest status indicator, on the pill's edge.
+                background = Glass.oval(if (UiTheme.dark) 0xFF51D29B.toInt() else UiTheme.role(UiTheme.Role.OK))
                 elevation = dp(7).toFloat()
                 visibility = View.GONE
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             }
-            addView(scanDot, FrameLayout.LayoutParams(dp(7), dp(7), Gravity.TOP or Gravity.END).also {
-                it.setMargins(0, dp(10), dp(10), 0)
+            addView(scanDot, FrameLayout.LayoutParams(dp(8), dp(8), Gravity.TOP or Gravity.END).also {
+                it.setMargins(0, dp(12), dp(12), 0)
             })
+            // Two on-page controls for the readers, both 48dp and both inside the reader pill too:
+            // reading controls live where the thumb is, the pill keeps the same actions available.
             reOcrBtn = android.widget.ImageView(this@MainActivity).apply {
-                setImageDrawable(IconDrawable(Ic.SEARCH, UiTheme.iconIdle))
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(0xEE232739.toInt())
-                    setStroke(dp(1), UiTheme.stroke)
-                }
-                val pad = dp(10)
+                setImageDrawable(IconDrawable(Ic.SCAN, UiTheme.role(UiTheme.Role.ICON)))
+                background = Glass.ripple(this@MainActivity, Glass.panel(this@MainActivity, 100, strong = true), null)
+                val pad = dp(13)
                 setPadding(pad, pad, pad, pad)
                 elevation = dp(10).toFloat()
                 contentDescription = "Re-scan a bubble area"
                 visibility = View.GONE
                 setOnClickListener { showRescanSelector() }
             }
-            addView(reOcrBtn, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.BOTTOM or Gravity.END).also {
-                it.setMargins(0, 0, dp(12), dp(134))
+            addView(reOcrBtn, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END).also {
+                it.setMargins(0, 0, dp(12), dp(136))
             })
             // Glossary for the chapter on screen (Scanning + Real-time).
             glossaryFab = android.widget.ImageView(this@MainActivity).apply {
-                setImageDrawable(IconDrawable(Ic.BOOK, UiTheme.iconIdle))
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(0xEE232739.toInt())
-                    setStroke(dp(1), UiTheme.stroke)
-                }
-                val pad = dp(9)
+                setImageDrawable(IconDrawable(Ic.BOOK, UiTheme.role(UiTheme.Role.ICON)))
+                background = Glass.ripple(this@MainActivity, Glass.panel(this@MainActivity, 100, strong = true), null)
+                val pad = dp(13)
                 setPadding(pad, pad, pad, pad)
                 elevation = dp(10).toFloat()
-                contentDescription = "Glossary for this chapter"
+                contentDescription = "Chapter glossary"
                 visibility = View.GONE
                 setOnClickListener { chapterGlossaryDialog() }
             }
-            addView(glossaryFab, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.BOTTOM or Gravity.END).also {
-                it.setMargins(0, 0, dp(14), dp(184))
+            addView(glossaryFab, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.BOTTOM or Gravity.END).also {
+                it.setMargins(0, 0, dp(12), dp(192))
             })
             activityChip = ActivityChip(this@MainActivity)
             addView(activityChip, FrameLayout.LayoutParams(WC, WC, Gravity.BOTTOM or Gravity.START).also {
@@ -3614,54 +3910,74 @@ return t.length>=40?'TXT:'+t:'';
             isLongClickable = true
             translationY = -dp(8).toFloat()   // raised out of the dock (headroom for it lives in dockWrap's top padding)
         }
-        val dock = LinearLayout(this).apply {
+        // One floating dock. Chapter navigation (‹ bolt ›) is the primary row and the only place the raised
+        // bolt lives; the mode switch, page view and tools get their own quiet row underneath so the
+        // centre of the bar belongs to one action instead of competing with four others.
+        val dockPrimary = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), 0, dp(8), 0)
-            background = floatingBarBg(34)
+            addView(dockBtn(Ic.BACK, "Previous chapter") { step("prev") }, LinearLayout.LayoutParams(0, dp(52), 1f))
+            addView(extractBtn, extractLp())
+            addView(dockBtn(Ic.FORWARD, "Next chapter") { step("next") }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        }
+        val dockSecondary = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, dp(6), dp(6))
+            addView(modeChip, LinearLayout.LayoutParams(0, dp(36), 1f).also { it.marginEnd = dp(8) })
+            addView(dockBtn(Ic.SPLIT, "Page view", 20) { cycleMode() }, LinearLayout.LayoutParams(dp(44), dp(40)))
+            addView(dockBtn(Ic.LIBRARY, "Library and saved books", 20) { libraryNovels() }, LinearLayout.LayoutParams(dp(44), dp(40)))
+            addView(dockBtn(Ic.DOTS, "Menu", 20) { menu() }.also { menuBtnView = it }, LinearLayout.LayoutParams(dp(44), dp(40)))
+        }
+        val dock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(4), 0, 0)
+            background = floatingBarBg(26)
             elevation = dp(12).toFloat()
             clipChildren = false   // the raised centre button may poke out above the dock
-            clipToPadding = false  // dock has side padding, so clipToPadding (default true) would still cut the button at the dock's top edge
-            addView(modeChip, LinearLayout.LayoutParams(0, dp(42), 1.9f).also { it.setMargins(0, 0, dp(2), 0) })
-            addView(modeBtn)
-            addView(dockBtn(Ic.BACK, "Previous chapter") { step("prev") })
-            addView(extractBtn, extractLp())
-            addView(dockBtn(Ic.FORWARD, "Next chapter") { step("next") })
-            addView(dockBtn(Ic.GRID, "Menu") { menu() }.also { menuBtnView = it })
+            clipToPadding = false  // clipToPadding (default true) would cut the button at the dock's top edge
+            addView(dockPrimary, LinearLayout.LayoutParams(MP, dp(52)))
+            addView(dockSecondary, LinearLayout.LayoutParams(MP, dp(40)))
         }
+        modeBtn = dockSecondary.getChildAt(1) as ImageView
+        // Notification strip shares the dock's footprint: it replaces the dock row while visible, so no text
+        // ever covers the page / translated bubbles.
+        snack = Snackbar(this)
+        snackSlot = FrameLayout(this).apply {
+            visibility = View.GONE
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            addView(snack, FrameLayout.LayoutParams(MP, WC, Gravity.CENTER))
+        }
+        dockRowHost = FrameLayout(this).apply { addView(dock, FrameLayout.LayoutParams(MP, dp(68))) }
+        val snackSlotInner = snackSlot
         val dockWrap = FrameLayout(this).apply {
+            id = View.generateViewId()
             clipChildren = false
             clipToPadding = false
-            // Top padding >= the button's overhang (~11dp) + badge: hardware layers / elevation clip anything outside this view.
-            setPadding(dp(14), dp(18), dp(14), dp(12))
-            addView(dock, FrameLayout.LayoutParams(MP, dp(68)))
+            addView(dockRowHost, FrameLayout.LayoutParams(MP, WC))
+            addView(snackSlotInner, FrameLayout.LayoutParams(MP, WC, Gravity.CENTER))
         }
         dockBar = dock
         dockWrapView = dockWrap
+        SnackbarHost.register(this, object : SnackbarHost {
+            override val isSnackbarVisible: Boolean get() = ::snack.isInitialized && snack.shown
+            override fun show(message: String, kind: Snackbar.Kind, actionLabel: String?, onAction: (() -> Unit)?, autoHideMs: Long) {
+                snackKindLast = kind
+                if (::homeView.isInitialized && homeView.visibility == View.VISIBLE) {
+                    homeView.showNotice(message, kind)
+                    return
+                }
+                snack.show(message, kind, actionLabel, onAction, autoHideMs)
+                updateDockVisibility()
+            }
+        })
         // The bars float over the page in Web Mode; their size can change (tab rail, shortcuts), so follow it.
         val barSizeWatcher = View.OnLayoutChangeListener { _, _, t, _, b, _, ot, _, ob ->
             if (b - t != ob - ot) handler.post { applyFloatingBars() }
         }
         chromeTopView.addOnLayoutChangeListener(barSizeWatcher)
         dockWrap.addOnLayoutChangeListener(barSizeWatcher)
-
-        snackView = TextView(this).apply {
-            textSize = 13f
-            typeface = medium
-            setTextColor(UiTheme.text)
-            maxWidth = dp(330)
-            setPadding(dp(18), dp(12), dp(18), dp(12))
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xF2292D3F.toInt(), 0xF2181B28.toInt())
-            ).apply {
-                cornerRadius = dp(22).toFloat()
-                setStroke(dp(1), 0x38FFFFFF)
-            }
-            elevation = dp(16).toFloat()
-            visibility = View.GONE
-            setOnClickListener { hideSnack() }
-        }
 
         val main = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3682,17 +3998,33 @@ return t.length>=40?'TXT:'+t:'';
             onSearch = { q -> go(q) }
             onMenu = { menu() }
             onHub = { part -> Hub.open(this@MainActivity, part) }
+            onDockHost = { toolbar -> homeView.setToolbar(toolbar) }
+            onOpenLibrary = { openLibraryManager() }
+            onOpenUpdates = { openLibraryManager() }
+            onOpenSources = { openLibraryManager() }
+            onExport = { novel -> exportAll(novel) }
+            onShelfMore = { s -> shelfMoreSheet(s) }
         }
+        val homeDock = FrameLayout(this).apply {
+            clipChildren = false
+            clipToPadding = false
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+        }
+        homeView.attachDock(homeDock)
+        homeView.setRefreshHook { refreshHome() }
+        homeViewRefreshPending = false
         val root = FrameLayout(this).apply {
             background = appBackground()
             addView(main, FrameLayout.LayoutParams(MP, MP))
             addView(homeView, FrameLayout.LayoutParams(MP, MP))
+            addView(homeDock, FrameLayout.LayoutParams(MP, WC, Gravity.BOTTOM))
             addView(modeOverlay, FrameLayout.LayoutParams(dp(230), dp(230), Gravity.CENTER))
             addView(floatBoltHost, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = dp(20) })
-            addView(snackView, FrameLayout.LayoutParams(WC, WC, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = dp(106) })
             addView(tourOverlay, FrameLayout.LayoutParams(MP, MP))
         }
         setContentView(root)
+        applyWindowInsets(root, main, homeView, homeDock, dockWrap, chromeTopView)
+        bindHomeToolbar(homeDock)
         handler.post(scanIndicatorRunnable)
 
         buildStrip()
@@ -3725,6 +4057,286 @@ return t.length>=40?'TXT:'+t:'';
             handler.postDelayed({ if (!isFinishing) showLanguageSheet(true) }, 500L)
         }
         handler.postDelayed({ maybeAskCommunity() }, 12_000L)
+    }
+
+    /**
+     * Library manager: search across saved books, rename / export / delete, and mark updates as seen.
+     * Built entirely on the existing [Store] data — the same rows the menu's old "Library" list showed.
+     */
+    /**
+     * Home dock, search state: the empty slot next to the search field becomes the reading-mode switch and
+     * the view control (the same handlers as the reading dock). Moved back out when Search closes.
+     */
+    private fun bindHomeToolbar(homeDock: View) {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+            addView(modeChip, LinearLayout.LayoutParams(0, dp(44), 1.0f))
+            addView(dockBtn(Ic.SPLIT, "Page view") { cycleMode() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(dockBtn(Ic.DOTS, "Menu") { menu() }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        }
+        homeView.setToolbar(bar)
+        // Reposition the window's bottom inset onto the floating home dock (it overlays the home view).
+        homeDock.setPadding(homeDock.paddingLeft, homeDock.paddingTop, homeDock.paddingRight, Insets.bottom)
+    }
+
+    private fun openLibraryManager() {
+        val all = Store.novelNames(this)
+        var q = ""
+        lateinit var dlg: Dialog
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(16))
+            background = Sheets.sheetBackground(this@MainActivity)
+        }
+        col.addView(sheetHandle())
+        col.addView(TextView(this).apply {
+            text = "Library"
+            textSize = Type.title
+            typeface = boldMedium
+            setTextColor(UiTheme.text)
+            setPadding(dp(4), 0, dp(4), dp(2))
+        })
+        col.addView(TextView(this).apply {
+            text = "${all.size} book" + (if (all.size == 1) "" else "s") + " · " + all.sumOf { Store.chapters(this@MainActivity, it).size } + " saved chapters"
+            textSize = Type.caption
+            setTextColor(UiTheme.dim)
+            setPadding(dp(4), 0, dp(4), dp(12))
+        })
+        val search = EditText(this).apply {
+            hint = "Search books or chapters"
+            setSingleLine()
+            textSize = Type.body
+            setTextColor(UiTheme.text)
+            setHintTextColor(UiTheme.faint)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = Glass.solid(this@MainActivity, 0x0FFFFFFF, 14, UiTheme.strokeSoft)
+        }
+        col.addView(search, LinearLayout.LayoutParams(MP, WC).also { it.bottomMargin = dp(6) })
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun render() {
+            body.removeAllViews()
+            val qq = q.trim()
+            val names = all.filter { n ->
+                qq.isEmpty() || n.contains(qq, true) ||
+                    Store.chapters(this@MainActivity, n).any { it.label().contains(qq, true) }
+            }
+            if (names.isEmpty()) {
+                body.addView(TextView(this@MainActivity).apply {
+                    text = if (all.isEmpty()) "Library is empty. Saved translations appear here." else "No book matches \"$qq\"."
+                    textSize = Type.label
+                    setTextColor(UiTheme.dim)
+                    setPadding(dp(6), dp(18), dp(6), dp(18))
+                })
+                return
+            }
+            for (n in names) {
+                val chs = Store.chapters(this@MainActivity, n)
+                val info = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(4), dp(10), dp(4), dp(10))
+                    contentDescription = "$n, ${chs.size} chapters"
+                    addView(Covers.view(this@MainActivity, n, 40, 56, 9, 17f), LinearLayout.LayoutParams(dp(40), dp(56)).also { it.marginEnd = dp(12) })
+                    addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(TextView(this@MainActivity).apply {
+                            text = n
+                            textSize = Type.body
+                            typeface = medium
+                            setTextColor(UiTheme.text)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                        })
+                        addView(TextView(this@MainActivity).apply {
+                            text = "${chs.size} chapters" + (chs.lastOrNull()?.label()?.let { " · " + it } ?: "")
+                            textSize = Type.caption
+                            setTextColor(UiTheme.faint)
+                            maxLines = 1
+                            ellipsize = android.text.TextUtils.TruncateAt.END
+                            setPadding(0, dp(2), 0, 0)
+                        })
+                    }, LinearLayout.LayoutParams(0, WC, 1f))
+                    addView(iconButton(Ic.DOTS, "Book actions", 18, 40, UiTheme.iconIdle) { bookSheet(n) },
+                        LinearLayout.LayoutParams(dp(40), dp(40)))
+                }
+                val row = FrameLayout(this@MainActivity).apply {
+                    background = Glass.ripple(this@MainActivity, null, 14)
+                    isClickable = true
+                    setOnClickListener { dlg.dismiss(); chapterListDialog(n) }
+                    addView(info, FrameLayout.LayoutParams(MP, WC))
+                }
+                body.addView(row, LinearLayout.LayoutParams(MP, WC))
+            }
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun afterTextChanged(s: Editable?) { q = s?.toString().orEmpty(); render() }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        render()
+        col.addView(body, LinearLayout.LayoutParams(MP, WC))
+        if (all.isNotEmpty()) {
+            col.addView(TextView(this).apply {
+                text = "Export all books"
+                textSize = Type.label
+                typeface = medium
+                setTextColor(UiTheme.accent)
+                gravity = Gravity.CENTER
+                setPadding(dp(14), dp(11), dp(14), dp(11))
+                background = Glass.ripple(this@MainActivity, Glass.solid(this@MainActivity, 0x0FFFFFFF, 14, UiTheme.strokeSoft), 14)
+                isClickable = true
+                setOnClickListener { dlg.dismiss(); exportAll(null) }
+            }, LinearLayout.LayoutParams(MP, WC).also { it.topMargin = dp(10) })
+        }
+        val scroll = MaxHeightScroll(this, (resources.displayMetrics.heightPixels * 0.82f).toInt()).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(col, ViewGroup.LayoutParams(MP, WC))
+        }
+        dlg = Sheets.create(this, scroll)
+        dlg.show()
+        LibraryModel.updates(this, markSeen = true)   // opening the library marks updates as seen
+    }
+
+    private fun bookSheet(name: String) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), dp(22))
+            background = Sheets.sheetBackground(this@MainActivity)
+        }
+        box.addView(sheetHandle())
+        box.addView(TextView(this).apply {
+            text = name
+            textSize = Type.heading
+            typeface = boldMedium
+            setTextColor(UiTheme.text)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(2), 0, dp(2), dp(10))
+        })
+        lateinit var dlg: Dialog
+        fun act(ic: Ic, title: String, sub: String, color: Int = UiTheme.text, onClick: () -> Unit) {
+            box.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                background = Glass.ripple(this@MainActivity, null, 14)
+                isClickable = true
+                setOnClickListener { onClick() }
+                addView(FrameLayout(this@MainActivity).apply {
+                    background = Glass.oval(0x14FFFFFF)
+                    addView(ImageView(this@MainActivity).apply { setImageDrawable(IconDrawable(ic, color)) },
+                        FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
+                }, LinearLayout.LayoutParams(dp(34), dp(34)).also { it.marginEnd = dp(12) })
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(TextView(this@MainActivity).apply {
+                        text = title; textSize = Type.body; typeface = medium; setTextColor(color)
+                    })
+                    addView(TextView(this@MainActivity).apply {
+                        text = sub; textSize = Type.caption; setTextColor(UiTheme.dim)
+                    })
+                }, LinearLayout.LayoutParams(0, WC, 1f))
+            }, LinearLayout.LayoutParams(MP, WC))
+        }
+        act(Ic.BOOK, "Chapter list", "Open any saved chapter", onClick = { dlg.dismiss(); chapterListDialog(name) })
+        act(Ic.SAVE, "Export as text", "Save this book with the system file picker", onClick = { dlg.dismiss(); exportAll(name) })
+        act(Ic.EDIT, "Rename", "Change the name used for future chapters", onClick = {
+            dlg.dismiss()
+            renameBookDialog(name)
+        })
+        act(Ic.TRASH, "Delete book", "Remove every saved chapter", UiTheme.danger, onClick = {
+            dlg.dismiss()
+            Sheets.confirm(this, "Delete book?", "All saved chapters of \"$name\" will be removed. This cannot be undone.", "Delete", danger = true) {
+                Store.deleteNovel(this, name)
+                notifyLibraryChanged()
+                toast("Deleted $name")
+            }
+        })
+        dlg = Sheets.create(this, box)
+        dlg.show()
+    }
+
+    private fun renameBookDialog(old: String) {
+        val et = EditText(this).apply {
+            setText(old)
+            setSingleLine()
+            setTextColor(UiTheme.text)
+            setHintTextColor(UiTheme.faint)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = Glass.solid(this@MainActivity, 0x0FFFFFFF, 12, UiTheme.strokeSoft)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(16))
+            background = Glass.panel(this@MainActivity, Space.radiusL, strong = true)
+            addView(TextView(this@MainActivity).apply {
+                text = "Rename book"
+                textSize = Type.heading
+                typeface = boldMedium
+                setTextColor(UiTheme.text)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "Future chapters saved from this book use the new name too."
+                textSize = Type.label
+                setTextColor(UiTheme.dim)
+                setPadding(0, dp(6), 0, dp(12))
+            })
+            addView(et, LinearLayout.LayoutParams(MP, WC))
+        }
+        val dlg = Sheets.create(this, box, bottom = false, dim = 0.55f)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, dp(16), 0, 0)
+        }
+        row.addView(TextView(this).apply {
+            text = "Cancel"
+            textSize = Type.body
+            typeface = medium
+            setTextColor(UiTheme.text)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = Glass.ripple(this@MainActivity, Glass.solid(this@MainActivity, 0x14FFFFFF, Space.radiusM, UiTheme.strokeSoft), Space.radiusM)
+            setOnClickListener { dlg.dismiss() }
+        }, LinearLayout.LayoutParams(WC, WC).also { it.marginEnd = dp(8) })
+        row.addView(TextView(this).apply {
+            text = "Save"
+            textSize = Type.body
+            typeface = medium
+            setTextColor(UiTheme.onAccent)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            background = Glass.ripple(this@MainActivity, Glass.accent(this@MainActivity, Space.radiusM), Space.radiusM)
+            setOnClickListener {
+                val n = et.text.toString().trim()
+                if (n.isNotEmpty()) Store.rename(this@MainActivity, old, n)
+                dlg.dismiss()
+                notifyLibraryChanged()
+            }
+        }, LinearLayout.LayoutParams(WC, WC))
+        box.addView(row, LinearLayout.LayoutParams(MP, WC))
+        dlg.show()
+    }
+
+    /** More-actions sheet for a saved book, opened from the home Library section. */
+    private fun shelfMoreSheet(s: LibraryModel.Shelf) = bookSheet(s.name)
+
+    private fun chapterListDialog(name: String) {
+        val l = Store.chapters(this, name)
+        if (l.isEmpty()) return
+        listDialog(name + "\nLong-press a chapter to delete it", l.map { it.label() },
+            { i ->
+                LibraryModel.recordRead(this, name, l[i].id)
+                startActivity(Intent(this, ReaderActivity::class.java).putExtra("novel", name).putExtra("id", l[i].id))
+            },
+            { i ->
+                Sheets.confirm(this, "Delete chapter?", "\"${l[i].label()}\" will be removed from the library.", "Delete", danger = true) {
+                    Store.delete(this, l[i].id)
+                    notifyLibraryChanged()
+                }
+            })
     }
 
     // ------------------------------------------------------------------ home screen
@@ -3932,7 +4544,16 @@ return t.length>=40?'TXT:'+t:'';
     private fun refreshHome() {
         if (!::homeView.isInitialized) return
         val novel = siteShortcuts().map { HomeSite(it.first, it.second) }
-        homeView.render(homeRecents(), novel, comicSiteShortcuts())
+        homeView.render(
+            homeRecents(), novel, comicSiteShortcuts(),
+            LibraryModel.shelves(this), LibraryModel.updates(this), LibraryModel.sources(this)
+        )
+    }
+
+    /** Library previews changed (book opened, chapter fetched, source toggled). */
+    private fun notifyLibraryChanged() {
+        if (!::homeView.isInitialized) return
+        handler.post { if (isFinishing) return@post; refreshHome() }
     }
 
     /** Webtoon / comic starting points. Edit this list to add your own sites. */
@@ -4318,23 +4939,50 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     private fun showLinkMenu(url: String) {
-        val shown = if (url.length > 70) url.take(67) + "…" else url
-        AlertDialog.Builder(this)
-            .setTitle(shown)
-            .setItems(arrayOf("Open in new tab", "Open in background tab", "Copy link address")) { _, which ->
-                when (which) {
-                    0 -> newBrowserTab(url)
-                    1 -> {
-                        saveCurrentTabState()
-                        browserTabs.add(BrowserTab("New Tab", url))
-                        renderTabs()
-                        persistBrowserTabs()
-                        toast("Opened in background tab (${browserTabs.size})")
-                    }
-                    2 -> { copy(url); toast("Link copied") }
-                }
-            }
-            .show()
+        val shown = if (url.length > 90) url.take(87) + "…" else url
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), dp(16))
+            background = Sheets.sheetBackground(this@MainActivity)
+        }
+        box.addView(Sheets.handle(this))
+        val host = try { Uri.parse(url).host.orEmpty().removePrefix("www.") } catch (_: Exception) { "" }
+        box.addView(TextView(this).apply {
+            text = host.ifBlank { "Link" }
+            textSize = Type.heading
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        box.addView(TextView(this).apply {
+            text = shown
+            textSize = Type.caption
+            setTextColor(UiTheme.role(UiTheme.Role.DIM))
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setPadding(0, dp(4), 0, dp(10))
+            isTextSelectable = true
+        })
+        lateinit var dlg: Dialog
+        val g = sheetGroup()
+        var left = 3
+        fun row(ic: Ic, label: String, action: () -> Unit) {
+            left--
+            g.addView(sheetRow(ic, label, left == 0) { dlg.dismiss(); action() }.view)
+        }
+        row(Ic.FORWARD, "Open in new tab") { newBrowserTab(url) }
+        row(Ic.LAYERS, "Open in background tab") {
+            saveCurrentTabState()
+            browserTabs.add(BrowserTab("New Tab", url))
+            renderTabs()
+            persistBrowserTabs()
+            toast("Opened in background tab (${browserTabs.size})")
+        }
+        row(Ic.SHARE, "Copy link address") { copy(url); toast("Link copied") }
+        box.addView(g, LinearLayout.LayoutParams(MP, WC))
+        dlg = Sheets.create(this, box)
+        dlg.show()
     }
 
     private fun newBrowserTab(url: String) {
@@ -4669,6 +5317,10 @@ return t.length>=40?'TXT:'+t:'';
     @Suppress("DEPRECATION")
     private fun applyDark() {
         val d = darkMode()
+        // App chrome follows the reader's Dark Mode choice: pages forced dark -> Night. Otherwise the
+        // appearance chosen in Settings › Appearance decides (Night is the default identity).
+        val wantDarkChrome = if (d == 2) true else Prefs.get(this, "appTheme", "dark") != "light"
+        if (UiTheme.dark != wantDarkChrome) { UiTheme.dark = wantDarkChrome; applyAppAppearance() }
         for (wv in listOf(novelWv, chatWv)) {
             val on = d != 0
             if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
@@ -4969,6 +5621,9 @@ return t.length>=40?'TXT:'+t:'';
             if (changed && !first && ::modeOverlay.isInitialized) modeOverlay.play(idx)
         }
         if (::extractBtn.isInitialized) extractBtn.modeIndex = idx
+        if (::expandLabel.isInitialized && ::expandBarPill.isInitialized && expandBarPill.visibility == View.VISIBLE) {
+            expandLabel.text = pageTitleShort()
+        }
         refreshPrefetchChip()
     }
 
@@ -4978,12 +5633,20 @@ return t.length>=40?'TXT:'+t:'';
         val show = currentReadMode() != ReadMode.REALTIME && mode != Mode.CHAT && !homeVisible()
         prefetchChip.visibility = if (show) View.VISIBLE else View.GONE
         val on = Prefs.bool(this, "prefetchNextChapter")
-        prefetchChip.text = if (on) "Ahead ON" else "Ahead OFF"
-        prefetchChip.background = GradientDrawable().apply {
-            cornerRadius = dp(14).toFloat()
-            setColor(if (on) 0xEB2FBF8A.toInt() else 0xD92A2E3F.toInt())
-            setStroke(dp(1), 0x38FFFFFF)
-        }
+        prefetchChip.text = if (on) "Ahead on" else "Ahead off"
+        val fg = if (on) UiTheme.role(UiTheme.Role.OK) else UiTheme.role(UiTheme.Role.DIM)
+        prefetchChip.setTextColor(fg)
+        val bi = IconDrawable(Ic.BOLT, fg)
+        bi.setBounds(0, 0, dp(13), dp(13))
+        prefetchChip.setCompoundDrawablesRelative(bi, null, null, null)
+        prefetchChip.background = Glass.ripple(
+            this,
+            Glass.solid(this, UiTheme.role(UiTheme.Role.GLASS_TOP), 18,
+                if (on) UiTheme.withAlpha(UiTheme.role(UiTheme.Role.OK), 0x66) else UiTheme.role(UiTheme.Role.STROKE)),
+            18
+        )
+        prefetchChip.contentDescription = if (on) "Translate next chapter ahead: on. Tap to turn off"
+        else "Translate next chapter ahead: off. Tap to turn on"
     }
 
     /** One place for the prefetch switch, used by the chip and by the menu row. */
@@ -5096,7 +5759,322 @@ return t.length>=40?'TXT:'+t:'';
         }
         if (target != ReadMode.NOVEL) Prefs.put(this, "lastToonSub", if (target == ReadMode.REALTIME) "rt" else "scan")
         refreshModeChip()
+        applyReaderChrome(target)
         trackReadModeSelection()
+    }
+
+    private lateinit var topBarOuter: View
+    private lateinit var expandBarPill: LinearLayout
+    private lateinit var expandIcon: ImageView
+    private lateinit var expandLabel: TextView
+    private lateinit var readerTitleColumn: LinearLayout
+    private lateinit var readerStatusDot: View
+    private lateinit var readerStatusText: TextView
+    private var expandedAddress = false
+    private var boxedTop = false
+
+    /** One line of live reader state under the page title ("Reading panel 2/5 · OCR"). */
+    private fun setReaderStatus(text: String?, color: Int) {
+        if (!::readerStatusText.isInitialized) return
+        if (text.isNullOrBlank()) {
+            readerStatusText.visibility = View.GONE
+            readerStatusDot.visibility = View.GONE
+            return
+        }
+        readerStatusText.text = text
+        readerStatusText.setTextColor(color)
+        readerStatusText.visibility = View.VISIBLE
+        readerStatusDot.background = Glass.oval(color)
+        readerStatusDot.visibility = View.VISIBLE
+        readerTitleColumn.contentDescription = "${expandLabel.text}. $text"
+    }
+
+    /** "Read this page again": the same pass the bolt runs, without leaving the reader. */
+    private fun reScanReaderPage() {
+        if (homeVisible()) { showHome(); return }
+        if (currentReadMode() == ReadMode.REALTIME) {
+            startWebModeExtract(navToken, realtimeViewport = true)
+            toast("Live: re-reading the visible panel")
+        } else if (webModeOn()) {
+            startWebModeExtract(navToken)
+            toast("Scanning: re-reading this chapter")
+        } else {
+            val ch = lastChapter
+            if (ch == null) toast("Open a chapter first")
+            else { enqueue(ch); toast("Chapter added to the translation queue") }
+        }
+    }
+
+    /**
+     * Reader chrome per mode ("Calm"):
+     *  - Novel: full browser chrome — tabs, address field, reload. Reading the current page needs no dock
+     *    for chapters, so the dock stays as built.
+     *  - WebToon (Scan / Live): one quiet pill — back, page title with a live status line, then a thin
+     *    divider and the reader actions (re-scan, reader status, tabs, reload, overflow). The dock is gone;
+     *    the controls it held (previous/next chapter, view switch, modes) live in the overflow sheet, and
+     *    the extract bolt floats above the page. No dark bars sit over the comic art.
+     *
+     * The two WebToon readers share this one pill; only the status line and the re-scan target differ,
+     * so Scan and Live can never drift apart again.
+     */
+    private fun applyReaderChrome(read: ReadMode) {
+        if (!::chromeTopView.isInitialized || !::topBarOuter.isInitialized) return
+        val toon = read != ReadMode.NOVEL
+        chromeTopView.background = if (toon) null else floatingBarBg(26)
+        (topBarOuter.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+            if (toon) { lp.setMargins(0, dp(8), 0, dp(4)); lp.height = dp(48); topBarOuter.layoutParams = lp }
+            else { lp.setMargins(0, dp(8), 0, dp(4)); lp.height = dp(52); topBarOuter.layoutParams = lp }
+        }
+        if (toon) {
+            expandBarPill.visibility = View.VISIBLE
+            expandBarPill.background = Glass.floating(this, 26)
+            expandLabel.text = pageTitleShort()
+            expandIcon.setImageDrawable(IconDrawable(Ic.BACK, UiTheme.role(UiTheme.Role.TEXT), 1.9f))
+            tabCountBtn.visibility = View.VISIBLE
+            setReaderStatus(
+                if (read == ReadMode.REALTIME) "Live · reading panels as you scroll" else "Scan · tap the bolt to read this page",
+                if (read == ReadMode.REALTIME) (if (UiTheme.dark) UiTheme.end(2) else UiTheme.role(UiTheme.Role.ACCENT_END))
+                else (if (UiTheme.dark) UiTheme.start(1) else UiTheme.role(UiTheme.Role.ACCENT))
+            )
+            applyReaderBars()
+        } else {
+            expandBarPill.visibility = View.GONE
+            addressBox.visibility = View.VISIBLE
+            tabCountBtn.visibility = View.VISIBLE
+            (chromeTopView.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+                if (lp.bottomMargin != 0) { lp.bottomMargin = 0; chromeTopView.layoutParams = lp }
+            }
+            syncToonBars()
+        }
+    }
+
+    /** Title of the calm reader pill: the page's own title, or the mode + site when that is unhelpful. */
+    private fun pageTitleShort(): String {
+        val t = try { novelWv.title.orEmpty().trim() } catch (_: Exception) { "" }
+        if (t.isNotEmpty() && t.length <= 42) return t
+        val host = try { Uri.parse(novelWv.url.orEmpty()).host.orEmpty().removePrefix("www.") } catch (_: Exception) { "" }
+        return when (currentReadMode()) {
+            ReadMode.REALTIME -> "Live" + if (host.isNotBlank()) " · $host" else ""
+            ReadMode.SCAN -> "Scan" + if (host.isNotBlank()) " · $host" else ""
+            else -> t.ifBlank { "Novel Studio" }
+        }
+    }
+
+    /**
+     * The reader's "⋯" sheet: everything that used to hide inside the long site menu, grouped so typical
+     * reading comes first. Rows reuse the same handlers as the main menu (one behaviour, two entries).
+     */
+    private fun readerControlsSheet() {
+        if (homeVisible()) { showHome(); return }
+        val mode = currentReadMode()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(18))
+            background = Sheets.sheetBackground(this@MainActivity)
+        }
+        box.addView(Sheets.handle(this))
+        box.addView(TextView(this).apply {
+            text = when (mode) {
+                ReadMode.NOVEL -> "Reader controls"
+                ReadMode.SCAN -> "Scan reader controls"
+                ReadMode.REALTIME -> "Live reader controls"
+            }
+            textSize = Type.heading
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            setPadding(dp(4), 0, dp(4), dp(2))
+        })
+        box.addView(TextView(this).apply {
+            text = when (mode) {
+                ReadMode.NOVEL -> "Text translation · chapter navigation · display"
+                ReadMode.SCAN -> "Bolt reads this chapter once · re-scan picks a bubble"
+                ReadMode.REALTIME -> "Visible panels are read and translated as you scroll"
+            }
+            textSize = Type.caption
+            setTextColor(UiTheme.role(UiTheme.Role.DIM))
+            setPadding(dp(4), 0, dp(4), dp(10))
+        })
+        lateinit var dlg: Dialog
+        fun group(title: String, vararg rows: Pair<Ic, String>) {
+            if (rows.isEmpty()) return
+            box.addView(Sheets.sectionLabel(this, title))
+            val g = sheetGroup()
+            rows.forEachIndexed { i, (ic, label) ->
+                g.addView(sheetRow(ic, label, i == rows.lastIndex) {
+                    dlg.dismiss()
+                    readerControlAction(label)
+                }.view)
+            }
+            box.addView(g, LinearLayout.LayoutParams(MP, WC))
+        }
+        group(
+            "CHAPTER",
+            Ic.BACK to "Previous chapter",
+            Ic.FORWARD to "Next chapter",
+            Ic.SCAN to "Read this chapter again",
+            Ic.BOLT to "Read the chapter with OCR" + if (webModeOn()) " (on)" else " (off)"
+        )
+        group(
+            "PAGE",
+            Ic.RELOAD to "Reload the page",
+            Ic.SEARCH to "Find translated text on the page",
+            Ic.SHARE to "Share this page",
+            Ic.LIBRARY to "Open the library"
+        )
+        group(
+            "DISPLAY",
+            Ic.SLIDERS to "Reading mode…",
+            Ic.TEXT to "Font: " + currentFontName(),
+            Ic.MOON to menuDarkLabel(),
+            Ic.SLIDERS to menuBarsLabel(),
+            Ic.PALETTE to "App appearance: " + appearanceLabel()
+        )
+        group(
+            "TRANSLATE",
+            Ic.LOCK to "Chatbot login",
+            Ic.SPARK to "Edit prompt for this reader",
+            Ic.CLOCK to "Reader activity and status"
+        )
+        val scroll = MaxHeightScroll(this, (resources.displayMetrics.heightPixels * 0.8f).toInt()).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(box, ViewGroup.LayoutParams(MP, WC))
+        }
+        dlg = Sheets.create(this, scroll)
+        dlg.show()
+    }
+
+    private fun readerControlAction(label: String) {
+        when {
+            label.startsWith("Previous chapter") -> step("prev")
+            label.startsWith("Next chapter") -> step("next")
+            label.startsWith("Read this chapter again") -> reScanReaderPage()
+            label.startsWith("Read the chapter with OCR") -> {
+                val on = !webModeOn()
+                applyWebModeFlag(on)
+                refreshModeChip()
+                toast(if (on) "OCR reading on — the bolt reads image chapters" else "OCR reading off — normal text extraction")
+            }
+            label.startsWith("Reload the page") -> reloadPage()
+            label.startsWith("Find translated") -> findTranslatedText()
+            label.startsWith("Share") -> {
+                val u = novelWv.url.orEmpty()
+                if (u.isBlank()) toast("No page to share")
+                else startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"; putExtra(Intent.EXTRA_TEXT, u)
+                }, "Share page"))
+            }
+            label.startsWith("Open the library") -> openLibraryManager()
+            label.startsWith("Reading mode") -> showModeSheet()
+            label.startsWith("Font") -> {
+                Prefs.put(this, "trSize", ((Prefs.sizeIdx(this) + 1) % Prefs.SIZES.size).toString())
+                val ch = lastChapter
+                if (ch != null && hasTr) shownTrRaw?.let { applyTranslation(ch, it, false) }
+                toast("Translation size: " + currentFontName())
+            }
+            label.startsWith("Dark Mode") -> {
+                Prefs.put(this, "dark", ((darkMode() + 1) % 3).toString())
+                applyDark()
+                toast(menuDarkLabel())
+            }
+            label.startsWith("Bars") -> {
+                Prefs.put(this, "barsMode", ((barsMode() + 1) % 3).toString())
+                if (barsHidden && !barsAnimating) setBarsHidden(false)
+                syncToonBars()
+                toast(menuBarsLabel())
+            }
+            label.startsWith("App appearance") -> {
+                setAppAppearance(!UiTheme.dark)
+                applyAppAppearance()
+                toast("App appearance: " + appearanceLabel())
+            }
+            label.startsWith("Chatbot login") -> loginChatbot()
+            label.startsWith("Edit prompt") -> when (currentReadMode()) {
+                ReadMode.REALTIME -> editRealtimePrompt()
+                ReadMode.SCAN -> editScanPrompt()
+                else -> editPrompt()
+            }
+            label.startsWith("Reader activity") -> showReaderStatusSheet()
+        }
+    }
+
+    private fun currentFontName(): String = when (Prefs.sizeIdx(this)) {
+        0 -> "Small"
+        1 -> "Medium"
+        2 -> "Large"
+        else -> "Extra large"
+    }
+
+    /**
+     * Translates the page's text and jumps to the first changed bubble. Pure navigation helper over the
+     * existing overlay, so nothing about text placement changes.
+     */
+    private fun findTranslatedText() {
+        novelWv.evaluateJavascript(
+            "(function(){try{var b=document.querySelector('#__ns_wm_overlay .__ns_b');if(!b)return 'none';" +
+                "var r=b.getBoundingClientRect();window.scrollBy(0,r.top-Math.round(window.innerHeight*0.3));" +
+                "b.style.transition='box-shadow .2s';var o=b.style.boxShadow;b.style.boxShadow='0 0 0 3px #8B93FF';" +
+                "setTimeout(function(){b.style.boxShadow=o;},1400);return 'ok';}catch(e){return 'err';}})()"
+        ) { raw ->
+            if (decode(raw).contains("none")) toast("No translated text on this page yet")
+        }
+    }
+
+    /** Status sheet: the same live states the dock ring and the activity chip show, spelled out. */
+    private fun showReaderStatusSheet() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(10), dp(18), dp(18))
+            background = Sheets.sheetBackground(this@MainActivity)
+        }
+        box.addView(Sheets.handle(this))
+        box.addView(TextView(this).apply {
+            text = "Reader status"
+            textSize = Type.heading
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+        })
+        fun row(label: String, value: String, color: Int) {
+            box.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(48)
+                addView(View(this@MainActivity).apply { background = Glass.oval(color) },
+                    LinearLayout.LayoutParams(dp(8), dp(8)).also { it.marginEnd = dp(12) })
+                addView(TextView(this@MainActivity).apply {
+                    text = label
+                    textSize = Type.body
+                    setTextColor(UiTheme.role(UiTheme.Role.DIM))
+                }, LinearLayout.LayoutParams(0, WC, 1f))
+                addView(TextView(this@MainActivity).apply {
+                    text = value
+                    textSize = Type.body
+                    typeface = medium
+                    gravity = Gravity.END
+                    setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+                })
+            }, LinearLayout.LayoutParams(MP, dp(48)))
+        }
+        val mode = currentReadMode()
+        row("Reading mode", when (mode) {
+            ReadMode.NOVEL -> "Novel"
+            ReadMode.SCAN -> "Webtoon · Scanning"
+            ReadMode.REALTIME -> "Webtoon · Live"
+        }, when (mode) {
+            ReadMode.NOVEL -> UiTheme.role(UiTheme.Role.ACCENT_START)
+            ReadMode.SCAN -> if (UiTheme.dark) UiTheme.start(1) else UiTheme.role(UiTheme.Role.ACCENT)
+            else -> if (UiTheme.dark) UiTheme.start(2) else UiTheme.role(UiTheme.Role.ACCENT_END)
+        })
+        row("OCR engine", currentOcrEngineLabel(), UiTheme.role(UiTheme.Role.ACCENT))
+        row("Last OCR run", lastActuallyUsedOcrEngine(), UiTheme.role(UiTheme.Role.DIM))
+        row("Page stage", webModeStage.ifBlank { if (running != null) "Translating" else "Idle" },
+            if (running != null || webModePct >= 0) UiTheme.role(UiTheme.Role.OK) else UiTheme.role(UiTheme.Role.FAINT))
+        row("Translation", if (Prefs.auto(this)) "Background insert" else "Copy mode", UiTheme.role(UiTheme.Role.DIM))
+        row("Chatbot", currentBotKey.ifBlank { "none" }, UiTheme.role(UiTheme.Role.DIM))
+        box.addView(Buttons.make(this, "Close", Buttons.Style.TONAL, heightDp = 46) { }, LinearLayout.LayoutParams(MP, dp(46)).also { it.topMargin = dp(14) })
+        val dlg = Sheets.create(this, box)
+        (box.getChildAt(box.childCount - 1) as TextView).setOnClickListener { dlg.dismiss() }
+        dlg.show()
     }
 
     private fun showModeSheet() {
@@ -5259,7 +6237,7 @@ return t.length>=40?'TXT:'+t:'';
             if (extractBtn.parent === floatBoltHost) {
                 floatBoltHost.removeView(extractBtn)
                 extractBtn.translationY = -dp(8).toFloat()   // same lift as the initial build
-                dockBar.addView(extractBtn, 3, extractLp())
+                dockBar.getChildAt(0).let { (it as ViewGroup).addView(extractBtn, 1, extractLp()) }  // primary row, between ‹ and ›
             }
             floatBoltHost.visibility = View.GONE
             chromeTopView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -5306,14 +6284,6 @@ return t.length>=40?'TXT:'+t:'';
 
     private fun menuOcrModelsLabel(): String =
         "🧠 OCR Engine: " + currentOcrEngineLabel() + "\nLast actually used: " + lastActuallyUsedOcrEngine()
-
-    private fun shortOcrEngineName(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
-        "paddle_small", "paddle_heavy" -> "Paddle"
-        "rapid_onnx" -> "RapidOCR"
-        "manga" -> "Manga OCR"
-        "lens" -> "Lens"
-        else -> "ML Kit"
-    }
 
     private fun currentOcrEngineLabel(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
         "paddle_small" -> "PaddleOCR Small"
@@ -5499,9 +6469,10 @@ return t.length>=40?'TXT:'+t:'';
 
     /** Dark translucent pill used behind the top bar and the dock (readable over any page). */
     private fun floatingBarBg(radiusDp: Int): GradientDrawable =
-        GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xEE232739.toInt(), 0xEE141726.toInt())).apply {
+        GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(UiTheme.role(UiTheme.Role.GLASS_TOP), UiTheme.role(UiTheme.Role.GLASS_BOTTOM))).apply {
             cornerRadius = dp(radiusDp).toFloat()
-            setStroke(dp(1), UiTheme.stroke)
+            setStroke(dp(1), UiTheme.role(UiTheme.Role.STROKE))
         }
 
     /**
@@ -5511,6 +6482,7 @@ return t.length>=40?'TXT:'+t:'';
      */
     private fun applyFloatingBars() {
         try {
+            if (currentReadMode() != ReadMode.NOVEL && mode == Mode.NOVEL) { applyReaderBars(); return }
             if (!::chromeTopView.isInitialized || !::dockWrapView.isInitialized || !::contentHolderView.isInitialized) return
             if (barsHidden || barsAnimating) return
             val topLp = chromeTopView.layoutParams as? LinearLayout.LayoutParams ?: return
@@ -5535,13 +6507,34 @@ return t.length>=40?'TXT:'+t:'';
             val insetCss = (botH / resources.displayMetrics.density).toInt()
             WebModeWriter.bottomInsetPx = insetCss
             novelWv.evaluateJavascript("try{document.documentElement.style.setProperty('--ns-bi','" + insetCss + "px');}catch(e){}", null)
-            reOcrBtn?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(134) + botH; b.layoutParams = it } }
-            glossaryFab?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(184) + botH; b.layoutParams = it } }
+            reOcrBtn?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(136) + botH; b.layoutParams = it } }
+            glossaryFab?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(192) + botH; b.layoutParams = it } }
             activityChip?.let { c -> (c.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(14) + botH; c.layoutParams = it } }
             (progressBox.layoutParams as? FrameLayout.LayoutParams)?.let { it.topMargin = dp(10) + topH; progressBox.layoutParams = it }
             (scanDot.layoutParams as? FrameLayout.LayoutParams)?.let { it.topMargin = dp(10) + topH; scanDot.layoutParams = it }
         } catch (_: Exception) { }
     }
+
+    /**
+     * Calm reader bars (Scanning + Live): the page reaches the top edge and the quiet pill floats over it.
+     * The dock stays as a normal row under the page (so its notification slot, progress strip and controls
+     * keep working and nothing is drawn over the comic art). Only the top bar floats.
+     */
+    private fun applyReaderBars() {
+        try {
+            if (!::chromeTopView.isInitialized) return
+            val topLp = chromeTopView.layoutParams as? LinearLayout.LayoutParams ?: return
+            val topH = if (chromeTopView.height > 0) chromeTopView.height else dp(64)
+            if (topLp.bottomMargin == -topH) return
+            topLp.bottomMargin = -topH
+            chromeTopView.layoutParams = topLp
+            chromeTopView.elevation = 0f
+            fl(progressBox)?.let { lp -> lp.topMargin = dp(8) + topH; progressBox.layoutParams = lp }
+            fl(scanDot)?.let { lp -> lp.topMargin = dp(8) + topH; scanDot.layoutParams = lp }
+        } catch (_: Throwable) { }
+    }
+
+    private fun fl(v: View?): FrameLayout.LayoutParams? = v?.layoutParams as? FrameLayout.LayoutParams
 
     private fun cycleMode() {
         setMode(when (mode) {
@@ -5907,11 +6900,14 @@ return t.length>=40?'TXT:'+t:'';
             if (Prefs.adblock(this@MainActivity) && view === novelWv && url != null) {
                 // Debug evidence only: what the cosmetic filter touched + how much text the page has.
                 handler.postDelayed({
-                    if (novelWv.url == url) novelWv.evaluateJavascript(AdBlock.probeJs()) { AdBlock.recordProbe(url, it) }
+                    if (novelWv.url == url) novelWv.evaluateJavascript(AdBlock.probeJs()) { AdBlock.recordProbe(this@MainActivity, url, it) }
                 }, 2500)
             }
             if (darkMode() == 2) view?.evaluateJavascript(Js.DARK_ON, null)
             if (url != null) {
+                if (view === novelWv && ::expandLabel.isInitialized && expandBarPill.visibility == View.VISIBLE) {
+                    expandLabel.text = pageTitleShort()
+                }
                 Prefs.put(this@MainActivity, "lastNovelUrl", url)
                 if (view === novelWv && !restoringTab) {
                     browserTabs.getOrNull(activeTabIndex)?.url = url
@@ -6000,6 +6996,19 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     // ================================================================== extraction
+    /**
+     * Pull the reply text out of a readLen() answer (the LAST of its 10 fields, URI-encoded). Kept
+     * here so the JSON unquoting is applied first and a literal '|' in the answer cannot shift the
+     * fields. After dropping field 0 nine remain, so the reply is at index 8; the limit = 9 stops
+     * the split there and keeps any '|' inside the reply.
+     */
+    internal fun pollReplyText(raw: String?): String {
+        val joined = decode(raw)
+        val encoded = joined.substringAfter('|', "").split('|', limit = 9).getOrNull(8) ?: ""
+        if (encoded.isEmpty()) return ""
+        return try { java.net.URLDecoder.decode(encoded, "UTF-8") } catch (_: Exception) { "" }
+    }
+
     private fun decode(raw: String?): String = try {
         if (raw == null || raw == "null") "" else JSONArray("[$raw]").getString(0)
     } catch (e: Exception) { "" }
@@ -6511,7 +7520,18 @@ return t.length>=40?'TXT:'+t:'';
         // the page. Let it finish caching upcoming panels while the visible panel is scanned and
         // translated; cancelling it on every viewport change made the 9-panel read-ahead starve.
         // For a manual/full-chapter extraction, stop read-ahead so foreground extraction gets priority.
-        if (!realtimeViewport) {
+        // But while the reader is ON this viewport, the visible panel always owns the OCR engines:
+        // a 4-panel read-ahead already occupied them for 13-20 s each (log: gateWaitMs=20835), so a
+        // fresh panel waited almost half a minute for pixels the reader was looking at.
+        var resumeAheadAfterVisible = false
+        if (realtimeViewport) {
+            resumeAheadAfterVisible = aheadOcrHandle != null
+            aheadOcrHandle?.cancel()
+            aheadOcrHandle = null
+            aheadOcrSeq++
+            aheadOcrStage = ""
+            aheadOcrPct = -1
+        } else {
             aheadOcrHandle?.cancel()
             aheadOcrHandle = null
             aheadOcrSeq++
@@ -6546,6 +7566,9 @@ return t.length>=40?'TXT:'+t:'';
                     webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()
                     webModeStage = stage
                     webModePct = pct
+                    // Real-time runs through the same status label. The chip used to be suppressed in
+                    // realtime mode, so a 30-55 s panel read showed nothing at all on screen.
+                    if (realtimeViewport) showRealtimeStatus(stage, pct)
                     updateProgressUi()
                 }
             },
@@ -6665,12 +7688,29 @@ return t.length>=40?'TXT:'+t:'';
                                 handleChapter(out.chapter, useSavedTranslation = useSaved)
                             }
                             // Only realtime viewport scans may resume the ahead-translation queue.
-                            if (realtimeViewport) handler.postDelayed({ pumpRealtimeAheadTranslation() }, 350L)
+                            if (realtimeViewport) {
+                                handler.postDelayed({ pumpRealtimeAheadTranslation() }, 350L)
+                                // The aheadOCR pass was cancelled while this viewport was read (visible
+                                // pixels always win). Start a fresh one only AFTER the batch has been
+                                // handed to the chatbot, so the next panels are ready when the reader scrolls.
+                                if (resumeAheadAfterVisible && aheadOcrHandle == null && webModeHandle == null) {
+                                    handler.postDelayed({
+                                        if (token == navToken && aheadOcrHandle == null && webModeHandle == null &&
+                                            DeepSeekRealtimeTranslation.isEnabled(this)) startAheadOcr()
+                                    }, 600L)
+                                }
+                            }
                         }
                         is WebModeOutcome.Failure -> {
                             // Even when OCR/network fails, the clean screenshot fingerprint may already
                             // have proved that this canvas now shows a different manga page.
                             clearCanvasTransitionOverlay(novelWv.url.orEmpty())
+                            if (realtimeViewport && resumeAheadAfterVisible && out.error != WebModeError.NAVIGATION_INVALIDATED) {
+                                handler.postDelayed({
+                                    if (token == navToken && aheadOcrHandle == null && webModeHandle == null &&
+                                        DeepSeekRealtimeTranslation.isEnabled(this)) startAheadOcr()
+                                }, 1200L)
+                            }
                             updateProgressUi()
                             deepSeekLastOcrAtMs = System.currentTimeMillis()
                             if (realtimeViewport &&
@@ -8067,6 +9107,7 @@ return t.length>=40?'TXT:'+t:'';
         val isWtrLab = host == "wtr-lab.com" || host.endsWith(".wtr-lab.com")
         val marked = addInternalMarkers(ch.text, splitSingleLines = isWtrLab)
         jobMarkers = Regex("(?m)^\\[\\d{3,}\\] ").findAll(marked).count()
+        replyReReads = 0
         val markerInstruction = """
 [Internal paragraph markers]
 Each paragraph starts with a marker such as [001], [002], [003].
@@ -8247,6 +9288,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 val sendFailed = parts.getOrNull(5) == "failed"
                 val uiDone = parts.getOrNull(6) == "1"
                 val meaningfulReply = parts.getOrNull(7) == "1"
+                // Reply text this poll already read (field 10, URI-encoded); see pollReplyText.
+                val pollText = pollReplyText(raw)
                 // Every marker has some text after it (even just "~" / "..." / "!!"): the chatbot did answer.
                 val filledReply = parts.getOrNull(8) == "1"
                 val got = parts.getOrNull(4) == "1" || n > n0
@@ -8299,7 +9342,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     RealtimeCompletionPolicy.noStopSignalThreshold(
                         this, if (livePanelBatch) 8 else 20
                     )
-                // A stable "[001]" without any translated body is not a completed answer.
+                // A stable "[001]" without any translated body is not a completed answer. "filledReply"
+                // now means every marker carries a PLAUSIBLE body (Js.__plausible), so a reply whose
+                // only content is "[008] B" no longer looks finished, while an answer that really did
+                // translate every bubble still completes even if __meaningful judged the whole text
+                // chrome-like (CJK-only answers, for example).
                 val usableRealtimeReply = !livePanelBatch || meaningfulReply || (filledReply && allMarkers)
                 val completedByMarkers = got && usableRealtimeReply && effLen >= minReplyLength && !streaming &&
                     allMarkers && st >= markerStableNeeded
@@ -8318,6 +9365,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 updateProgressUi()
 
                 when {
+                    // Hand the reply this poll already read to finishJob. Only live bubble batches use it
+                    // (they carry no page markers to strip); every other path re-reads exactly as before.
+                    completed && isDeepSeekLivePanel(ch) && ReplyHandoff.usablePollText(
+                        pollText, got, completed
+                    ) != null -> {
+                        val reply = pollText!!
+                        val cacheStarted = android.os.SystemClock.elapsedRealtime()
+                        chatWv.evaluateJavascript(Js.cacheReply(reply)) {
+                            Log.i(
+                                "NovelStudioOCR",
+                                "REPLY_HANDOFF cacheMs=${android.os.SystemClock.elapsedRealtime() - cacheStarted} chars=${reply.length}"
+                            )
+                            finishJob(tok, ch, reply)
+                        }
+                    }
                     completed -> finishJob(tok, ch)
                     livePanelBatch && got && !meaningfulReply && !(filledReply && allMarkers) && !streaming && st >= 8 && elapsed >= 12_000L ->
                         failJob(tok, ch, "The chatbot returned only paragraph markers, not a translation. Tap ⚡ to retry.")
@@ -8362,10 +9424,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             .trim()
     }
 
-    private fun finishJob(tok: Int, ch: Chapter) {
+    /**
+     * [pollReply] = the reply the last completion poll already read. Live bubble batches use it directly
+     * (Js.cacheReply stored it for this readText call, which returns it without a page scan); every other
+     * job passes null and re-reads the page as before.
+     */
+    private fun finishJob(tok: Int, ch: Chapter, pollReply: String? = null) {
         if (tok != runToken) return
-        chatWv.evaluateJavascript(Js.readText()) { raw ->
-            if (tok != runToken) return@evaluateJavascript
+        // readText() returns the reply stored by Js.cacheReply for live batches without re-scanning the
+        // page; any other job has no cached reply and the page is read exactly as before.
+        chatWv.evaluateJavascript(Js.readText()) { raw -> completeJob(tok, ch, raw) }
+    }
+
+    private fun completeJob(tok: Int, ch: Chapter, raw: String) {
+        run {
+            if (tok != runToken) return@run
             // Only a request carrying its own bubble layout is a live overlay batch. A geometry-free
             // text fallback or a deliberate full-page extract must use the normal chapter pipeline.
             val livePanelBatch = isRealtimeBubbleBatch(ch)
@@ -8381,16 +9454,27 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 updateProgressUi()
                 startNext()
                 handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
-                return@evaluateJavascript
+                return@run
             }
             val rawTranslation = cleanReply(decode(raw))
             if (livePanelBatch && !hasMeaningfulRealtimeReply(rawTranslation)) {
+                // A chrome-only read ("Write a message…", "Message collapsed Show more") does not mean
+                // the chatbot failed: the DOM tracker can miss the answer's own nodes for one poll and
+                // the page still shows it. Re-read the page a couple of times before declaring that
+                // nothing was sent; the answer usually appears on the first re-read.
+                if (ReplyHandoff.shouldReRead(meaningful = false, attempts = replyReReads)) {
+                    replyReReads++
+                    Log.i("NovelStudioOCR", "REPLY_EMPTY re-read ${replyReReads}/${ReplyHandoff.MAX_RE_READS} (${rawTranslation.length} chars after clean)")
+                    handler.postDelayed({ finishJob(tok, ch) }, 250L)
+                    return@run
+                }
                 failJob(tok, ch, "The chatbot did not send any text. Just wait — the app will try again by itself.", autoRetry = true)
-                return@evaluateJavascript
+                return@run
             }
+            replyReReads = 0
             if (rawTranslation.length < (if (livePanelBatch) 2 else 30)) {
                 failJob(tok, ch, "Could not read the answer")
-                return@evaluateJavascript
+                return@run
             }
             // Markers are internal alignment data only. Never expose them in the
             // clipboard or saved chapter, but keep the raw marked response for DOM
@@ -8398,7 +9482,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             val t = stripInternalMarkers(rawTranslation)
             if (t.isBlank() || (!livePanelBatch && t.length < 30)) {
                 failJob(tok, ch, "Could not read the translation")
-                return@evaluateJavascript
+                return@run
             }
             val aheadTaskKey = keyOf(ch)
             val aheadTask = rtAheadTranslationTasksByJobKey[aheadTaskKey]
@@ -8407,7 +9491,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 // never save it as a chapter or try to put it on the screen early.
                 deferNextChatbotRequest()
                 finishRealtimeAheadTranslation(aheadTaskKey, aheadTask, rawTranslation)
-                return@evaluateJavascript
+                return@run
             }
             // Scanning: a reply that cannot be matched to the bubbles used to be saved as a good translation
             // (the AI always answers something). Treat it as a failure instead.
@@ -8417,7 +9501,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     val placed = WebModeLayout.align(rawTranslation, lay)
                     if (placed == null || placed.none { !it.isNullOrBlank() }) {
                         failJob(tok, ch, "The chatbot answer could not be matched to the page.", fallback = true)
-                        return@evaluateJavascript
+                        return@run
                     }
                 }
             }
@@ -8841,9 +9925,17 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             val wmLayout = if (livePanelBatch) realtimeBatchLayout(ch)
                 else WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
             val wmPlaced = wmLayout?.let { WebModeLayout.align(text, it) }
+            // Stage diagnostics: counts only, never the translation itself.
+            if (Log.isLoggable("NovelStudioOCR", Log.INFO)) {
+                val blocks = wmLayout?.bubbles?.size ?: 0
+                val placedCount = wmPlaced?.count { !it.isNullOrBlank() } ?: -1
+                val markerCount = Regex("\\[\\d{3,}\\]").findAll(text).count()
+                Log.i("NovelStudioOCR", "PLACE start live=$livePanelBatch blocks=$blocks placed=$placedCount markers=$markerCount")
+            }
             val wmScript: String
             if (livePanelBatch) {
                 if (wmLayout == null || wmPlaced == null) {
+                    Log.i("NovelStudioOCR", "PLACE skipped: layout=${wmLayout != null} placed=${wmPlaced != null}")
                     releaseDeepSeekHashBatch(ch)
                     toast("⚠️ This batch did not match the bubbles; nothing was placed in the wrong spot")
                     restoreChapterAfterBubbleJob(ch.url)
@@ -8856,11 +9948,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     Prefs.fontFile(this), pageKey(ch.url)
                 )
             } else if (wmLayout != null && wmPlaced != null) {
+                val scanPlaced = wmPlaced.count { v -> !v.isNullOrBlank() }
+                Log.i("NovelStudioOCR", "PLACE scan mode blocks=${wmLayout.bubbles.size} placed=$scanPlaced")
                 val translatedLayout = WebModeLayout.translated(wmLayout, wmPlaced)
                 WebModeLayoutStore.replace(this, ch.url, translatedLayout)
                 wmScript = WebModeWriter.bubbleScript(wmLayout, wmPlaced, Prefs.fontFile(this), pageKey(ch.url))
             } else {
                 // Scanning mode has no reader-view fallback: tell the user briefly (English) and point to Realtime mode.
+                Log.i("NovelStudioOCR", "PLACE skipped: no scan layout and no stored layout for this page")
                 toast("Something went wrong. Please use Realtime mode.")
                 return
             }
@@ -8871,6 +9966,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
                     return@evaluateJavascript
                 }
+                val placedOk = r != null && r.contains("ok")
+                Log.i("NovelStudioOCR", "PLACE result live=$livePanelBatch ok=$placedOk script=${wmScript.length}B")
                 if (r != null && r.contains("ok")) {
                     if (livePanelBatch) {
                         val matched = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
@@ -9146,6 +10243,85 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     }
 
     // ---- translation status card + the ring around the extract button
+    // ------------------------------------------------------------------ realtime status chip
+    private var rtChip: TextView? = null
+    private var rtChipAtMs = 0L
+
+    /**
+     * "Panel 2/4 - reading with Lens - 8s" for the live viewport read.
+     * Real-time used to be completely silent while a screen OCR took 5-55 s, which is exactly the
+     * "I cannot see what it is reading" complaint. This is a small, non-blocking label; it never
+     * covers the picture for long (auto-hides after the pass is quiet) and tapping it does nothing
+     * except dismiss, so it can sit above the reader without stealing taps from the page.
+     */
+    private fun showRealtimeStatus(stage: String, pct: Int) {
+        val label = rtChipLabel(stage, pct) ?: return
+        // The same stage also lives in the reader pill's second line: always visible there, out of the art.
+        setReaderStatus(stage + if (pct in 1..100) " · $pct%" else "",
+            if (UiTheme.dark) UiTheme.end(2) else UiTheme.role(UiTheme.Role.ACCENT_END))
+        rtChipAtMs = System.currentTimeMillis()
+        val chip = rtChip ?: TextView(this).apply {
+            textSize = Type.caption
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            elevation = dp(7).toFloat()
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(UiTheme.role(UiTheme.Role.GLASS_TOP))
+                setStroke(dp(1), UiTheme.role(UiTheme.Role.STROKE))
+            }
+            isClickable = true
+            setOnClickListener { hideRealtimeStatus() }
+            content?.addView(this, FrameLayout.LayoutParams(WC, WC).also {
+                it.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                it.bottomMargin = dp(56)
+            })
+            rtChip = this
+        }
+        chip.text = label
+        if (chip.visibility != View.VISIBLE) {
+            chip.alpha = 0f
+            chip.visibility = View.VISIBLE
+            chip.animate().alpha(1f).setDuration(140).start()
+        }
+        chip.bringToFront()
+        // The pages that never finish (dead Lens endpoint, missing model) must not leave a stale
+        // message on screen: hide it two seconds after the last stage update.
+        handler.removeCallbacks(rtChipHide)
+        handler.postDelayed(rtChipHide, 2500L)
+    }
+
+    private val rtChipHide = Runnable {
+        if (System.currentTimeMillis() - rtChipAtMs < 1800L) return@Runnable
+        hideRealtimeStatus()
+    }
+
+    private fun hideRealtimeStatus() {
+        val chip = rtChip ?: return
+        chip.animate().cancel()
+        chip.animate().alpha(0f).setDuration(180).withEndAction {
+            if (chip.alpha < 0.05f) chip.visibility = View.GONE
+        }.start()
+    }
+
+    /** Short, honest description of the current OCR stage; null means "nothing worth showing". */
+    private fun rtChipLabel(stage: String, pct: Int): String? {
+        val s = stage.trim()
+        if (s.isEmpty()) return null
+        val engine = when (Prefs.get(this, "ocrEngine", "mlkit")) {
+            "lens" -> "Lens"
+            "paddle_heavy" -> "Paddle M"
+            "paddle_small" -> "Paddle S"
+            "manga" -> "Manga OCR"
+            "rapid_onnx" -> "RapidOCR"
+            else -> "ML Kit"
+        }
+        val p = if (pct in 0..100) " $pct%" else ""
+        return "Reading panel - $s ($engine)$p"
+    }
+
     private fun updateProgressUi() {
         // Real-time DeepSeek mode should not keep popping the large progress card over panels.
         // OCR/translation continues normally; the small scan status dot remains the indicator.
@@ -9256,7 +10432,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
 
     // ---------------------------------------------------------------- bottom-sheet building blocks
     private fun sheetHandle(): View = View(this).apply {
-        background = Glass.solid(this@MainActivity, 0x47FFFFFF, 2)
+        background = Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.FAINT), 2)
         layoutParams = LinearLayout.LayoutParams(dp(40), dp(4)).also {
             it.gravity = Gravity.CENTER_HORIZONTAL
             it.bottomMargin = dp(12)
@@ -9265,10 +10441,10 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
 
     private fun sectionLabel(t: String): TextView = TextView(this).apply {
         text = t
-        textSize = 11.5f
+        textSize = Type.overline
         typeface = boldMedium
         letterSpacing = 0.12f
-        setTextColor(UiTheme.faint)
+        setTextColor(UiTheme.role(UiTheme.Role.FAINT))
         setPadding(dp(6), dp(16), dp(6), dp(7))
     }
 
@@ -9310,7 +10486,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
 
     private fun sheetGroup(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = Glass.solid(this@MainActivity, 0x0FFFFFFF, 20, UiTheme.strokeSoft)
+        background = Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.SURFACE), 20, UiTheme.role(UiTheme.Role.STROKE_SOFT))
     }
 
     /** "✅ 🌙 Dark Mode: Auto" -> title "Dark Mode", badge "Auto"; toggles become ON/OFF badges. */
@@ -9333,40 +10509,67 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             state.visibility = View.VISIBLE
             state.text = s
             when (on) {
-                true -> { state.setTextColor(0xFF06210F.toInt()); state.background = Glass.solid(this@MainActivity, UiTheme.ok, 12) }
-                false -> { state.setTextColor(UiTheme.faint); state.background = Glass.solid(this@MainActivity, 0x14FFFFFF, 12) }
-                null -> { state.setTextColor(UiTheme.dim); state.background = Glass.solid(this@MainActivity, 0x14FFFFFF, 12) }
+                true -> { state.setTextColor(UiTheme.role(UiTheme.Role.ON_OK)); state.background = Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.OK), 12) }
+                false -> { state.setTextColor(UiTheme.role(UiTheme.Role.FAINT)); state.background = Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.CONTROL), 12) }
+                null -> { state.setTextColor(UiTheme.role(UiTheme.Role.DIM)); state.background = Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.CONTROL), 12) }
             }
         }
     }
 
+    /** Pill used by the menu's section tabs (selected = filled accent, rest = quiet surface). */
+    private fun filterPill(label: String, selected: Boolean, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = Type.label
+        typeface = boldMedium
+        gravity = Gravity.CENTER
+        minimumHeight = dp(40)
+        contentDescription = if (selected) "$label, selected" else label
+        stylePill(this, selected)
+        setOnClickListener { onClick() }
+    }
+
+    private fun stylePill(v: TextView, selected: Boolean) {
+        v.setTextColor(if (selected) UiTheme.role(UiTheme.Role.ON_ACCENT) else UiTheme.role(UiTheme.Role.DIM))
+        v.typeface = boldMedium
+        v.background = Glass.ripple(
+            this,
+            if (selected) Glass.solid(this, UiTheme.role(UiTheme.Role.ACCENT), 100)
+            else Glass.solid(this, UiTheme.role(UiTheme.Role.CONTROL), 100, UiTheme.role(UiTheme.Role.STROKE_SOFT)),
+            100
+        )
+    }
+
     private fun sheetRow(ic: Ic?, rawLabel: String, last: Boolean, onClick: () -> Unit): SheetRow {
         val title = TextView(this).apply {
-            textSize = 14.5f
+            textSize = Type.body
             typeface = medium
-            setTextColor(UiTheme.text)
-            maxLines = 1
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
+            setLineSpacing(dp(1).toFloat(), 1f)
         }
         val state = TextView(this).apply {
-            textSize = 11.5f
+            textSize = Type.overline
             typeface = boldMedium
             gravity = Gravity.CENTER
             setPadding(dp(10), 0, dp(10), 0)
+            minimumHeight = dp(24)
             visibility = View.GONE
         }
         val inner = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(14), 0)
+            setPadding(dp(10), dp(6), dp(14), dp(6))
             minimumHeight = dp(52)
             background = Glass.ripple(this@MainActivity, null, 0)
             isClickable = true
-            setOnClickListener { onClick() }
+            isFocusable = true
             if (ic != null) {
-                val box = FrameLayout(this@MainActivity).apply { background = Glass.oval(0x14FFFFFF) }
-                box.addView(ImageView(this@MainActivity).apply { setImageDrawable(IconDrawable(ic, UiTheme.iconIdle)) },
-                    FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
+                val box = FrameLayout(this@MainActivity).apply { background = Glass.oval(UiTheme.role(UiTheme.Role.CONTROL)) }
+                box.addView(ImageView(this@MainActivity).apply {
+                    setImageDrawable(IconDrawable(ic, UiTheme.role(UiTheme.Role.ICON)))
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }, FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER))
                 addView(box, LinearLayout.LayoutParams(dp(34), dp(34)).also { it.marginEnd = dp(12) })
             }
             addView(title, LinearLayout.LayoutParams(0, WC, 1f))
@@ -9375,9 +10578,10 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(inner, LinearLayout.LayoutParams(MP, WC))
-            if (!last) addView(View(this@MainActivity).apply { setBackgroundColor(0x10FFFFFF) },
-                LinearLayout.LayoutParams(MP, dp(1)).also { it.marginStart = dp(58) })
+            if (!last) addView(View(this@MainActivity).apply { setBackgroundColor(UiTheme.role(UiTheme.Role.HAIRLINE)) },
+                LinearLayout.LayoutParams(MP, dp(1)).also { it.marginStart = dp(56) })
         }
+        inner.setOnClickListener { onClick() }
         return SheetRow(view, title, state).also { it.set(rawLabel) }
     }
 
@@ -9386,26 +10590,32 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         val iconView = ImageView(this)
         val labelView = TextView(this).apply {
             text = label
-            textSize = 11f
+            textSize = Type.overline
             typeface = medium
             gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(2), 0, dp(2), 0)
         }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             isClickable = true
+            isFocusable = true
+            contentDescription = label
+            minimumHeight = dp(76)
             setOnClickListener { onClick() }
             addView(iconView, LinearLayout.LayoutParams(dp(22), dp(22)))
-            addView(labelView, LinearLayout.LayoutParams(WC, WC).also { it.topMargin = dp(7) })
+            addView(labelView, LinearLayout.LayoutParams(MP, WC).also { it.topMargin = dp(7) })
         }
         fun style(active: Boolean) {
-            iconView.setImageDrawable(IconDrawable(ic, if (active) Color.WHITE else UiTheme.iconIdle))
-            labelView.setTextColor(if (active) Color.WHITE else UiTheme.iconIdle)
+            val fg = if (active) UiTheme.role(UiTheme.Role.ON_ACCENT) else UiTheme.role(UiTheme.Role.ICON)
+            iconView.setImageDrawable(IconDrawable(ic, fg))
+            labelView.setTextColor(fg)
+            box.contentDescription = label + if (active) ", on" else ""
             box.background = Glass.ripple(
                 this,
-                if (active) GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0x597B8CFF, 0x47B27CFF)).apply {
-                    cornerRadius = dp(20).toFloat(); setStroke(dp(1), UiTheme.accent)
-                } else Glass.solid(this, 0x12FFFFFF, 20, UiTheme.strokeSoft),
+                if (active) Glass.accent(this, 20) else Glass.solid(this, UiTheme.role(UiTheme.Role.CONTROL), 20, UiTheme.role(UiTheme.Role.STROKE_SOFT)),
                 20
             )
         }
@@ -9429,7 +10639,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "✏️ AdBlock Rules (paste)", menuPrefetchDepthLabel(), menuWebModeLabel(), DeepSeekRealtimeTranslation.menuLabel(this),
             "📝 Edit Prompt For Live Translation", menuForceLabel(),
             "🤖 AI Scan Page Links & Update AdBlock", menuRtPromptLabel(),
-            "🎌 Japanese Manga Engine (optional)", menuTextRemovalLabel(),
+            "🎌 Japanese Manga Engine (optional)", menuTextRemovalLabel(), menuInpaintLabel(),
+            "🫧 Text Placement (fit + vertical)",
             menuAutoFreshChatLabel(), menuExtraChatDelayLabel(), menuScanIntervalLabel(),
             "🖼 Scan Report: images (Copy)", menuForceLoadLabel(), menuSendHoldLabel(),
             "🐞 Copy crash / freeze log", menuBatchLabel(),
@@ -9440,8 +10651,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "💬 Join the Community (Telegram · Reddit)",
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
-            "🧹 Clear OCR Log (then reproduce the problem)",
-            menuYoloLabel()
+            "🧹 Clear OCR Log (then reproduce the problem)"
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -9449,23 +10659,23 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             0 to Ic.BOOK, 1 to Ic.CLOCK, 3 to Ic.BOOKMARK, 4 to Ic.BOOKMARK, 5 to Ic.SPARK,
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
-            27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT,
-            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH
+            27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT, 39 to Ic.SPARK, 40 to Ic.TEXT,
+            41 to Ic.RELOAD, 42 to Ic.CLOCK, 43 to Ic.CLOCK, 22 to Ic.SEARCH, 44 to Ic.SEARCH, 45 to Ic.BOLT, 46 to Ic.CLOCK, 47 to Ic.SEARCH, 48 to Ic.SPARK, 49 to Ic.SPARK, 50 to Ic.BOLT, 51 to Ic.RELOAD, 52 to Ic.SEARCH, 53 to Ic.SPARK, 54 to Ic.SEARCH, 55 to Ic.SLIDERS, 56 to Ic.SPARK, 57 to Ic.BOLT, 58 to Ic.SHARE, 59 to Ic.SEARCH, 60 to Ic.SEARCH, 61 to Ic.RELOAD
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
-            "COMMUNITY" to listOf(56),
+            "COMMUNITY" to listOf(58),
             "LIBRARY" to listOf(0, 4, 1, 3),
-            "TRANSLATE" to listOf(5, 33, 54, 7),
-            "OCR" to listOf(53, 50, 57, 58, 59, 60),
+            "TRANSLATE" to listOf(5, 33, 56, 7),
+            "OCR" to listOf(55, 52, 59, 60, 61),
             "READER" to listOf(9, 20, 23),
-            "APP" to listOf(55)
+            "APP" to listOf(57)
         )
         val advanced = listOf(
-            "TRANSLATION" to listOf(47, 12, 19, 14, 26, 30, 39, 40, 44, 46),
-            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 37, 38, 41, 43, 48, 49, 51),
+            "TRANSLATION" to listOf(49, 12, 19, 14, 26, 30, 41, 42, 46, 48),
+            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 37, 38, 39, 40, 43, 45, 50, 51, 53),
             "BROWSER" to listOf(15, 16, 21, 24, 29, 35),
-            "DIAGNOSTICS" to listOf(22, 27, 28, 42, 45, 52)
+            "DIAGNOSTICS" to listOf(22, 27, 28, 44, 47, 54)
         )
         lateinit var dlg: Dialog
         val rows = HashMap<Int, SheetRow>()
@@ -9533,10 +10743,10 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     toast(if (on) "🖼 Web Mode on — tap ● to read image chapters with OCR" else "📖 Web Mode off — normal text extraction")
                 }
                 33 -> { dlg.dismiss(); editRealtimePrompt() }
-                54 -> { dlg.dismiss(); editScanPrompt() }
-                55 -> { dlg.dismiss(); showUpdateNotice() }
-                56 -> { dlg.dismiss(); showCommunityChooser() }
-                57 -> {
+                56 -> { dlg.dismiss(); editScanPrompt() }
+                57 -> { dlg.dismiss(); showUpdateNotice() }
+                58 -> { dlg.dismiss(); showCommunityChooser() }
+                59 -> {
                     dlg.dismiss()
                     val host = try { Uri.parse(novelWv.url.orEmpty()).host.orEmpty().removePrefix("www.") } catch (_: Exception) { "" }
                     AlertDialog.Builder(this)
@@ -9545,9 +10755,9 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                         .setPositiveButton("OK", null)
                         .setNeutralButton("Forget this site") { _, _ ->
                             try {
-                                val o = org.json.JSONObject(Prefs.get(this, "siteLearn2", "{}"))
+                                val o = org.json.JSONObject(Prefs.get(this, "siteLearn", "{}"))
                                 o.remove(host)
-                                Prefs.put(this, "siteLearn2", o.toString())
+                                Prefs.put(this, "siteLearn", o.toString())
                                 toast("Forgotten — the app will learn this site again")
                             } catch (_: Exception) {}
                         }
@@ -9588,8 +10798,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                           else "📝 Only the text is sent (no prompt) — scan & real-time")
                 }
                 38 -> {
-                    val on = !Prefs.bool(this, "wmTextRemoval2", true)
-                    Prefs.putBool(this, "wmTextRemoval2", on)
+                    val on = !Prefs.bool(this, "wmTextRemoval", true)
+                    Prefs.putBool(this, "wmTextRemoval", on)
                     if (on) {
                         toast("🧽 Text Remover ON — next Web Mode/Japanese Manga OCR scan will clean only safe text pixels.")
                     } else {
@@ -9600,6 +10810,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     refresh(i, menuTextRemovalLabel())
                 }
                 39 -> {
+                    toggleInpaintModel()
+                    refresh(i, menuInpaintLabel())
+                }
+                40 -> {
+                    placementSettingsDialog()
+                    dlg.dismiss()
+                }
+                41 -> {
                     val on = !autoFreshChatEnabled
                     Prefs.putBool(this, "autoNewChat", on)
                     chatRequestCount = 0
@@ -9608,40 +10826,40 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     toast(if (on) "🔄 Auto new chat ON — every $chatNewWindowEvery requests"
                           else "🔄 Auto new chat OFF — stay in the current chat")
                 }
-                53 -> { dlg.dismiss(); ocrModelsDialog() }
-                51 -> {
+                55 -> { dlg.dismiss(); ocrModelsDialog() }
+                53 -> {
                     val on = !Prefs.bool(this, "ocrRescan", true)
                     Prefs.putBool(this, "ocrRescan", on)
                     refresh(i, menuOcrRescanLabel())
                     toast(if (on) "🩹 OCR rescan ON — lines the first pass missed are re-read"
                           else "🩹 OCR rescan OFF — normal OCR only")
                 }
-                52 -> {
+                54 -> {
                     val on = !Prefs.bool(this, "ocrDebug", false)
                     Prefs.putBool(this, "ocrDebug", on)
                     refresh(i, menuOcrDebugLabel())
                     toast(if (on) "🔬 OCR debug ON — marked slices go to the app's private folder (Android/data › files › ocr_debug, newest 12), NOT the Gallery. Resets to OFF on restart"
                           else "🔬 OCR debug OFF")
                 }
-                50 -> {
+                52 -> {
                     val cur = ocrLangCodes.indexOf(Prefs.get(this, "ocrLang", "auto")).let { if (it < 0) 0 else it }
                     Prefs.put(this, "ocrLang", ocrLangCodes[(cur + 1) % ocrLangCodes.size])
                     refresh(i, menuOcrLangLabel())
                     toast(menuOcrLangLabel())
                 }
-                49 -> {
+                51 -> {
                     Prefs.put(this, "barsMode", ((barsMode() + 1) % 3).toString())
                     if (barsHidden && !barsAnimating) setBarsHidden(false)
                     syncToonBars()
                     refresh(i, menuBarsLabel())
                     toast(menuBarsLabel())
                 }
-                48 -> {
+                50 -> {
                     Prefs.put(this, "scanFastFirst", if (Prefs.get(this, "scanFastFirst", "1") == "1") "0" else "1")
                     refresh(i, menuScanFastLabel())
                     toast(menuScanFastLabel())
                 }
-                47 -> {
+                49 -> {
                     // One tap back to the settings that work best for reading webtoons.
                     Prefs.put(this, "rtBatchLevel", "2")
                     Prefs.put(this, "sendHoldMs", "0"); Js.sendHoldMs = 0L
@@ -9651,39 +10869,38 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     dlg.dismiss()
                     toast("✨ Recommended: batching Big · Send instant · scan interval Auto · fast-first OCR · force-load OFF")
                 }
-                46 -> {
+                48 -> {
                     Prefs.put(this, "rtBatchLevel", ((rtBatchLevel() + 1) % 4).toString())
                     refresh(i, menuBatchLabel())
                     toast(menuBatchLabel())
                 }
-                58 -> {
+                60 -> {
                     dlg.dismiss()
                     val full = OcrDiag.report(this, novelWv.url.orEmpty()) +
                         "\n--- CRASH / FREEZE LOG (tail) ---\n" + CrashLog.read().takeLast(6_000).ifBlank { "(none)" }
                     copy(full)
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
-                60 -> { yoloDialog { refresh(i, menuYoloLabel()) } }
-                59 -> {
+                61 -> {
                     OcrDiag.clear()
                     toast("🧹 OCR log cleared — now open the page, scan, then copy the log")
                 }
-                45 -> {
+                47 -> {
                     dlg.dismiss()
                     val log = CrashLog.read().takeLast(20_000)
                     if (log.isBlank()) toast("🐞 No crash or freeze recorded yet")
                     else { copy(log); toast("🐞 Log copied — paste it here") }
                 }
-                44 -> editSendHold { refresh(i, menuSendHoldLabel()) }
-                43 -> {
+                46 -> editSendHold { refresh(i, menuSendHoldLabel()) }
+                45 -> {
                     Prefs.put(this, "forceLoadImages", if (forceLoadOn()) "0" else "1")
                     applyForceLoadImages()
                     refresh(i, menuForceLoadLabel())
                     toast(if (forceLoadOn()) "⚡ ON — reload the page for it to take effect" else "Force-load OFF — reload the page")
                 }
                 22 -> { dlg.dismiss(); diagnosePage() }
-                42 -> { dlg.dismiss(); diagnoseScanImages() }
-                41 -> {
+                44 -> { dlg.dismiss(); diagnoseScanImages() }
+                43 -> {
                     // Wait after every scroll step of a full scan. Raise it for sites whose images only
                     // load once they reach the screen; Auto keeps the fast built-in cadence.
                     val steps = longArrayOf(0L, 150L, 300L, 500L, 800L, 1_200L, 2_000L)
@@ -9692,7 +10909,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     refresh(i, menuScanIntervalLabel())
                     toast(menuScanIntervalLabel())
                 }
-                40 -> {
+                42 -> {
                     val steps = longArrayOf(0L, 300L, 600L, 1_000L)
                     val current = steps.indexOf(chatExtraDelayMs).let { if (it < 0) 0 else it }
                     val next = steps[(current + 1) % steps.size]
@@ -9787,16 +11004,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             return group
         }
         val langRow = sheetRow(Ic.GLOBE, "Language: " + Langs.target(this), false) { dlg.dismiss(); showLanguageSheet(false) }
+        // ---- tabs: the every-day groups and the technical ones never share one long scroll.
+        val tabRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(2), 0, dp(8)) }
+        val pages = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pageMain = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pageMore = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pages.addView(pageMain, LinearLayout.LayoutParams(MP, WC))
+        pages.addView(pageMore, LinearLayout.LayoutParams(MP, WC))
+        pageMore.visibility = View.GONE
         for ((name, idx) in daily) {
             val group = buildGroup(idx) ?: continue
             if (name == "TRANSLATE") group.addView(langRow.view, 0)
-            col.addView(sectionLabel(name))
-            col.addView(group, LinearLayout.LayoutParams(MP, WC))
+            pageMain.addView(sectionLabel(name))
+            pageMain.addView(group, LinearLayout.LayoutParams(MP, WC))
         }
-        val adv = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
+        val adv = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var advCount = 0
         for ((name, idx) in advanced) {
             val group = buildGroup(idx) ?: continue
@@ -9804,13 +11026,34 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             adv.addView(sectionLabel(name))
             adv.addView(group, LinearLayout.LayoutParams(MP, WC))
         }
-        col.addView(foldHeader("ADVANCED", advCount, adv, col))
-        col.addView(adv, LinearLayout.LayoutParams(MP, WC))
-        col.addView(sectionLabel("HELP"))
-        col.addView(
-            sheetGroup().apply { addView(sheetRow(Ic.SPARK, "Quick tour", true) { dlg.dismiss(); startTour(manual = true) }.view) },
+        pageMore.addView(foldHeader("ADVANCED", advCount, adv, pageMore))
+        pageMore.addView(adv, LinearLayout.LayoutParams(MP, WC))
+        pageMore.addView(sectionLabel("HELP"))
+        pageMore.addView(
+            sheetGroup().apply {
+                addView(sheetRow(Ic.SPARK, "Quick tour", false) { dlg.dismiss(); startTour(manual = true) }.view)
+                addView(sheetRow(Ic.PALETTE, "App appearance: " + appearanceLabel(), true) {
+                    setAppAppearance(UiTheme.dark)
+                    applyAppAppearance()
+                    dlg.dismiss()
+                    toast("App appearance: " + appearanceLabel())
+                }.view)
+            },
             LinearLayout.LayoutParams(MP, WC)
         )
+        val tabMain = filterPill("Everyday", true) { }
+        val tabMore = filterPill("All settings", false) { }
+        fun selectTab(main: Boolean) {
+            pageMain.visibility = if (main) View.VISIBLE else View.GONE
+            pageMore.visibility = if (main) View.GONE else View.VISIBLE
+            stylePill(tabMain, main); stylePill(tabMore, !main)
+        }
+        tabMain.setOnClickListener { selectTab(true) }
+        tabMore.setOnClickListener { selectTab(false) }
+        tabRow.addView(tabMain, LinearLayout.LayoutParams(0, dp(40), 1f).also { it.marginEnd = dp(8) })
+        tabRow.addView(tabMore, LinearLayout.LayoutParams(0, dp(40), 1f))
+        col.addView(tabRow, LinearLayout.LayoutParams(MP, WC))
+        col.addView(pages, LinearLayout.LayoutParams(MP, WC))
         val scroll = MaxHeightScroll(this, (resources.displayMetrics.heightPixels * 0.86f).toInt()).apply {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
@@ -10269,40 +11512,103 @@ ${rows.take(220).joinToString("\n")}
     private fun menuAdBlockLabel(): String =
         (if (Prefs.adblock(this)) "✅" else "⬜") + " Ad Block"
 
-    private fun menuYoloLabel(): String =
-        "🫧 Bubble Detector (YOLO, optional): " + (if (YoloBubbleDetector.enabled(this)) "ACTIVE" else if (YoloBubbleDetector.isInstalled(this)) "installed" else "light mode")
+    private fun menuTextRemovalLabel(): String =
+        (if (Prefs.bool(this, "wmTextRemoval", true)) "✅" else "⬜") + " 🧽 Text Remover (Webtoon + Manga)"
 
     /**
-     * Optional precise bubble detector for phones with plenty of RAM. The model file is downloaded by the user (from the
-     * Manga Translator project) and imported here with a file picker: the app copies it to its own folder, so no path has
-     * to be typed or fixed afterwards.
+     * AI inpainting (LaMa, ONNX) for lettering that sits on artwork. The engine and its 37 MB model
+     * downloader already existed, but nothing ever set "wmAiInpaint", so that code was dead and
+     * crowded bubbles over art kept the old flat-card overlay forever.
      */
-    private fun yoloDialog(onChanged: () -> Unit) {
-        AlertDialog.Builder(this)
-            .setTitle("Bubble Detector (YOLO)")
-            .setMessage(YoloBubbleDetector.status(this) +
-                "\n\nThe app already finds bubble shapes without any download (light mode). This model is only for phones " +
-                "with 6 GB RAM or more and gives exact balloon outlines. File needed: mixed-dual-s-e5_float16.tflite")
-            .setPositiveButton("Import model file") { _, _ ->
-                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                }
-                startActivityForResult(i, REQ_YOLO_MODEL)
-            }
-            .setNeutralButton("Mode: " + YoloBubbleDetector.mode(this)) { _, _ ->
-                val next = when (YoloBubbleDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
-                Prefs.put(this, "wmYoloMode", next)
-                if (next == "off") YoloBubbleDetector.release()
-                toast("Bubble detector mode: $next")
-                onChanged()
-            }
-            .setNegativeButton("Remove model") { _, _ -> YoloBubbleDetector.delete(this); toast("Model removed"); onChanged() }
-            .show()
+    private fun menuInpaintLabel(): String = when {
+        !Prefs.bool(this, "wmAiInpaint", false) -> {
+            val why = WebModeInpainter.lastLoadError
+            if (why.isBlank()) "⬜ 🎨 AI Inpaint on artwork (optional)"
+            else "⚠️ 🎨 AI Inpaint off — model failed: ${why.take(48)}"
+        }
+        WebModeInpainter.isReady(this) -> "✅ 🎨 AI Inpaint on artwork"
+        WebModeInpainter.isDownloading() -> "⏳ 🎨 AI Inpaint — downloading model…"
+        else -> "⬇️ 🎨 AI Inpaint — tap to download model"
     }
 
-    private fun menuTextRemovalLabel(): String =
-        (if (Prefs.bool(this, "wmTextRemoval2", true)) "✅" else "⬜") + " 🧽 Text Remover (Webtoon + Manga)"
+    private fun toggleInpaintModel() {
+        if (!Prefs.bool(this, "wmAiInpaint", false)) {
+            // An explicit "on" gives the model a new chance after an earlier failure.
+            WebModeInpainter.resetFailures(this)
+            Prefs.putBool(this, "wmAiInpaint", true)
+            if (WebModeInpainter.isReady(this)) {
+                toast("🎨 AI Inpaint ON — artwork bubbles with text are rebuilt instead of covered")
+                return
+            }
+            toast("🎨 AI Inpaint ON — downloading the 37 MB model once (Wi-Fi recommended)")
+            WebModeInpainter.download(this,
+                onProgress = { got, total ->
+                    if (total > 0) runOnUiThread {
+                        val pct = (got * 100 / total).toInt().coerceIn(0, 100)
+                        if (pct % 10 == 0) toastQuiet("⬇️ Inpaint model $pct%")
+                    }
+                },
+                onDone = { error ->
+                    runOnUiThread {
+                        if (error == null) {
+                            WebModeInpainter.warmUpAsync(this)
+                            toast("✅ AI Inpaint model ready")
+                        } else {
+                            Prefs.putBool(this, "wmAiInpaint", false)
+                            toast("❌ Inpaint model download failed: $error (AI Inpaint turned OFF)")
+                            // Offer the safe way out instead of leaving a model that kills this phone's runtime.
+                            AlertDialog.Builder(this)
+                                .setTitle("🎨 AI Inpaint could not start")
+                                .setMessage(
+                                    "The model was downloaded but this phone's ONNX Runtime could not use it.\n\n" +
+                                        error + "\n\n" + WebModeInpainter.fileState(this) +
+                                        "\n\nThe feature stays OFF, so start-up is unaffected. You can delete the " +
+                                        "model file and try the download again."
+                                )
+                                .setPositiveButton("Delete model") { _, _ ->
+                                    val ok = WebModeInpainter.delete(this)
+                                    Prefs.putBool(this, "wmAiInpaint", false)
+                                    toast(if (ok) "🗑 Model deleted — AI Inpaint stays off" else "Could not delete the model file")
+                                }
+                                .setNegativeButton("Keep off", null)
+                                .show()
+                        }
+                    }
+                })
+            return
+        }
+        // ON: one tap turns the AI off but keeps the model for later.
+        Prefs.putBool(this, "wmAiInpaint", false)
+        toast("🎨 AI Inpaint OFF — flat colour fill is used for artwork bubbles (model kept)")
+    }
+
+    private var lastQuietToastAtMs = 0L
+    private fun toastQuiet(msg: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastQuietToastAtMs < 1200L) return
+        lastQuietToastAtMs = now
+        toast(msg)
+    }
+
+    /** Small modal: AI placement toggles (outline-aware fit / vertical columns), not a second menu. */
+    private fun placementSettingsDialog() {
+        val labels = listOf(
+            (if (Prefs.bool(this, "wmLooseFit", true)) "✅" else "⬜") +
+                " 🫧 Fit text inside the real balloon outline\n" +
+                "Uses the largest rectangle that fits the bubble shape (oval / tail / two-lobed).",
+            (if (Prefs.bool(this, "wmVerticalText", true)) "✅" else "⬜") +
+                " 📜 Vertical (column) layout for manga\n" +
+                "Original lettering that ran top-to-bottom keeps that direction, right-to-left columns."
+        )
+        listDialog("🫧 Text placement", labels, { i ->
+            if (i == 0) {
+                Prefs.putBool(this, "wmLooseFit", !Prefs.bool(this, "wmLooseFit", true))
+            } else {
+                Prefs.putBool(this, "wmVerticalText", !Prefs.bool(this, "wmVerticalText", true))
+            }
+            toast(if (i == 0) "Changes apply to the next placed translation" else "Changes apply to the next placed translation")
+        }, null)
+    }
 
     /** Glass bottom sheet with one tappable row per label (long-press optional). */
     /** A sheet with a search box on top; used for the long language lists. */
@@ -10419,47 +11725,7 @@ ${rows.take(220).joinToString("\n")}
     }
 
     // ---------- offline library ----------
-    private fun libraryNovels() {
-        val names = Store.novelNames(this)
-        if (names.isEmpty()) return toast("Library is empty. Saved translations will appear here.")
-        val labels = names.map { it + "   (" + Store.chapters(this, it).size + " chapters)" }
-        listDialog("📚 Library", labels, { i -> novelActions(names[i]) }, null)
-    }
-
-    private fun novelActions(name: String) {
-        AlertDialog.Builder(this).setTitle(name)
-            .setItems(arrayOf("📖 Chapter List", "⬇️ Export this novel as TXT", "✏️ Rename", "🗑 Delete Novel")) { _, k ->
-                when (k) {
-                    0 -> chapterList(name)
-                    1 -> exportAll(name)
-                    2 -> renameNovel(name)
-                    3 -> AlertDialog.Builder(this).setMessage("Delete all translations for \"$name\"?")
-                        .setPositiveButton("Delete") { _, _ -> Store.deleteNovel(this, name) }
-                        .setNegativeButton("No", null).show()
-                    else -> {}
-                }
-            }.show()
-    }
-
-    private fun chapterList(name: String) {
-        val l = Store.chapters(this, name)
-        if (l.isEmpty()) return
-        listDialog(name + " (long-press to delete)", l.map { it.label() },
-            { i -> startActivity(Intent(this, ReaderActivity::class.java).putExtra("novel", name).putExtra("id", l[i].id)) },
-            { i ->
-                AlertDialog.Builder(this).setMessage("Delete \"${l[i].label()}\"?")
-                    .setPositiveButton("Delete") { _, _ -> Store.delete(this, l[i].id) }
-                    .setNegativeButton("No", null).show()
-            })
-    }
-
-    private fun renameNovel(old: String) {
-        val et = EditText(this).apply { setText(old) }
-        AlertDialog.Builder(this).setTitle("Novel name")
-            .setView(et)
-            .setPositiveButton("Save") { _, _ -> Store.rename(this, old, et.text.toString().trim()) }
-            .setNegativeButton("Cancel", null).show()
-    }
+    private fun libraryNovels() = openLibraryManager()
 
     private fun exportAll(novel: String?) {
         if (Store.list(this).isEmpty()) return toast("There are no translations to export")
@@ -10472,8 +11738,6 @@ ${rows.take(220).joinToString("\n")}
         startActivityForResult(i, 42)
     }
 
-    private val REQ_YOLO_MODEL = 4731
-
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 42 && resultCode == RESULT_OK) {
@@ -10483,17 +11747,6 @@ ${rows.take(220).joinToString("\n")}
                 toast("✅ Export completed")
             } catch (e: Exception) {
                 toast("❌ " + (e.message ?: "Failed"))
-            }
-        } else if (requestCode == REQ_YOLO_MODEL) {
-            val u = data?.data
-            if (resultCode == RESULT_OK && u != null) {
-                toast("Importing model...")
-                Thread {
-                    val err = YoloBubbleDetector.importFrom(this, u)
-                    runOnUiThread {
-                        toast(if (err == null) "✅ Model imported. " + (if (YoloBubbleDetector.libraryPresent()) "" else "Add the LiteRT line to app/build.gradle to use it.") else "❌ $err")
-                    }
-                }.start()
             }
         } else if (requestCode == com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.REQUEST_CODE &&
             resultCode == RESULT_OK) {
@@ -10627,6 +11880,7 @@ ${rows.take(220).joinToString("\n")}
     override fun onBackPressed() {
         when {
             ::tourOverlay.isInitialized && tourOverlay.isRunning() -> tourOverlay.finish()
+            ::homeView.isInitialized && homeView.visibility == View.VISIBLE && homeView.handleBack() -> Unit
             homeVisible() -> super.onBackPressed()
             activeWv.canGoBack() -> activeWv.goBack()
             else -> showHome()

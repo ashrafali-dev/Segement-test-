@@ -11,19 +11,27 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.ashraf.novelstudio.Prefs
+import com.ashraf.novelstudio.Ic
+import com.ashraf.novelstudio.IconDrawable
+import com.ashraf.novelstudio.Glass
+import com.ashraf.novelstudio.Buttons
+import com.ashraf.novelstudio.Insets
+import com.ashraf.novelstudio.Space
+import com.ashraf.novelstudio.UiTheme
 import com.ashraf.novelstudio.WmBubble
 import com.ashraf.novelstudio.WebModeTextRemover
 import org.json.JSONArray
@@ -45,11 +53,12 @@ class JapaneseMangaEngineActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var resultView: TextView
     private lateinit var progress: ProgressBar
-    private lateinit var installButton: Button
-    private lateinit var deleteButton: Button
-    private lateinit var scanButton: Button
-    private lateinit var cancelButton: Button
-    private lateinit var translateButton: Button
+    private lateinit var installButton: TextView
+    private lateinit var engineBadge: TextView
+    private lateinit var scanButton: TextView
+    private lateinit var cancelButton: TextView
+    private lateinit var translateButton: TextView
+    private lateinit var deleteButton: TextView
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "japanese-manga-image").apply { isDaemon = true } }
     @Volatile private var scanning = false
@@ -84,65 +93,119 @@ class JapaneseMangaEngineActivity : Activity() {
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(6), dp(10), dp(8))
-            setBackgroundColor(0xFF10131C.toInt())
+            setPadding(dp(16), dp(6), dp(16), dp(10))
+            setBackgroundColor(UiTheme.role(UiTheme.Role.BG))
         }
-        root.addView(TextView(this).apply {
-            text = "日本語 Manga Engine"
-            textSize = 20f
-            setTextColor(0xFFF2F4FA.toInt())
+        // ---- header: type title, then the ONE engine badge (installed / not installed / downloading)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(5), 0, dp(5))
-        }, LinearLayout.LayoutParams(-1, -2))
+            addView(ImageView(this@JapaneseMangaEngineActivity).apply {
+                setImageDrawable(IconDrawable(Ic.GLOBE, UiTheme.role(UiTheme.Role.ACCENT)))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(dp(26), dp(26)).also { it.marginEnd = dp(10) })
+            addView(TextView(this@JapaneseMangaEngineActivity).apply {
+                text = "日本語 Manga Engine"
+                textSize = com.ashraf.novelstudio.Type.title
+                typeface = com.ashraf.novelstudio.Type.bold()
+                setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(closeButton(), LinearLayout.LayoutParams(dp(48), dp(48)))
+        }
+        root.addView(header, LinearLayout.LayoutParams(-1, -2))
         status = TextView(this).apply {
-            textSize = 12f
-            setTextColor(0xFFBEC7D8.toInt())
-            setPadding(0, dp(2), 0, dp(7))
-            text = "ঐচ্ছিক মাঙ্গা OCR ইঞ্জিন"
+            textSize = com.ashraf.novelstudio.Type.caption
+            setTextColor(UiTheme.role(UiTheme.Role.DIM))
+            setPadding(0, dp(2), 0, dp(10))
+            text = "Optional on-device engine for Japanese manga pages."
         }
         root.addView(status, LinearLayout.LayoutParams(-1, -2))
+
+        // ---- engine card: state, then the only two actions that make sense for that state
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+            background = Glass.panel(this@JapaneseMangaEngineActivity, Space.radiusL, strong = true)
+        }
+        engineBadge = TextView(this).apply {
+            textSize = com.ashraf.novelstudio.Type.overline
+            typeface = com.ashraf.novelstudio.Type.bold()
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
+        card.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@JapaneseMangaEngineActivity).apply {
+                text = "Engine files"
+                textSize = com.ashraf.novelstudio.Type.body
+                setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(engineBadge)
+        }, LinearLayout.LayoutParams(-1, -2))
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        installButton = button("ডাউনলোড (~38 MB)") { confirmInstall() }
-        deleteButton = button("ইঞ্জিন মুছুন") { confirmDelete() }
-        row1.addView(installButton, LinearLayout.LayoutParams(0, dp(42), 1f).apply { rightMargin = dp(4) })
-        row1.addView(deleteButton, LinearLayout.LayoutParams(0, dp(42), 1f).apply { leftMargin = dp(4) })
-        root.addView(row1)
+        installButton = com.ashraf.novelstudio.Buttons.make(this, "Download (~38 MB)",
+            com.ashraf.novelstudio.Buttons.Style.FILLED, Ic.DOWNLOAD, 46) { confirmInstall() }
+        deleteButton = com.ashraf.novelstudio.Buttons.make(this, "Delete",
+            com.ashraf.novelstudio.Buttons.Style.OUTLINED, Ic.TRASH, 46) { confirmDelete() }
+        row1.addView(installButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(4); topMargin = dp(10) })
+        row1.addView(deleteButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(4); topMargin = dp(10) })
+        card.addView(row1)
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        scanButton = button("এই পেজ OCR স্ক্যান") { scanPage() }
-        cancelButton = button("বাতিল") { cancelWork() }
-        row2.addView(scanButton, LinearLayout.LayoutParams(0, dp(42), 1f).apply { topMargin = dp(5); rightMargin = dp(4) })
-        row2.addView(cancelButton, LinearLayout.LayoutParams(0, dp(42), 1f).apply { topMargin = dp(5); leftMargin = dp(4) })
-        root.addView(row2)
-        translateButton = button("অনুবাদ করে বাবলে বসাও") { returnMangaResult() }
+        scanButton = com.ashraf.novelstudio.Buttons.make(this, "Scan this page",
+            com.ashraf.novelstudio.Buttons.Style.TONAL, Ic.SCAN, 46) { scanPage() }
+        cancelButton = com.ashraf.novelstudio.Buttons.make(this, "Cancel",
+            com.ashraf.novelstudio.Buttons.Style.TEXT, Ic.CLOSE, 46) { cancelWork() }
+        row2.addView(scanButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(4); topMargin = dp(8) })
+        row2.addView(cancelButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { leftMargin = dp(4); topMargin = dp(8) })
+        card.addView(row2)
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            visibility = View.GONE
+            progressTintList = android.content.res.ColorStateList.valueOf(UiTheme.role(UiTheme.Role.ACCENT))
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(UiTheme.role(UiTheme.Role.STROKE))
+        }
+        card.addView(progress, LinearLayout.LayoutParams(-1, dp(4)).apply { topMargin = dp(6) })
+        root.addView(card, LinearLayout.LayoutParams(-1, -2))
+        translateButton = com.ashraf.novelstudio.Buttons.make(this, "Place translation in bubbles",
+            com.ashraf.novelstudio.Buttons.Style.FILLED, Ic.CHECK, 48) { returnMangaResult() }
         translateButton.isEnabled = false
-        root.addView(translateButton, LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(5) })
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
-        root.addView(progress, LinearLayout.LayoutParams(-1, dp(5)).apply { topMargin = dp(5) })
-        page = WebView(this).apply { setBackgroundColor(0xFF171C28.toInt()) }
-        root.addView(page, LinearLayout.LayoutParams(-1, 0, 0.9f).apply { topMargin = dp(7); bottomMargin = dp(5) })
+        root.addView(translateButton, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
+
+        page = WebView(this).apply { setBackgroundColor(UiTheme.role(UiTheme.Role.SURFACE)) }
+        root.addView(page, LinearLayout.LayoutParams(-1, 0, 0.9f).apply { topMargin = dp(10); bottomMargin = dp(8) })
         val scroll = ScrollView(this).apply { isFillViewport = true }
         resultView = TextView(this).apply {
-            textSize = 13f
-            setTextColor(0xFFE0E6F0.toInt())
-            setPadding(dp(7), dp(8), dp(7), dp(12))
-            text = "OCR ফল এখানে দেখাবে। প্রথমে ইঞ্জিন ডাউনলোড করে পেজ স্ক্যান করো।\n\nডাউনলোড করা থাকলে Realtime/Scan মোড জাপানিজ মাঙ্গায় এই মডেল নিজেই ব্যবহার করে; এই স্ক্রিন শুধু ডাউনলোড/মোছা ও টেস্টের জন্য।"
+            textSize = com.ashraf.novelstudio.Type.label
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            setLineSpacing(dp(3).toFloat(), 1.15f)
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+            background = Glass.solid(this@JapaneseMangaEngineActivity, UiTheme.role(UiTheme.Role.SURFACE), 16, UiTheme.role(UiTheme.Role.STROKE_SOFT))
+            text = "OCR results appear here. Download the engine once, then scan the page.\n\nWhen the engine is installed, Realtime / Scan mode uses it automatically for Japanese pages; this screen is only for download, delete and testing."
         }
         scroll.addView(resultView, android.widget.FrameLayout.LayoutParams(-1, -2))
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1.1f))
         runtime = WebView(this).apply {
             alpha = 0.01f
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            setBackgroundColor(0xFF10131C.toInt())
+            setBackgroundColor(UiTheme.role(UiTheme.Role.BG))
         }
         root.addView(runtime, LinearLayout.LayoutParams(dp(1), dp(1)))
         setContentView(root)
+        Insets.capture(this)
+        root.setPadding(dp(16), Insets.top + dp(6), dp(16), Insets.bottom + dp(10))
     }
 
-    private fun button(label: String, action: () -> Unit) = Button(this).apply {
-        text = label
-        isAllCaps = false
-        textSize = 12f
-        setOnClickListener { action() }
+    private fun closeButton(): View = ImageView(this).apply {
+        setImageDrawable(IconDrawable(Ic.CLOSE, UiTheme.role(UiTheme.Role.ICON)))
+        val p = dp(12)
+        setPadding(p, p, p, p)
+        background = Glass.ripple(this@JapaneseMangaEngineActivity, null)
+        contentDescription = "Close"
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        isClickable = true
+        setOnClickListener { finish() }
     }
 
     private fun setupPage() {
@@ -212,6 +275,21 @@ class JapaneseMangaEngineActivity : Activity() {
         scanButton.isEnabled = installed && page.url?.startsWith("http") == true && !scanning && !scanWhenReady
         cancelButton.isEnabled = manager.isDownloading() || scanning || scanWhenReady
         translateButton.isEnabled = lastResultJson.isNotBlank() && !scanning
+        // Honest state badge: never "installed" because a card looks good, only when the files are there.
+        val (label, color) = when {
+            manager.isDownloading() -> "Downloading" to UiTheme.role(UiTheme.Role.WARN)
+            installed -> "Installed" to UiTheme.role(UiTheme.Role.OK)
+            manager.hasFiles() -> "Incomplete" to UiTheme.role(UiTheme.Role.WARN)
+            else -> "Not installed" to UiTheme.role(UiTheme.Role.FAINT)
+        }
+        engineBadge.text = label
+        engineBadge.setTextColor(color)
+        engineBadge.background = Glass.solid(this, UiTheme.withAlpha(color, 0x24), 100, UiTheme.withAlpha(color, 0x59))
+        // Disabled buttons must read as disabled, not just ignore taps.
+        for (b in listOf(installButton, deleteButton, scanButton, cancelButton, translateButton)) {
+            b.alpha = if (b.isEnabled) 1f else 0.45f
+        }
+        installButton.text = if (installed) "Re-download" else "Download (~38 MB)"
     }
 
     private fun confirmInstall() {
@@ -421,7 +499,9 @@ class JapaneseMangaEngineActivity : Activity() {
                 fg = fg,
                 fg2 = fg,
                 soft = r.optBoolean("soft", false),
-                sourceText = text
+                sourceText = text,
+                // The manga engine already grouped the columns and reported their direction.
+                vertical = r.optBoolean("vertical", false)
             ))
         }
         return out

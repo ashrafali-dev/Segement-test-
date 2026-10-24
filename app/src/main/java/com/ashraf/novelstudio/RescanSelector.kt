@@ -38,7 +38,13 @@ class RescanSelector(
     private var ly = 0f
 
     private val dimPaint = Paint().apply { color = 0x70000000 }
-    private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent; style = Paint.Style.STROKE; strokeWidth = 2.5f * d }
+    private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x59FFFFFF; style = Paint.Style.STROKE; strokeWidth = 1.5f * d }
+    private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = accent
+        style = Paint.Style.STROKE
+        strokeWidth = 3f * d
+        strokeCap = Paint.Cap.ROUND
+    }
     private val dotFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val dotRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent; style = Paint.Style.STROKE; strokeWidth = 3f * d }
 
@@ -49,26 +55,28 @@ class RescanSelector(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding((10 * d).toInt(), (8 * d).toInt(), (10 * d).toInt(), (8 * d).toInt())
-            background = GradientDrawable().apply { setColor(0xEE232739.toInt()); cornerRadius = 26 * d }
+            background = Glass.panel(ctx, 26, strong = true)
             elevation = 12 * d
         }
         fun btn(label: String, filled: Boolean, click: () -> Unit) = TextView(ctx).apply {
             text = label
-            textSize = 14f
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setTextColor(Color.WHITE)
+            textSize = Type.label
+            typeface = Type.medium()
+            setTextColor(if (filled) UiTheme.onAccent else UiTheme.text)
             gravity = Gravity.CENTER
             setPadding((18 * d).toInt(), 0, (18 * d).toInt(), 0)
-            background = GradientDrawable().apply {
-                cornerRadius = 20 * d
-                setColor(if (filled) accent else 0x33FFFFFF)
-            }
+            background = Glass.ripple(
+                ctx,
+                if (filled) Glass.solid(ctx, accent, 20) else Glass.solid(ctx, 0x14FFFFFF, 20, UiTheme.strokeSoft),
+                20
+            )
+            isClickable = true
             setOnClickListener { click() }
         }
-        bar.addView(btn("Cancel", false) { onCancel() }, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, (40 * d).toInt()))
+        bar.addView(btn("Cancel", false) { onCancel() }, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, (42 * d).toInt()))
         bar.addView(btn("Read this area", true) {
             if (width > 0 && height > 0) onScan(l / width, t / height, r / width, b / height)
-        }, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, (40 * d).toInt()).also { it.leftMargin = (10 * d).toInt() })
+        }, LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, (42 * d).toInt()).also { it.leftMargin = (10 * d).toInt() })
         addView(bar, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also {
             it.bottomMargin = (28 * d).toInt()
         })
@@ -111,6 +119,13 @@ class RescanSelector(
         c.drawRect(0f, t, l, b, dimPaint)
         c.drawRect(r, t, w, b, dimPaint)
         c.drawRect(l, t, r, b, framePaint)
+        // Corner strokes on the frame beat a full box: same "scanner" language, calmer over artwork.
+        val bl = 16f * d
+        val cc = cornerPaint
+        c.drawLine(l, t, l + bl, t, cc); c.drawLine(l, t, l, t + bl, cc)
+        c.drawLine(r - bl, t, r, t, cc); c.drawLine(r, t, r, t + bl, cc)
+        c.drawLine(l, b - bl, l, b, cc); c.drawLine(l, b, l + bl, b, cc)
+        c.drawLine(r - bl, b, r, b, cc); c.drawLine(r, b - bl, r, b, cc)
         for (p in dots()) {
             c.drawCircle(p[0], p[1], 9 * d, dotFill)
             c.drawCircle(p[0], p[1], 9 * d, dotRing)

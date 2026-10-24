@@ -87,27 +87,27 @@ class TourOverlay(private val ctx: Context) : FrameLayout(ctx) {
             setOnClickListener { finish() }
         }
         nextBtn.apply {
-            textSize = 14f
-            typeface = bold
-            setTextColor(Color.WHITE)
-            setPadding(ctx.dpi(20), ctx.dpi(9), ctx.dpi(20), ctx.dpi(9))
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(UiTheme.accentA, UiTheme.accentB)).apply {
-                cornerRadius = ctx.dpf(20)
-            }
+            textSize = Type.label
+            typeface = Type.medium()
+            setTextColor(UiTheme.onAccent)
+            gravity = Gravity.CENTER
+            setPadding(ctx.dpi(20), ctx.dpi(10), ctx.dpi(20), ctx.dpi(10))
+            background = Glass.ripple(ctx, Glass.accent(ctx, 14), 14)
             isClickable = true
             setOnClickListener { next() }
+            minimumHeight = ctx.dpi(44)
         }
         val bottom = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             addView(countTv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(skipBtn)
-            addView(nextBtn)
+            addView(nextBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also { it.marginStart = ctx.dpi(8) })
         }
         card.apply {
             orientation = LinearLayout.VERTICAL
             setPadding(ctx.dpi(20), ctx.dpi(18), ctx.dpi(16), ctx.dpi(14))
-            background = Glass.solid(ctx, UiTheme.sheet, 22, UiTheme.stroke)
+            background = Glass.panel(ctx, Space.radiusL, strong = true)
             elevation = 12f * dens
             addView(titleTv)
             addView(bodyTv)

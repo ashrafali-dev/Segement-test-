@@ -3,10 +3,7 @@ package com.ashraf.novelstudio
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.animation.LinearInterpolator
@@ -29,21 +26,16 @@ class ActivityChip(context: Context) : LinearLayout(context) {
         gravity = Gravity.CENTER_VERTICAL
         val d = resources.displayMetrics.density
         setPadding((12 * d).toInt(), (7 * d).toInt(), (14 * d).toInt(), (7 * d).toInt())
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = 20 * d
-            setColor(0xE6121420.toInt())
-            setStroke((1 * d).toInt().coerceAtLeast(1), 0x33FFFFFF)
-        }
+        background = Glass.panel(context, 20).apply { setStroke((1 * d).toInt().coerceAtLeast(1), UiTheme.role(UiTheme.Role.STROKE)) }
         elevation = 12 * d
         isClickable = false
         isFocusable = false
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         addView(dots, LayoutParams((26 * d).toInt(), (14 * d).toInt()).also { it.rightMargin = (8 * d).toInt() })
         label.apply {
-            setTextColor(Color.WHITE)
-            textSize = 12.5f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            textSize = Type.caption
+            typeface = Type.medium()
             // Long engine/error labels wrap onto up to 4 lines instead of being cut off at the screen edge.
             maxLines = 4
             maxWidth = (context.resources.displayMetrics.widthPixels - 110 * d).toInt()

@@ -103,6 +103,38 @@ class ModeGlyphPainter {
         }
         c.restore()
     }
+
+    /**
+     * The three reader-setting leaves share one silhouette (three lines that deliberately diverge),
+     * so "size", "line spacing" and "letter spacing" read as a family instead of three unrelated
+     * knobs, sliders and grills.
+     */
+    fun drawSettings(c: Canvas, kind: Int, cx: Float, cy: Float, size: Float, color: Int) {
+        val s = size / 24f
+        c.save()
+        c.translate(cx - size / 2f, cy - size / 2f)
+        c.scale(s, s)
+        stroke.color = color
+        stroke.strokeWidth = 1.9f
+        val left = 4f
+        val w = 16f
+        val gap = when (kind) {
+            0 -> 5f          // text size: stacked tight
+            1 -> 8.5f        // line spacing: stacked loose
+            else -> 5f
+        }
+        val top = 12f - gap
+        for (r in 0 until 3) {
+            val y = top + gap * r
+            val shrink = when (kind) {
+                0 -> 0f                    // full width: one line
+                1 -> 0f                    // full width, further apart
+                else -> r * 1.6f           // letter spacing: each row a little shorter
+            }
+            c.drawLine(left + shrink, y, left + w - shrink, y, stroke)
+        }
+        c.restore()
+    }
 }
 
 // ============================================================================ dock capsule
@@ -117,7 +149,7 @@ class ModeCapsule(ctx: Context) : View(ctx) {
     private val trackStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 1f * dens
-        color = UiTheme.strokeSoft
+        color = UiTheme.role(UiTheme.Role.STROKE_SOFT)
     }
     private val thumb = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
@@ -199,7 +231,7 @@ class ModeCapsule(ctx: Context) : View(ctx) {
         for (i in 0..2) {
             val cx = pad + segW * (i + 0.5f)
             val d = min(1f, abs(pos - i))
-            glyph.draw(c, i, cx, h / 2f, 17f * dens, ModeUi.lerp(Color.WHITE, UiTheme.iconIdle, d))
+            glyph.draw(c, i, cx, h / 2f, 17f * dens, ModeUi.lerp(Color.WHITE, UiTheme.role(UiTheme.Role.ICON), d))
         }
     }
 
@@ -349,11 +381,11 @@ class ModeSwitchOverlay(ctx: Context) : View(ctx) {
 
         // glass card
         rect.set(cx - cardW / 2f, cy - cardW / 2f, cx + cardW / 2f, cy + cardW / 2f)
-        p.color = UiTheme.sheet
+        p.color = UiTheme.role(UiTheme.Role.SHEET)
         p.alpha = 0xEE
         c.drawRoundRect(rect, 30f * dens, 30f * dens, p)
         p.alpha = 255
-        st.color = 0x33FFFFFF
+        st.color = UiTheme.role(UiTheme.Role.STROKE)
         st.strokeWidth = 1f * dens
         c.drawRoundRect(rect, 30f * dens, 30f * dens, st)
 
