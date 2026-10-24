@@ -33,7 +33,7 @@ internal object WebModeTextRemover {
         encoded: ByteArray,
         bubbles: List<WmBubble>
     ): Boolean {
-        if (!Prefs.bool(context, "wmTextRemoval", true)) return false
+        if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
         if (isAnimatedOrUnsupported(encoded)) return false
 
@@ -72,6 +72,16 @@ internal object WebModeTextRemover {
                 .filter { it.sourceText.isNotBlank() && it.w > 0f && it.h > 0f }
                 .take(500)
                 .toList()
+
+            // Step 1 - bubbles whose SHAPE is known (closed flat speech bubble): paint the whole interior with the paper
+            // colour. This does not depend on the lettering test below, so Japanese columns, bold SFX and lettering the
+            // recogniser missed are wiped too, and the bubble counts as cleaned. (Before, any bubble that failed one of the
+            // strict glyph checks kept its old text and fell back to an ugly background box.)
+            for (bubble in boundedBubbles) {
+                if (bubble.soft || bubble.cv.size < 4) continue
+                val n = try { wipeInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)) } catch (_: Exception) { 0 }
+                if (n > 0) { totalRemoved += n; erased.add(WebModeTextRemovalCache.bubbleKey(bubble)) }
+            }
 
             for (bubble in boundedBubbles) {
                 val cx = bubble.cx * width
@@ -342,6 +352,45 @@ internal object WebModeTextRemover {
         } finally {
             bitmap.recycle()
         }
+    }
+
+    /**
+     * Paints the paper colour over every pixel inside the bubble-interior rectangles [cv] (flat list of left, top, right,
+     * bottom image fractions) that differs from it. Returns the number of pixels changed. If more than ~45 % of the
+     * interior is dark/coloured it is not an empty bubble with lettering but artwork: nothing is touched.
+     */
+    private fun wipeInterior(bitmap: Bitmap, cv: List<Float>, width: Int, height: Int, bg: Int): Int {
+        val rects = ArrayList<IntArray>()
+        var q = 0
+        while (q + 3 < cv.size) {
+            val l = (cv[q] * width).toInt().coerceIn(0, width)
+            val t = (cv[q + 1] * height).toInt().coerceIn(0, height)
+            val r = ceil(cv[q + 2] * width).toInt().coerceIn(l, width)
+            val b = ceil(cv[q + 3] * height).toInt().coerceIn(t, height)
+            if (r - l >= 2 && b - t >= 2 && (r - l).toLong() * (b - t) <= 2_500_000L) rects.add(intArrayOf(l, t, r, b))
+            q += 4
+        }
+        if (rects.isEmpty()) return 0
+        var total = 0L
+        var ink = 0L
+        for (rc in rects) {
+            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
+            val px = IntArray(w * h)
+            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
+            for (p in px) { total++; if (distance(p, bg) >= 60f) ink++ }
+        }
+        if (total == 0L || ink * 100 > total * 45) return 0
+        val paper = opaque(bg)
+        var changed = 0
+        for (rc in rects) {
+            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
+            val px = IntArray(w * h)
+            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
+            var any = false
+            for (i in px.indices) if (distance(px[i], bg) >= 4f) { px[i] = paper; changed++; any = true }
+            if (any) bitmap.setPixels(px, 0, w, rc[0], rc[1], w, h)
+        }
+        return changed
     }
 
     /** Colour for one erased pixel on artwork: inverse-distance blend of the nearest kept pixel in each of 8 directions (1/d² weights: no streaks, no pulling in far colours). */

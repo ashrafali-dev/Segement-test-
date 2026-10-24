@@ -9440,7 +9440,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "💬 Join the Community (Telegram · Reddit)",
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
-            "🧹 Clear OCR Log (then reproduce the problem)"
+            "🧹 Clear OCR Log (then reproduce the problem)",
+            menuYoloLabel()
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -9449,14 +9450,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
             27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT,
-            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD
+            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
             "COMMUNITY" to listOf(56),
             "LIBRARY" to listOf(0, 4, 1, 3),
             "TRANSLATE" to listOf(5, 33, 54, 7),
-            "OCR" to listOf(53, 50, 57, 58, 59),
+            "OCR" to listOf(53, 50, 57, 58, 59, 60),
             "READER" to listOf(9, 20, 23),
             "APP" to listOf(55)
         )
@@ -9544,9 +9545,9 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                         .setPositiveButton("OK", null)
                         .setNeutralButton("Forget this site") { _, _ ->
                             try {
-                                val o = org.json.JSONObject(Prefs.get(this, "siteLearn", "{}"))
+                                val o = org.json.JSONObject(Prefs.get(this, "siteLearn2", "{}"))
                                 o.remove(host)
-                                Prefs.put(this, "siteLearn", o.toString())
+                                Prefs.put(this, "siteLearn2", o.toString())
                                 toast("Forgotten — the app will learn this site again")
                             } catch (_: Exception) {}
                         }
@@ -9587,8 +9588,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                           else "📝 Only the text is sent (no prompt) — scan & real-time")
                 }
                 38 -> {
-                    val on = !Prefs.bool(this, "wmTextRemoval", false)
-                    Prefs.putBool(this, "wmTextRemoval", on)
+                    val on = !Prefs.bool(this, "wmTextRemoval2", true)
+                    Prefs.putBool(this, "wmTextRemoval2", on)
                     if (on) {
                         toast("🧽 Text Remover ON — next Web Mode/Japanese Manga OCR scan will clean only safe text pixels.")
                     } else {
@@ -9662,6 +9663,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     copy(full)
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
+                60 -> { yoloDialog { refresh(i, menuYoloLabel()) } }
                 59 -> {
                     OcrDiag.clear()
                     toast("🧹 OCR log cleared — now open the page, scan, then copy the log")
@@ -10267,8 +10269,40 @@ ${rows.take(220).joinToString("\n")}
     private fun menuAdBlockLabel(): String =
         (if (Prefs.adblock(this)) "✅" else "⬜") + " Ad Block"
 
+    private fun menuYoloLabel(): String =
+        "🫧 Bubble Detector (YOLO, optional): " + (if (YoloBubbleDetector.enabled(this)) "ACTIVE" else if (YoloBubbleDetector.isInstalled(this)) "installed" else "light mode")
+
+    /**
+     * Optional precise bubble detector for phones with plenty of RAM. The model file is downloaded by the user (from the
+     * Manga Translator project) and imported here with a file picker: the app copies it to its own folder, so no path has
+     * to be typed or fixed afterwards.
+     */
+    private fun yoloDialog(onChanged: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setTitle("Bubble Detector (YOLO)")
+            .setMessage(YoloBubbleDetector.status(this) +
+                "\n\nThe app already finds bubble shapes without any download (light mode). This model is only for phones " +
+                "with 6 GB RAM or more and gives exact balloon outlines. File needed: mixed-dual-s-e5_float16.tflite")
+            .setPositiveButton("Import model file") { _, _ ->
+                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                }
+                startActivityForResult(i, REQ_YOLO_MODEL)
+            }
+            .setNeutralButton("Mode: " + YoloBubbleDetector.mode(this)) { _, _ ->
+                val next = when (YoloBubbleDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
+                Prefs.put(this, "wmYoloMode", next)
+                if (next == "off") YoloBubbleDetector.release()
+                toast("Bubble detector mode: $next")
+                onChanged()
+            }
+            .setNegativeButton("Remove model") { _, _ -> YoloBubbleDetector.delete(this); toast("Model removed"); onChanged() }
+            .show()
+    }
+
     private fun menuTextRemovalLabel(): String =
-        (if (Prefs.bool(this, "wmTextRemoval", false)) "✅" else "⬜") + " 🧽 Text Remover (Webtoon + Manga)"
+        (if (Prefs.bool(this, "wmTextRemoval2", true)) "✅" else "⬜") + " 🧽 Text Remover (Webtoon + Manga)"
 
     /** Glass bottom sheet with one tappable row per label (long-press optional). */
     /** A sheet with a search box on top; used for the long language lists. */
@@ -10438,6 +10472,8 @@ ${rows.take(220).joinToString("\n")}
         startActivityForResult(i, 42)
     }
 
+    private val REQ_YOLO_MODEL = 4731
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 42 && resultCode == RESULT_OK) {
@@ -10447,6 +10483,17 @@ ${rows.take(220).joinToString("\n")}
                 toast("✅ Export completed")
             } catch (e: Exception) {
                 toast("❌ " + (e.message ?: "Failed"))
+            }
+        } else if (requestCode == REQ_YOLO_MODEL) {
+            val u = data?.data
+            if (resultCode == RESULT_OK && u != null) {
+                toast("Importing model...")
+                Thread {
+                    val err = YoloBubbleDetector.importFrom(this, u)
+                    runOnUiThread {
+                        toast(if (err == null) "✅ Model imported. " + (if (YoloBubbleDetector.libraryPresent()) "" else "Add the LiteRT line to app/build.gradle to use it.") else "❌ $err")
+                    }
+                }.start()
             }
         } else if (requestCode == com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.REQUEST_CODE &&
             resultCode == RESULT_OK) {

@@ -29,7 +29,12 @@ internal object WebModeTextRemovalCache {
 
     /** Stable id of a bubble by its (rounded) position; the writer looks it up with the same function. */
     fun bubbleKey(b: WmBubble): String =
-        "${Math.round(b.cx * 1000f)}:${Math.round(b.cy * 1000f)}:${Math.round(b.w * 1000f)}:${Math.round(b.h * 1000f)}"
+        "${k(b.cx)}:${k(b.cy)}:${k(b.w)}:${k(b.h)}"
+
+    // The saved layout stores every number rounded to 5 decimals. Rounding to 5 decimals FIRST makes the key of the freshly
+    // read bubble and of the same bubble after the save/load round trip identical (before, ~3 % of the bubbles landed on
+    // the other side of a .0005 boundary, lost their "erased" mark and fell back to a background box).
+    private fun k(v: Float): Long = Math.round((Math.round(v * 100000.0) / 100000.0) * 1000.0)
 
     @Synchronized
     fun setErased(sourceUrl: String, keys: Set<String>) {

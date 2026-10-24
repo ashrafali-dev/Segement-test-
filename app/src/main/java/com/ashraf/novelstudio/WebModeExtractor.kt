@@ -130,6 +130,12 @@ internal class WebModeExtractor(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PanelOcr>?): Boolean = size > 60
     }
     private val aheadDone: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    // The panel the read-ahead is reading RIGHT NOW. When the reader reaches it, the visible job waits for that result
+    // (a few seconds at most) instead of starting a second download + OCR of the same picture.
+    @Volatile private var aheadBusyKey: String = ""
+    // Panels a visible job already read and found without text: not read again for a while (art-only panels were
+    // re-read every few seconds while they stayed on screen).
+    private val blankSeenAt = ConcurrentHashMap<String, Long>()
     // Panels the read-ahead gave up on (no text, too small, or the download failed twice). They must not
     // keep occupying the look-ahead window, otherwise art-only panels would stop it from moving forward.
     private val aheadBlank: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -321,6 +327,20 @@ internal class WebModeExtractor(
 
         private fun aheadFinished() { onMain { req.onAheadDone?.invoke() } }
 
+        /** A finished visible read is kept like a read-ahead result: the same panel is never read twice. */
+        private fun rememberVisibleRead(liveView: Boolean, src: String, po: PanelOcr) {
+            if (!liveView) return
+            val key = WebModeLogic.normalizeUrl(src)
+            if (key.isBlank()) return
+            if (po.text.isNotBlank()) {
+                synchronized(aheadCache) { aheadCache[key] = po }
+                aheadDone.add(key)
+                blankSeenAt.remove(key)
+            } else {
+                blankSeenAt[key] = SystemClock.elapsedRealtime()
+            }
+        }
+
         private fun processAhead(refs: List<PanelRef>, pageUrl: String, lang: String) {
             val script = newScript(lang, pageUrl)
             // Full-chapter inventory may legitimately contain hundreds of panels. Do not
@@ -347,6 +367,7 @@ internal class WebModeExtractor(
                 }
                 // A previous cache eviction must not leave a URL permanently marked as done.
                 aheadDone.remove(key)
+                aheadBusyKey = key
                 try {
                     progress("Read-ahead OCR: loading image ${index + 1}/$total", index * 99 / total)
                     val bytes = fetchWithRetry(p, pageUrl) ?: run {
@@ -377,8 +398,11 @@ internal class WebModeExtractor(
                 } catch (_: OutOfMemoryError) {
                     progress("Read-ahead OCR: memory limit hit; stopping safely", index * 99 / total)
                     break
+                } finally {
+                    if (aheadBusyKey == key) aheadBusyKey = ""
                 }
             }
+            aheadBusyKey = ""
             if (alive()) progress("Read-ahead OCR complete: ${cachedCount}/$total panels cached", 99)
         }
         // ---- phase 1: scroll the real page so lazy loaders fire, until the image set stops changing
@@ -693,7 +717,25 @@ internal class WebModeExtractor(
                 if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
                 if (req.visibleOnly && req.forceOcrSrc.isNullOrBlank()) {
                     // Real-time: this panel may already have been read ahead (download + full OCR done).
-                    val hit = synchronized(aheadCache) { aheadCache[WebModeLogic.normalizeUrl(p.src)] }
+                    val hitKey = WebModeLogic.normalizeUrl(p.src)
+                    var hit = synchronized(aheadCache) { aheadCache[hitKey] }
+                    if (hit == null && aheadBusyKey == hitKey) {
+                        // The read-ahead is working on exactly this panel: let it finish rather than doing the work twice.
+                        val waitUntil = SystemClock.elapsedRealtime() + AHEAD_WAIT_MS
+                        while (hit == null && aheadBusyKey == hitKey && alive() && SystemClock.elapsedRealtime() < waitUntil) {
+                            try { Thread.sleep(80L) } catch (_: InterruptedException) { break }
+                            hit = synchronized(aheadCache) { aheadCache[hitKey] }
+                        }
+                    }
+                    if (hit == null) {
+                        val seenBlank = blankSeenAt[hitKey]
+                        if (seenBlank != null && SystemClock.elapsedRealtime() - seenBlank < BLANK_MEMO_MS) {
+                            diag.downloaded++; diag.decoded++; diag.ocrEmpty++
+                            texts[i] = ""
+                            layouts[i] = emptyList()
+                            continue
+                        }
+                    }
                     if (hit != null) {
                         diag.downloaded++; diag.decoded++
                         val ct = hit.text
@@ -786,6 +828,7 @@ internal class WebModeExtractor(
                     if (t.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += t.length }
                     texts[i] = t
                     layouts[i] = po.bubbles
+                    rememberVisibleRead(liveView, p.src, po)
                     if (liveView && t.isNotBlank()) SiteLearner.recordDownload(wv.context, hostOf(meta.url), true, SystemClock.elapsedRealtime() - tFetch)
                 } catch (e: OcrUnavailableException) {
                     fail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label)
@@ -838,6 +881,7 @@ internal class WebModeExtractor(
                             if (t.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += t.length }
                             texts[i] = t
                             layouts[i] = po.bubbles
+                            rememberVisibleRead(liveView, panels[i].src, po)
                             if (liveView && t.isNotBlank()) {
                                 SiteLearner.recordDownload(wv.context, hostOf(meta.url),
                                     true, SystemClock.elapsedRealtime() - panelFetchStartedAt[i])
@@ -1805,7 +1849,7 @@ internal class WebModeExtractor(
             fun finishResult(): PanelOcr {
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
-                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval", true) &&
+                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) &&
                     (src.startsWith("https://", true) || src.startsWith("http://", true))) {
                     try {
                         WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles)
@@ -1868,14 +1912,58 @@ internal class WebModeExtractor(
                     ?: throw DecodeException()
                 try {
                     val sl = WebModeLogic.slices(h)
-                    for ((idx, yy) in sl.withIndex()) {
-                        val (y0, y1) = yy
-                        if (!alive()) break
-                        val bmp = region.decodeRegion(Rect(0, y0, w, y1), opts) ?: throw DecodeException()
+                    // Google Lens is a network round trip (~0.7 s) per slice. A tall panel used to pay that once per slice,
+                    // one after the other: send up to three slices at once and process their answers in page order.
+                    val router = engine as? RoutingOcrEngine
+                    val lensParallelSlices = sl.size > 1 && !OcrGate.isBackgroundThread() &&
+                        router?.usesRemoteTextDetection() == true
+                    if (lensParallelSlices) {
+                        try { router?.prepareForConcurrentLens(st.current) } catch (_: Throwable) {}
+                        val pool = Executors.newFixedThreadPool(3) { r -> Thread(r, "ns-webmode-lens-slice") }
                         try {
-                            if (bmp.width >= 32 && bmp.height >= 32)
-                                readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1, fastMode = fastMode)
-                        } finally { bmp.recycle() }
+                            var at = 0
+                            while (at < sl.size) {
+                                if (!alive()) break
+                                val end = minOf(sl.size, at + 3)
+                                val bmps = ArrayList<Bitmap?>()
+                                val futs = ArrayList<java.util.concurrent.Future<OcrResult>?>()
+                                try {
+                                    for (j in at until end) {
+                                        val b = region.decodeRegion(Rect(0, sl[j].first, w, sl[j].second), opts)
+                                        bmps.add(b)
+                                        futs.add(if (b != null && b.width >= 32 && b.height >= 32)
+                                            pool.submit(java.util.concurrent.Callable {
+                                                LENS_SLICE_SLOTS.acquire()
+                                                try { recognize(b, st, fastMode) } finally { LENS_SLICE_SLOTS.release() }
+                                            }) else null)
+                                    }
+                                    for (o in 0 until end - at) {
+                                        val j = at + o
+                                        val b = bmps[o] ?: throw DecodeException()
+                                        val rec = try { futs[o]?.get(30, TimeUnit.SECONDS) }
+                                            catch (e: java.util.concurrent.ExecutionException) { throw e.cause ?: e }
+                                            catch (e: java.util.concurrent.TimeoutException) { throw RuntimeException("Lens slice timeout", e) }
+                                        if (rec != null)
+                                            readSlice(b, st, sl[j].first, sample, w, h, src, texts, bubbles, j == 0, j == sl.size - 1,
+                                                fastMode = fastMode, preRecognized = rec)
+                                    }
+                                } finally {
+                                    for (f in futs) f?.cancel(true)
+                                    for (b in bmps) try { b?.recycle() } catch (_: Throwable) {}
+                                }
+                                at = end
+                            }
+                        } finally { pool.shutdownNow() }
+                    } else {
+                        for ((idx, yy) in sl.withIndex()) {
+                            val (y0, y1) = yy
+                            if (!alive()) break
+                            val bmp = region.decodeRegion(Rect(0, y0, w, y1), opts) ?: throw DecodeException()
+                            try {
+                                if (bmp.width >= 32 && bmp.height >= 32)
+                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1, fastMode = fastMode)
+                            } finally { bmp.recycle() }
+                        }
                     }
                 } finally { region.recycle() }
             }
@@ -1896,6 +1984,7 @@ internal class WebModeExtractor(
             val outBefore = out.size
             var groupMs = 0L
             var ocrMs = 0L
+            var fitMs = 0L
             var lineCount = 0
             try {
             // Audit raw lines BEFORE joining paragraphs. A merged paragraph rectangle hides skipped
@@ -1913,6 +2002,9 @@ internal class WebModeExtractor(
             if (blocks.isEmpty()) return
             val rects = blocks.map { WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
             val k = sample.toFloat()
+            // Optional precise balloon masks (one model run per slice), null when not installed/enabled.
+            val yoloBalloons: List<YoloBubbleDetector.Balloon>? =
+                if (Prefs.bool(wv.context, "wmBubbleFit", true)) YoloBubbleDetector.detect(wv.context, bmp) else null
 
             // A flat speech bubble can contain lettering that the first pass missed.
             // Do this check for LONG blocks too: a long partial read is still partial.
@@ -1933,7 +2025,12 @@ internal class WebModeExtractor(
                 // Non-transitive grouping + image evidence (outline between two lines) -- see BubbleGrouping.groups.
                 val tg = android.os.SystemClock.elapsedRealtime()
                 val grp = BubbleGrouping.groupContaining(blocks, i, pool.filter { !consumed[it] }) { x, y ->
-                    OcrPost.outlineBetween(bmp, x, y)
+                    OcrPost.outlineBetween(bmp, x, y) || run {
+                        // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
+                        // never one sentence. Unknown shape (null) keeps the geometry decision.
+                        val ix = blocks.indexOf(x); val iy = blocks.indexOf(y)
+                        ix >= 0 && iy >= 0 && BubbleFit.sameBubble(bmp, rects[ix], rects[iy], rects) == false
+                    }
                 }.toCollection(LinkedHashSet<Int>())
                 groupMs += android.os.SystemClock.elapsedRealtime() - tg
                 if (grp.size < 2) return
@@ -2065,9 +2162,18 @@ internal class WebModeExtractor(
                 // lettering. Without this the text was fitted into the lettering's own tight box (a long translation got
                 // tiny) or into an oval's bounding box (its corners lie outside the outline: text left the bubble).
                 var tL = 0; var tT = 0; var tR = 0; var tB = 0
-                if (!rotated && !b.vertical && Prefs.bool(wv.context, "wmBubbleFit", true)) {
+                var coverBands: List<IntArray> = emptyList()
+                if (!rotated && Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     val seedBox = refinedSeed[i] ?: rects[i]
-                    val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
+                    val tFit = android.os.SystemClock.elapsedRealtime()
+                    // Precise balloons from the optional YOLO model when it is installed and enabled; otherwise (or when it
+                    // found no balloon around this lettering) the light pixel-based finder.
+                    val yolo = yoloBalloons
+                    val fit = try {
+                        (if (yolo != null) BubbleFit.fromBalloons(yolo, seedBox, rects) else null)
+                            ?: BubbleFit.analyse(bmp, seedBox, rects)
+                    } catch (_: Throwable) { null }
+                    fitMs += android.os.SystemClock.elapsedRealtime() - tFit
                     if (fit != null) {
                         val sf = fit.safe
                         val aL = Math.floor((cx - bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
@@ -2093,6 +2199,9 @@ internal class WebModeExtractor(
                         val textArea = (xr - xl).toLong() * (xb - xt)
                         if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
                             tL = xl; tT = xt; tR = xr; tB = xb
+                            // The whole interior (not just the lettering box) is what gets painted over when the picture
+                            // itself is not cleaned.
+                            coverBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
                             cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
                         }
                     }
@@ -2108,7 +2217,13 @@ internal class WebModeExtractor(
                     tcx = if (tR > tL) (x0 + (tL + tR) / 2f * k) / fullW else 0f,
                     tcy = if (tR > tL) (y0 + (tT + tB) / 2f * k) / fullH else 0f,
                     tbw = if (tR > tL) (tR - tL) * k / fullW else 0f,
-                    tbh = if (tR > tL) (tB - tT) * k / fullH else 0f
+                    tbh = if (tR > tL) (tB - tT) * k / fullH else 0f,
+                    cv = if (tR > tL && coverBands.isNotEmpty()) ArrayList<Float>(coverBands.size * 4).also { lst ->
+                        for (cb in coverBands) {
+                            lst.add((x0 + cb[0] * k) / fullW); lst.add((y0 + cb[1] * k) / fullH)
+                            lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
+                        }
+                    } else emptyList()
                 )
                 // Same text seen by two overlapping slices: keep the bigger box once.
                 var dup = -1
@@ -2138,7 +2253,7 @@ internal class WebModeExtractor(
                         // A union covers the recovered lower rows too; choosing just the bigger box
                         // can leave the other slice's tail visibly untranslated.
                         out[dup] = prior.copy(sourceText = merged, cx = (l + r) / 2, cy = (t + bt) / 2,
-                            w = r - l, h = bt - t, tcx = 0f, tcy = 0f, tbw = 0f, tbh = 0f)
+                            w = r - l, h = bt - t, tcx = 0f, tcy = 0f, tbw = 0f, tbh = 0f, cv = emptyList())
                         texts[dup] = merged
                     }
                     continue
@@ -2148,7 +2263,7 @@ internal class WebModeExtractor(
             }
             } finally {
                 // Structured diagnostics: counts and timings only, never recognised text.
-                Log.i(TAG, "slice job=$id mode=${if (fastMode) "fast" else "full"} ocrMs=$ocrMs groupingMs=$groupMs " +
+                Log.i(TAG, "slice job=$id mode=${if (fastMode) "fast" else "full"} ocrMs=$ocrMs groupingMs=$groupMs bubbleFitMs=$fitMs " +
                     "sliceTotalMs=${android.os.SystemClock.elapsedRealtime() - tSlice} lines=$lineCount " +
                     "groups=${out.size - outBefore} image=${bmp.width}x${bmp.height}")
             }
@@ -2409,6 +2524,10 @@ internal class WebModeExtractor(
         private const val MAX_BYTES = 25 * 1024 * 1024
         private const val FETCH_THREADS = 4
         private const val FETCH_AHEAD = 4
+        // How long a visible job waits for the read-ahead that is already reading the very same panel.
+        private const val AHEAD_WAIT_MS = 5000L
+        // A panel read without text is not read again within this time.
+        private const val BLANK_MEMO_MS = 90_000L
         private const val EARLY_ABORT_FAILS = 4
         private const val DISCOVERY_MAX_MS = 120_000L
         private const val EMPTY_GRACE_MS = 8_000L
@@ -2416,6 +2535,8 @@ internal class WebModeExtractor(
         private const val LENS_IMAGE_FETCH_WAIT_MS = 900L
         private const val VISIBLE_FETCH_WAIT_MS = 7_000L
         private const val SCREEN_LENS_DEADLINE_MS = 12_000L
+        // At most this many Lens requests of tall-panel slices in flight at once (all panels together).
+        private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(4)
         private const val JOB_MAX_MS = 12 * 60_000L
         private const val VALIDITY_CHECK_INTERVAL_MS = 250L
         private const val MIN_W = 120

@@ -89,6 +89,7 @@ internal object WebModeWriter {
     cleanLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:0;';
     w.appendChild(cleanLayer);
     var cleanImgs=Object.create(null);
+    var holes=Object.create(null);   // per picture: rectangles (image fractions) where the ORIGINAL must show through
     function ensureCleanImage(im,s,url,r,o0){
       if(!url||!im||!r||r.width<8||r.height<8)return;
       var key=norm(s),entry=cleanImgs[key];
@@ -101,11 +102,22 @@ internal object WebModeWriter {
       if(entry.url!==url){entry.url=url;entry.el.src=url;}
       var x=ABS?(r.left-o0.left):r.left,y=ABS?(r.top-o0.top):r.top;
       entry.el.style.width=r.width+'px';entry.el.style.height=r.height+'px';
+      var hl=holes[key];
+      if(hl&&hl.length){
+        // evenodd path = whole picture minus the holes
+        var W=r.width,H=r.height,d='M0 0H'+W+'V'+H+'H0Z';
+        for(var hi=0;hi<hl.length;hi++){var q=hl[hi];
+          var hx0=Math.max(0,q[0]*W),hy0=Math.max(0,q[1]*H),hx1=Math.min(W,q[2]*W),hy1=Math.min(H,q[3]*H);
+          if(hx1>hx0&&hy1>hy0)d+='M'+hx0.toFixed(1)+' '+hy0.toFixed(1)+'H'+hx1.toFixed(1)+'V'+hy1.toFixed(1)+'H'+hx0.toFixed(1)+'Z';}
+        var cp='path(evenodd,"'+d+'")';
+        if(entry.cp!==cp){entry.cp=cp;entry.el.style.clipPath=cp;entry.el.style.webkitClipPath=cp;}
+      }else if(entry.cp){entry.cp='';entry.el.style.clipPath='';entry.el.style.webkitClipPath='';}
       entry.el.style.transform='translate3d('+x+'px,'+y+'px,0)';
     }
     var fam=font?"'NSBn',sans-serif":'sans-serif';
     for(var i=0;i<items.length;i++){
       var it=items[i];
+      if(it.hole){var hk=norm(it.s);(holes[hk]=holes[hk]||[]);for(var hq=0;hq<it.r.length;hq++)holes[hk].push(it.r[hq]);continue;}
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
       b.setAttribute('data-cl',it.cl||'');
@@ -118,8 +130,8 @@ internal object WebModeWriter {
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
         // If the underlying source image was cleaned, do not put an opaque box over it:
         // untouched nearby lettering/line art stays visible instead of disappearing under the translation.
-        +'background:'+(it.cl?'transparent':it.bg)+';color:'+it.fg+';font-family:'+fam+';font-weight:600;'
-        +(it.cl?'border-radius:0;box-shadow:none;':(it.sf?'border-radius:12px;box-shadow:0 0 7px 5px '+it.bg+';':'border-radius:4px;box-shadow:0 0 0 3px '+it.bg+';'));
+        +'background:'+((it.cl||(it.cv&&it.cv.length>=4))?'transparent':it.bg)+';color:'+it.fg+';font-family:'+fam+';font-weight:600;'
+        +((it.cl||(it.cv&&it.cv.length>=4))?'border-radius:0;box-shadow:none;':(it.sf?'border-radius:12px;box-shadow:0 0 7px 5px '+it.bg+';':'border-radius:4px;box-shadow:0 0 0 3px '+it.bg+';'));
       var t=document.createElement('div'); t.textContent=it.t;
       // Preserve Bengali grapheme clusters/ conjuncts and use a shaping-friendly text layout.
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
@@ -145,7 +157,20 @@ internal object WebModeWriter {
         t.style.webkitBackgroundClip='text'; t.style.backgroundClip='text';
         t.style.webkitTextFillColor='transparent'; t.style.color='transparent';
       }
-      b.appendChild(t); w.appendChild(b);
+      b.appendChild(t);
+      // Not cleaned in the picture: paint the paper colour over the WHOLE bubble interior (rectangles that stay inside
+      // the outline), behind the text. Lettering the recogniser missed is hidden too, and no box edge shows outside the bubble.
+      if(!it.cl&&it.cv&&it.cv.length>=4){
+        for(var ci=0;ci+3<it.cv.length;ci+=4){
+          var cd=document.createElement('div');
+          cd.className='__ns_cv';
+          cd.setAttribute('data-f',it.cv[ci]+','+it.cv[ci+1]+','+it.cv[ci+2]+','+it.cv[ci+3]);
+          cd.style.cssText='position:absolute;pointer-events:none;z-index:-1;margin:0;padding:0;left:0;top:0;width:0;height:0;'
+            +'background:'+it.bg+';';
+          b.appendChild(cd);
+        }
+      }
+      w.appendChild(b);
     }
     var allS=[],seenSources=Object.create(null);
     for(var si=0;si<(sources||[]).length;si++){
@@ -395,6 +420,8 @@ internal object WebModeWriter {
       for(var i=0;i<L.length;i++)for(var j=i+1;j<L.length;j++){
         var A=L[i],B=L[j];
         if(A.s!==B.s||A.rot||B.rot)continue;
+        // Bubbles that bring their own interior shape paint only inside their own outline: overlapping boxes are harmless.
+        if(A.cvd&&B.cvd)continue;
         var ox=Math.min(A.x1,B.x1)-Math.max(A.x0,B.x0),oy=Math.min(A.y1,B.y1)-Math.max(A.y0,B.y0);
         if(ox<=2||oy<=2)continue;
         var aA=(A.x1-A.x0)*(A.y1-A.y0),aB=(B.x1-B.x0)*(B.y1-B.y0);
@@ -482,7 +509,7 @@ internal object WebModeWriter {
         var near=!(vy+bh/2<-MARGIN||vy-bh/2>vh+MARGIN);
         if(!near){if(b.style.display!=='none')b.style.display='none';continue;}
         var px=ABS?(vx-o.left):vx,py=ABS?(vy-o.top):vy;          // centre in the overlay's own space
-        L.push({b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
+        L.push({b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,ox0:px-bw/2,oy0:py-bh/2,cvd:!!b.querySelector('.__ns_cv'),
           x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,rot:((g[4]*1)!==0),z:0});
       }
       resolve(L);
@@ -495,6 +522,13 @@ internal object WebModeWriter {
         if(bb.getAttribute('data-k')!==key){
           bb.setAttribute('data-k',key);
           bb.style.width=cw+'px'; bb.style.height=ch+'px';
+          // Interior cover rectangles are laid out against the NOMINAL box, so they stay put when the box was cut.
+          var cvs=bb.querySelectorAll('.__ns_cv');
+          for(var ci=0;ci<cvs.length;ci++){
+            var f=cvs[ci].getAttribute('data-f').split(','),cs=cvs[ci].style;
+            cs.left=(R.ox0+f[0]*R.ow-R.x0)+'px';cs.top=(R.oy0+f[1]*R.oh-R.y0)+'px';
+            cs.width=((f[2]-f[0])*R.ow)+'px';cs.height=((f[3]-f[1])*R.oh)+'px';
+          }
           bb.style.transform='translate3d('+(cx-cw/2)+'px,'+(cy-ch/2)+'px,0)'+((gg[4]*1)?' rotate('+gg[4]+'deg)':'');
         }
         var zz=R.z?String(R.z):'';
@@ -912,12 +946,40 @@ internal object WebModeWriter {
         for ((i, b) in layout.bubbles.withIndex()) {
             if (i in hidden) continue
             val t = WmSfx.fix(translated.getOrNull(i)?.trim().orEmpty())
-            if (t.isEmpty()) continue
+            if (t.isEmpty()) {
+                // Erased in the cleaned picture but not translated (yet): cut a HOLE in the cleaned picture there, so the
+                // original lettering stays visible instead of vanishing - and every OTHER bubble of the picture can still
+                // use the clean picture (before, one untranslated bubble switched the whole picture back to ugly boxes).
+                if (b.sourceText.isNotBlank() && b.w > 0f && b.h > 0f &&
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)) &&
+                    WebModeTextRemovalCache.urlFor(b.src) != null) {
+                    val rects = JSONArray()
+                    rects.put(JSONArray().put(r5(b.cx - b.w / 2f)).put(r5(b.cy - b.h / 2f)).put(r5(b.cx + b.w / 2f)).put(r5(b.cy + b.h / 2f)))
+                    var q = 0
+                    while (q + 3 < b.cv.size) {
+                        rects.put(JSONArray().put(r5(b.cv[q])).put(r5(b.cv[q + 1])).put(r5(b.cv[q + 2])).put(r5(b.cv[q + 3])))
+                        q += 4
+                    }
+                    arr.put(JSONObject().put("hole", true).put("s", WebModeLogic.normalizeUrl(b.src)).put("r", rects))
+                }
+                continue
+            }
             arr.put(JSONObject()
                 .put("t", t).put("s", WebModeLogic.normalizeUrl(b.src))
                 .put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
                 .put("a", r5(b.angle)).put("f", r5(b.font))
                 .apply {
+                    if (b.cv.size >= 4 && b.w > 0f && b.h > 0f) {
+                        val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
+                        val ja = JSONArray()
+                        var q = 0
+                        while (q + 3 < b.cv.size) {
+                            ja.put(r5((b.cv[q] - bl) / b.w)).put(r5((b.cv[q + 1] - bt) / b.h))
+                                .put(r5((b.cv[q + 2] - bl) / b.w)).put(r5((b.cv[q + 3] - bt) / b.h))
+                            q += 4
+                        }
+                        put("cv", ja)
+                    }
                     if (b.tbw > 0f && b.tbh > 0f && b.w > 0f && b.h > 0f) {
                         val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
                         val tl = b.tcx - b.tbw / 2f; val tt = b.tcy - b.tbh / 2f
@@ -932,8 +994,7 @@ internal object WebModeWriter {
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
-                .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)) &&
-                    canShowCleanImage[WebModeLogic.normalizeUrl(b.src)] == true)
+                .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
                     WebModeTextRemovalCache.urlFor(b.src).orEmpty() else ""))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.

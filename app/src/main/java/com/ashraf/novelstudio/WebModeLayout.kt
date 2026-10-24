@@ -33,7 +33,13 @@ internal data class WmBubble(
      * outline). Centre [tcx]/[tcy] and size [tbw]/[tbh], fractions of the image like the cover box. [tbw] = 0 means
      * "use the whole box".
      */
-    val tcx: Float = 0f, val tcy: Float = 0f, val tbw: Float = 0f, val tbh: Float = 0f
+    val tcx: Float = 0f, val tcy: Float = 0f, val tbw: Float = 0f, val tbh: Float = 0f,
+    /**
+     * The whole bubble interior as rectangles (flat list of left, top, right, bottom per rectangle, fractions of the
+     * image). Painted in the paper colour when the picture itself could not be cleaned, so lettering the recogniser
+     * missed (a second line, "!!") cannot stay visible next to the translation. Empty = not known.
+     */
+    val cv: List<Float> = emptyList()
 )
 
 /**
@@ -49,7 +55,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             .put("a", r5(b.angle)).put("f", r5(b.font)).put("bg", b.bg).put("fg", b.fg)
             .put("fg2", b.fg2).put("sf", b.soft)
             .put("srcText", b.sourceText).put("tr", b.translatedText).put("so", b.stroke)
-            .put("tcx", r5(b.tcx)).put("tcy", r5(b.tcy)).put("tbw", r5(b.tbw)).put("tbh", r5(b.tbh)))
+            .put("tcx", r5(b.tcx)).put("tcy", r5(b.tcy)).put("tbw", r5(b.tbw)).put("tbh", r5(b.tbh))
+            .put("cv", JSONArray().also { arr -> for (v in b.cv) arr.put(r5(v)) }))
         return JSONObject().put("v", 2).put("to", titleOffset).put("b", a).toString()
     }
 
@@ -71,7 +78,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                     b.optInt("fg2", b.getInt("fg")), b.optBoolean("sf", false),
                     b.optString("srcText", ""), b.optString("tr", ""), b.optInt("so", 0),
                     b.optDouble("tcx", 0.0).toFloat(), b.optDouble("tcy", 0.0).toFloat(),
-                    b.optDouble("tbw", 0.0).toFloat(), b.optDouble("tbh", 0.0).toFloat()
+                    b.optDouble("tbw", 0.0).toFloat(), b.optDouble("tbh", 0.0).toFloat(),
+                    b.optJSONArray("cv")?.let { ja -> List(ja.length()) { k -> ja.optDouble(k, 0.0).toFloat() } } ?: emptyList()
                 ))
             }
             WebModeLayout(o.optInt("to", 1), list)

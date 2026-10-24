@@ -31,6 +31,70 @@ internal object BubbleFitCore {
             }
             return inside.toFloat() / total
         }
+
+        /**
+         * The bubble interior as a few rectangles [left, top, right, bottom] (window pixels), every one lying inside the
+         * bubble. Painted in the paper colour they hide ALL old lettering of the bubble (also lines the recogniser
+         * missed) without touching the outline - the "fill the whole bubble" step of Manga Translator, for the case
+         * where the picture itself cannot be cleaned. Rows with similar edges are merged; the band count is capped.
+         */
+        fun bands(maxBands: Int = 28): List<IntArray> {
+            // runs per row: [l, r) in cells
+            val rows = ArrayList<IntArray>(sh)   // flat [l0,r0,l1,r1,...]
+            for (y in 0 until sh) {
+                val rr = ArrayList<Int>()
+                var x = 0
+                while (x < sw) {
+                    if (!filled[y * sw + x]) { x++; continue }
+                    val st = x
+                    while (x < sw && filled[y * sw + x]) x++
+                    if (x - st >= 2) { rr.add(st); rr.add(x) }
+                }
+                rows.add(rr.toIntArray())
+            }
+            for (tol in 1..10) {
+                val out = ArrayList<IntArray>()
+                var gy = -1
+                var g: IntArray? = null
+                fun flush(endY: Int) {
+                    val cur = g ?: return
+                    var i = 0
+                    while (i < cur.size) {
+                        out.add(intArrayOf(cur[i] * ds, gy * ds, cur[i + 1] * ds, endY * ds))
+                        i += 2
+                    }
+                    g = null
+                }
+                for (y in 0 until sh) {
+                    val row = rows[y]
+                    val cur = g
+                    if (row.isEmpty()) { flush(y); continue }
+                    if (cur != null && cur.size == row.size) {
+                        var ok = true
+                        var i = 0
+                        while (i < row.size) {
+                            if (Math.abs(row[i] - cur[i]) > tol || Math.abs(row[i + 1] - cur[i + 1]) > tol) { ok = false; break }
+                            i++
+                            i++
+                        }
+                        if (ok) {
+                            // keep the INTERSECTION so the band never leaves the bubble
+                            var j = 0
+                            while (j < row.size) {
+                                cur[j] = maxOf(cur[j], row[j]); cur[j + 1] = minOf(cur[j + 1], row[j + 1]); j += 2
+                            }
+                            continue
+                        }
+                    }
+                    flush(y)
+                    g = row.copyOf(); gy = y
+                }
+                flush(sh)
+                val good = out.filter { it[2] - it[0] >= ds && it[3] - it[1] >= ds }
+                if (good.size <= maxBands) return good
+            }
+            return emptyList()
+        }
     }
 
     class Result(
@@ -167,6 +231,18 @@ internal object BubbleFitCore {
             val y1 = ((r[3] + ds - 1) / ds).coerceIn(y0, sh)
             for (y in y0 until y1) for (x in x0 until x1) filled[y * sw + x] = true
         }
+        return completeMask(filled, sw, sh, ds, seed, w, h)
+    }
+
+    /**
+     * Second half of [analyse], shared with detector-made masks: closes pockets (lettering islands) that are
+     * completely surrounded by bubble, then derives the interior bounds and the largest safe rectangle.
+     * [filled] is a (sw x sh) grid of cells of [ds] window pixels; [seed] is the lettering box in window pixels.
+     */
+    fun completeMask(filled: BooleanArray, sw: Int, sh: Int, ds: Int, seed: IntArray, w: Int, h: Int): Result? {
+        val queue = IntArray(sw * sh)
+        var qh: Int
+        var qt: Int
         val outside = BooleanArray(sw * sh)
         qh = 0; qt = 0
         fun pushOut(cx: Int, cy: Int) {
