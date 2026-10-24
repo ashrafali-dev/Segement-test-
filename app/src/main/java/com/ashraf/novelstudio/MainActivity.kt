@@ -92,8 +92,8 @@ class MainActivity : Activity() {
     private lateinit var activeWv: WebView
     // Isolated, off-screen reader used only for optional next-chapter prefetch.
     private lateinit var prefetchWv: WebView
-    // Isolated full-size WebView for the chapter-link queue; does not navigate the visible reader.
-    private lateinit var chapterLinkWv: WebView
+    // Lazily created only when the user explicitly starts Chapter Link Autopilot.
+    private var chapterLinkWv: WebView? = null
     private var chapterLinkAutopilotRunner: ChapterLinkAutopilotRunner? = null
     private var prefetchTarget = ""
     private var prefetchToken = 0
@@ -2450,7 +2450,7 @@ return t.length>=40?'TXT:'+t:'';
                 ScanKeepAlive.sync(this@MainActivity, jobBusy)
                 if (jobBusy) {
                     try { chatWv.resumeTimers() } catch (_: Exception) { }
-                    try { if (::chapterLinkWv.isInitialized) { chapterLinkWv.onResume(); chapterLinkWv.resumeTimers() } } catch (_: Exception) { }
+                    try { chapterLinkWv?.let { it.onResume(); it.resumeTimers() } } catch (_: Exception) { }
                 }
 
                 // The large button badge and the older tiny in-content dot mirror the same live stage.
@@ -3240,22 +3240,6 @@ return t.length>=40?'TXT:'+t:'';
         chatWv.settings.javaScriptCanOpenWindowsAutomatically = true
         chatWv.webChromeClient = ChatChrome()
         activeWv = novelWv
-        chapterLinkWv = WebView(this).apply {
-            setup(this)
-            alpha = 0.01f
-            isClickable = false
-            isFocusable = false
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            webChromeClient = WebChromeClient()
-            webViewClient = object : WebViewClient() {
-                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean = handleRendererGone(detail)
-                override fun onPageFinished(view: WebView?, url: String?) { super.onPageFinished(view, url); chapterLinkAutopilotRunner?.onPageFinished(url) }
-                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
-                    super.onReceivedError(view, request, error)
-                    if (request?.isForMainFrame == true) chapterLinkAutopilotRunner?.onPageLoadError(request.url?.toString(),error?.description?.toString().orEmpty())
-                }
-            }
-        }
         prefetchWv = WebView(this).apply {
             setup(this)
             alpha = 0.01f
@@ -3802,8 +3786,6 @@ return t.length>=40?'TXT:'+t:'';
         }
 
         content = FrameLayout(this).apply {
-            // The chapter-link WebView is attached at real size beneath the visible reader/chat panes.
-            addView(chapterLinkWv, 0, FrameLayout.LayoutParams(MP, MP))
             // Off-screen reader for prefetch: a real-size view UNDER the visible pages. A 1x1
             // WebView never triggers the lazy/IntersectionObserver rendering that WTR-LAB
             // and WebNovel use, so their chapter text never appeared.
@@ -4030,9 +4012,6 @@ return t.length>=40?'TXT:'+t:'';
             addView(floatBoltHost, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = dp(20) })
             addView(tourOverlay, FrameLayout.LayoutParams(MP, MP))
         }
-        chapterLinkAutopilotRunner = ChapterLinkAutopilotRunner(applicationContext,handler,chapterLinkWv,{ webMode },
-            { chapter -> enqueue(chapter) },
-            { ScanKeepAlive.sync(this@MainActivity,ChapterLinkAutopilotQueue.hasBackgroundWork(this@MainActivity)) })
         setContentView(root)
         applyWindowInsets(root, main, homeView, homeDock, dockWrap, chromeTopView)
         bindHomeToolbar(homeDock)
@@ -4056,7 +4035,6 @@ return t.length>=40?'TXT:'+t:'';
         Langs.applyRuntime(this)
         refreshHome()
         handleIntent(intent)
-        if (ChapterLinkAutopilotQueue.hasRunnable(this)) startChapterLinkAutopilot(showToast = false)
         NovelStudioAnalytics.track(
             this, "app_open",
             mode = analyticsReadMode(),
@@ -4602,12 +4580,59 @@ return t.length>=40?'TXT:'+t:'';
         handleIntent(intent)
     }
 
+    private fun ensureChapterLinkAutopilotRunner(): ChapterLinkAutopilotRunner {
+        chapterLinkAutopilotRunner?.let { return it }
+        val webView = chapterLinkWv ?: WebView(this).apply {
+            setup(this)
+            alpha = 0.01f
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
+                    handleRendererGone(detail)
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    chapterLinkAutopilotRunner?.onPageFinished(url)
+                }
+                override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                    super.onReceivedError(view, request, error)
+                    if (request?.isForMainFrame == true) {
+                        chapterLinkAutopilotRunner?.onPageLoadError(request.url?.toString(), error?.description?.toString().orEmpty())
+                    }
+                }
+            }
+        }.also { created ->
+            chapterLinkWv = created
+            if (::content.isInitialized) {
+                content.addView(created, 0, FrameLayout.LayoutParams(MP, MP))
+            } else {
+                chapterLinkWv = null
+                created.destroy()
+                throw IllegalStateException("Chapter Autopilot cannot start before the reader UI is ready")
+            }
+        }
+        return ChapterLinkAutopilotRunner(
+            applicationContext, handler, webView, { webMode },
+            { chapter -> enqueue(chapter) },
+            { ScanKeepAlive.sync(this@MainActivity, ChapterLinkAutopilotQueue.hasBackgroundWork(this@MainActivity)) }
+        ).also { chapterLinkAutopilotRunner = it }
+    }
+
     private fun startChapterLinkAutopilot(showToast: Boolean = true) {
-        if (!ChapterLinkAutopilotQueue.hasRunnable(this)) { if(showToast) toast("Add chapter links first, or resume the queue from Chapter Autopilot"); return }
-        val runner=chapterLinkAutopilotRunner
-        if(runner==null) { if(showToast) toast("Chapter Autopilot is not ready yet"); return }
-        runner.start(); ScanKeepAlive.sync(this,true)
-        if(showToast) toast("Chapter Autopilot started — scan and chatbot translation are queued")
+        if (!ChapterLinkAutopilotQueue.hasRunnable(this)) {
+            if (showToast) toast("Add chapter links first, or resume the queue from Chapter Autopilot")
+            return
+        }
+        val runner = try { ensureChapterLinkAutopilotRunner() } catch (t: Throwable) {
+            Log.e("ChapterAutopilot", "Unable to initialize chapter-link WebView", t)
+            if (showToast) toast("Chapter Autopilot could not start. See crash log.")
+            return
+        }
+        runner.start()
+        ScanKeepAlive.sync(this, true)
+        if (showToast) toast("Chapter Autopilot started — scan and chatbot translation are queued")
     }
 
     // Browser -> Share -> Novel Studio : open that link in the novel pane
@@ -11960,7 +11985,8 @@ ${rows.take(220).joinToString("\n")}
 
     override fun onDestroy() {
         chapterLinkAutopilotRunner?.stopForProcessRecreation()
-        try { chapterLinkWv.stopLoading(); chapterLinkWv.destroy() } catch (_: Exception) { }
+        chapterLinkWv?.let { try { it.stopLoading(); it.destroy() } catch (_: Exception) { } }
+        chapterLinkWv = null
         ScanKeepAlive.stop(this)
         aheadOcrHandle?.cancel()
         webModeHandle?.cancel()
