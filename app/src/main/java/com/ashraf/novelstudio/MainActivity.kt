@@ -2749,12 +2749,12 @@ return t.length>=40?'TXT:'+t:'';
         if (shown >= due.size || usageMin < due[shown] || isFinishing) return
         if (!Langs.setupDone(this) || (::tourOverlay.isInitialized && tourOverlay.isRunning())) return
         Prefs.put(this, "tipCount", (shown + 1).toString())
-        AlertDialog.Builder(this)
-            .setTitle("Quick tip")
         Sheets.info(
             this, "Quick tip",
             "If translation fails, text is not placed on the page, or the reading page keeps running for a long time, close the app completely and open it again. That fixes most stuck states."
         )
+    }
+
     // ---- "reading the page" that never ends: point new users to the search (re-scan) button
     private var readingSinceMs = 0L
 
