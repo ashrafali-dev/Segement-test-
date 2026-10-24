@@ -261,6 +261,14 @@ internal object BubbleFitCore {
             pushOut(cx + 1, cy); pushOut(cx - 1, cy); pushOut(cx, cy + 1); pushOut(cx, cy - 1)
         }
         var area = 0
+        var base = 0
+        var pockets = 0
+        for (i in filled.indices) {
+            if (filled[i]) base++ else if (!outside[i]) pockets++
+        }
+        // A real bubble only encloses small islands (the inside of letters, a missed word). A "bubble" that swallows a big
+        // island is an open page background around some artwork (a bowl, a character): not a bubble at all.
+        if (pockets * 100 > base * 30) return null
         for (i in filled.indices) {
             if (!filled[i] && !outside[i]) filled[i] = true
             if (filled[i]) area++

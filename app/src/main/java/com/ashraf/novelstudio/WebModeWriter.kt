@@ -376,10 +376,13 @@ internal object WebModeWriter {
       t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
       t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
       t.style.whiteSpace='normal';t.style.maxBlockSize='none';
+      t.style.flex='none';   // a flex item would shrink to the narrow box and report a wrong, too tall size while we measure
       // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
       // as a last resort, then request a taller geometry instead of clipping the final lines.
       var cap=Number(maxPx);if(!isFinite(cap)||cap<2)cap=4;
       var lo=0.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
+      // A readable floor: below it the box grows (sideways first, then taller) instead of the font shrinking further.
+      var floorPx=Math.max(6,Math.min(cap*0.62,hi));
       function fits(){
         var r=t.getBoundingClientRect();
         return r.height<=availH+0.5&&t.scrollHeight<=availH+1&&
@@ -388,6 +391,38 @@ internal object WebModeWriter {
       for(var n=0;n<18;n++){
         var mid=(lo+hi)/2;t.style.fontSize=mid+'px';
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
+      }
+      if(best<floorPx){
+        // Even the smallest readable size does not fit: take the free space at the sides.
+        // Font size AND the full text length are kept; the box simply becomes wider (bounded by the picture).
+        // Prefer ~85% of the original size and widen only as far as that needs; fall back to the floor when even
+        // the full free width cannot hold it.
+        var wantPx=Math.max(floorPx,Math.min(hi,cap*0.85));
+        t.style.fontSize=wantPx+'px';
+        var nomW=Number(b.__nsNomW)||boxW,maxW=Math.max(boxW,Number(b.__nsMaxW)||boxW);
+        var maxExt=Math.max(0,(maxW-boxW)*0.88);
+        var baseAvail=availW,ext=0;
+        function fitsExt(e){t.style.width=(baseAvail+e)+'px';t.style.maxWidth=(baseAvail+e)+'px';return fits();}
+        if(maxExt>1&&!fitsExt(0)){
+          if(!fitsExt(maxExt)&&wantPx>floorPx){t.style.fontSize=floorPx+'px';}
+          if(fitsExt(maxExt)){
+            var eLo=0,eHi=maxExt;
+            for(var ei=0;ei<14;ei++){var em=(eLo+eHi)/2;if(fitsExt(em))eHi=em;else eLo=em;}
+            ext=eHi;
+          }else ext=maxExt;
+        }
+        availW=baseAvail+ext;fitsExt(ext);
+        if(ext>0.5){
+          var newBoxW=boxW+ext/0.88+2;
+          var wr=newBoxW/Math.max(1,nomW);if(wr>(Number(b.__nsReqWRatio)||0)+0.005){b.__nsReqWRatio=wr;b.__nsReqHRatio=0;}
+        }
+        t.style.overflow='visible';
+        if(fits())return boxH;
+        // Still too tall at full allowed width: the box also grows taller (never clipped).
+        availH=Math.max(availH,1);
+        var rq=t.getBoundingClientRect(),needH=Math.max(rq.height,t.scrollHeight);
+        var shr=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
+        return Math.max(boxH+1,Math.ceil(needH/shr)+4);
       }
       t.style.fontSize=best+'px';
       for(var pass=0;pass<4;pass++){
@@ -440,6 +475,7 @@ internal object WebModeWriter {
       for(var i=0;i<n;i++){
         parent[i]=i;L[i].hidden=false;
         L[i].needH=Math.max(L[i].needH||0,(Number(L[i].b.__nsReqHRatio)||0)*L[i].oh);
+        L[i].needW=Math.max(L[i].needW||0,(Number(L[i].b.__nsReqWRatio)||0)*L[i].ow);
       }
       // Exact duplicate OCR/translation at the same place is one label, not two.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
@@ -459,13 +495,18 @@ internal object WebModeWriter {
         for(var ri=0;ri<n;ri++){
           var RB=L[ri];if(RB.hidden)continue;
           var ocx=(RB.ox0+RB.ox1)/2,ocy=(RB.oy0+RB.oy1)/2;
-          RB.w=RB.ow;RB.h=Math.max(RB.oh,RB.needH||0);
-          RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
+          RB.w=Math.max(RB.ow,RB.needW||0);RB.h=Math.max(RB.oh,RB.needH||0);
+          var lb0=Number.isFinite(RB.il)?RB.il+1:-Infinity,rb0=Number.isFinite(RB.ir)?RB.ir-1:Infinity;
+          if(rb0-lb0>=RB.w&&RB.w>RB.ow+0.5){var cx0=Math.max(lb0+RB.w/2,Math.min(rb0-RB.w/2,ocx));RB.x0=cx0-RB.w/2;RB.x1=cx0+RB.w/2;}
+          else{RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;}
+          RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
         }
         var groups=Object.create(null);
         for(var i=0;i<n;i++){if(L[i].hidden)continue;var k=root(i);(groups[k]=groups[k]||[]).push(L[i]);}
         for(var k in groups){
-          var G=groups[k];if(G.length<2)continue;
+          var G=groups[k];
+          for(var gq=0;gq<G.length;gq++)G[gq].grp=G.length>1;
+          if(G.length<2)continue;
           G.sort(function(a,b){var dx=(a.ox0+a.ox1)-(b.ox0+b.ox1);return dx||((a.oy0+a.oy1)-(b.oy0+b.oy1));});
           var leftBound=-Infinity,rightBound=Infinity,centre=0,total=0;
           for(var q=0;q<G.length;q++){
@@ -478,11 +519,11 @@ internal object WebModeWriter {
           if(!(rightBound>leftBound+2)){leftBound=0;rightBound=window.innerWidth||400;}
           var available=Math.max(1,rightBound-leftBound-4),gap=Math.min(GAP,available/Math.max(4,G.length*2)),
               widths=0;
-          for(var q=0;q<G.length;q++)widths+=geom(G[q],true).w;
+          for(var q=0;q<G.length;q++)widths+=Math.max(geom(G[q],true).w,G[q].needW||0);
           var scale=Math.min(1,Math.max(0.001,(available-gap*(G.length-1))/Math.max(1,widths)));
           var cursor,totalNow=0;
           for(var q=0;q<G.length;q++){
-            var R=G[q],origW=R.ow,origH=R.oh,ang=Number(R.angle)||0,need=Math.max(origH,R.needH||0);
+            var R=G[q],origW=Math.max(R.ow,R.needW||0),origH=R.oh,ang=Number(R.angle)||0,need=Math.max(origH,R.needH||0);
             R.w=origW*scale;R.h=ang?Math.max(origH*scale,R.needH||0):need;
             var vis=geom({x0:0,x1:R.w,y0:0,y1:R.h,angle:ang},false);R._visW=vis.w;totalNow+=vis.w;
           }
@@ -514,6 +555,59 @@ internal object WebModeWriter {
         }
         if(!merged)break;
       }
+    }
+    function bw0(R){return R.ow;}
+    function ensureLabelCover(bb){
+      var labelCover=bb.__nsLabelCover;
+      if(!labelCover){
+        labelCover=document.createElement('div');labelCover.className='__ns_label_cover';
+        var labelBg=bb.getAttribute('data-bg')||'#fff',labelSfx=bb.getAttribute('data-sf')==='1';
+        labelCover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+          +'pointer-events:none;will-change:transform;background:'+labelBg+';border-radius:'+(labelSfx?'12px':'4px')+';'
+          +'box-shadow:'+(labelSfx?'0 0 7px 5px '+labelBg:'0 0 0 3px '+labelBg)+';';
+        coverLayer.appendChild(labelCover);bb.__nsLabelCover=labelCover;
+      }
+      return labelCover;
+    }
+    // Final check after every layout (font load, resize, scroll, a new OCR result all end up in layout()):
+    // (1) every visible text must lie inside its own measured box; if not, ask for a bigger box;
+    // (2) no two visible texts may overlap; the lower one is pushed down by exactly the overlap.
+    // The result is published in window.__nsLayoutReport so the app (and tests) can read it.
+    function verify(L){
+      var vis=[],overflow=0,overlaps=0,pushed=0,need=false;
+      for(var i=0;i<L.length;i++){
+        var R=L[i];if(R.hidden||R.b.style.display==='none')continue;
+        var t=R.b.firstChild;if(!t)continue;
+        var tr=t.getBoundingClientRect(),br=R.b.getBoundingClientRect();
+        var th=Math.max(tr.height,t.scrollHeight),tw=Math.max(tr.width,t.scrollWidth);
+        var bh=R.y1-R.y0,bw=R.x1-R.x0;
+        if(!R.rot&&(th>bh+1.5||tw>bw+1.5)){
+          overflow++;
+          var ratio=(th/0.86+4)/Math.max(1,R.oh);
+          if(th>bh+1.5&&ratio>(Number(R.b.__nsReqHRatio)||0)+0.005){R.b.__nsReqHRatio=ratio;need=true;}
+        }
+        vis.push({R:R,l:tr.left,r:tr.right,t:tr.top,b:tr.bottom});
+      }
+      vis.sort(function(a,b){return a.t-b.t;});
+      for(var i=0;i<vis.length;i++)for(var j=i+1;j<vis.length;j++){
+        var A=vis[i],B=vis[j];
+        if(A.R.s!==B.R.s)continue;
+        var ox=Math.min(A.r,B.r)-Math.max(A.l,B.l),oy=Math.min(A.b,B.b)-Math.max(A.t,B.t);
+        if(ox<=1||oy<=1)continue;
+        overlaps++;
+        if(B.R.rot)continue;
+        var dy=oy+2,R=B.R,bb=R.b;
+        R.y0+=dy;R.y1+=dy;B.t+=dy;B.b+=dy;pushed++;
+        var cw=R.x1-R.x0,ch=R.y1-R.y0;
+        bb.setAttribute('data-k',Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch));
+        bb.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
+        var lc=ensureLabelCover(bb),lk='v'+Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
+        if(lc.getAttribute('data-k')!==lk){lc.setAttribute('data-k',lk);lc.style.width=cw+'px';lc.style.height=ch+'px';
+          lc.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');}
+        lc.style.display='block';
+      }
+      window.__nsLayoutReport={visible:vis.length,overflow:overflow,overlaps:overlaps,pushed:pushed,t:Date.now()};
+      return need;
     }
     function layout(){
       if(!document.contains(w)){
@@ -558,7 +652,8 @@ internal object WebModeWriter {
         if(!near){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var px=ABS?(vx-o.left):vx,py=ABS?(vy-o.top):vy;          // centre in the overlay's own space
         var imgX=ABS?(r.left-o.left):r.left,angle=Number(g[4])||0;
-        L.push({b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
+        b.__nsNomW=bw;b.__nsMaxW=Math.max(bw,r.width-4);
+        L.push({needW:Math.max(0,(Number(b.__nsReqWRatio)||0)*bw),b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
           ox0:px-bw/2,ox1:px+bw/2,oy0:py-bh/2,oy1:py+bh/2,il:imgX,ir:imgX+r.width,
           needH:Math.max(0,(Number(b.__nsReqHRatio)||0)*bh),angle:angle,rot:angle!==0,
           x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,hidden:false});
@@ -597,15 +692,7 @@ internal object WebModeWriter {
           // matching card under the relocated text so it stays readable over artwork.
           // Every card lives in coverLayer, below textLayer, so it cannot occlude another label.
           if(moved){
-            var labelCover=bb.__nsLabelCover;
-            if(!labelCover){
-              labelCover=document.createElement('div');labelCover.className='__ns_label_cover';
-              var labelBg=bb.getAttribute('data-bg')||'#fff',labelSfx=bb.getAttribute('data-sf')==='1';
-              labelCover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
-                +'pointer-events:none;will-change:transform;background:'+labelBg+';border-radius:'+(labelSfx?'12px':'4px')+';'
-                +'box-shadow:'+(labelSfx?'0 0 7px 5px '+labelBg:'0 0 0 3px '+labelBg)+';';
-              coverLayer.appendChild(labelCover);bb.__nsLabelCover=labelCover;
-            }
+            var labelCover=ensureLabelCover(bb);
             var labelKey=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch)+','+R.angle;
             if(labelCover.getAttribute('data-k')!==labelKey){
               labelCover.setAttribute('data-k',labelKey);labelCover.style.width=cw+'px';labelCover.style.height=ch+'px';
@@ -621,14 +708,21 @@ internal object WebModeWriter {
           var fw=String(Math.round(R.rw));
           if(szChanged||bb.getAttribute('data-fw')!==fw){
             bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);
+            // A box that shares its row with neighbours may not take more width than the row gave it.
+            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(bw0(R),R.rw-4);
+            var prevW=Number(bb.__nsReqWRatio)||0;
             var requiredH=fit(bb,(Number(gg[5])||0.01)*R.rw);
+            if((Number(bb.__nsReqWRatio)||0)>prevW+0.005)expanded=true;   // wider box wanted: lay out again with it
             if(requiredH>ch+0.5){
               var ratio=requiredH/Math.max(1,R.oh),oldRatio=Number(bb.__nsReqHRatio)||0;
               if(ratio>oldRatio+0.005){bb.__nsReqHRatio=ratio;expanded=true;}
             }
           }
         }
-        if(!expanded)break;
+        if(!expanded){
+          if(verify(L)){requestedRelayout=true;continue;}
+          break;
+        }
         requestedRelayout=true;
       }
       if(requestedRelayout)schedNow();

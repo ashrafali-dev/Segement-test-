@@ -94,20 +94,44 @@ internal object BubbleFit {
     }
 
     fun analyse(bmp: Bitmap, seed: IntArray, others: List<IntArray>): Fit? {
-        val bw = bmp.width
-        val bh = bmp.height
+        // A bubble much larger than its lettering does not fit the small first window (its paper reaches the window
+        // edge and it looks like an open page): look again with a wider window before giving up.
+        val first = windowFor(bmp, seed, 1f)
+        val r1 = attempt(bmp, seed, others, first)
+        if (r1 != null) return r1
+        val second = windowFor(bmp, seed, 2.8f)
+        if (second == null || (first != null && second.contentEquals(first))) return null
+        return attempt(bmp, seed, others, second)
+    }
+
+    /** [x0, y0, x1, y1] of the analysis window around [seed], or null when it would be unusable. */
+    private fun windowFor(bmp: Bitmap, seed: IntArray, scale: Float): IntArray? {
         val sw = seed[2] - seed[0]
         val sh = seed[3] - seed[1]
         if (sw < 4 || sh < 4) return null
-        val mx = maxOf(40, (sw * 0.9f).toInt())
-        val my = maxOf(40, (sh * 1.2f).toInt())
-        val x0 = (seed[0] - mx).coerceAtLeast(0)
-        val y0 = (seed[1] - my).coerceAtLeast(0)
-        val x1 = (seed[2] + mx).coerceAtMost(bw)
-        val y1 = (seed[3] + my).coerceAtMost(bh)
+        val mx = maxOf(40, (sw * 0.9f * scale).toInt())
+        val my = maxOf(40, (sh * 1.2f * scale).toInt())
+        var x0 = (seed[0] - mx).coerceAtLeast(0)
+        var y0 = (seed[1] - my).coerceAtLeast(0)
+        var x1 = (seed[2] + mx).coerceAtMost(bmp.width)
+        var y1 = (seed[3] + my).coerceAtMost(bmp.height)
+        // keep the pixel budget: shrink the margins evenly until the window fits
+        var guard = 0
+        while ((x1 - x0).toLong() * (y1 - y0) > MAX_WINDOW_PIXELS && guard++ < 8) {
+            x0 = (x0 + (seed[0] - x0) / 4).coerceAtMost(seed[0])
+            x1 = (x1 - (x1 - seed[2]) / 4).coerceAtLeast(seed[2])
+            y0 = (y0 + (seed[1] - y0) / 4).coerceAtMost(seed[1])
+            y1 = (y1 - (y1 - seed[3]) / 4).coerceAtLeast(seed[3])
+        }
+        if (x1 - x0 < 16 || y1 - y0 < 16 || (x1 - x0).toLong() * (y1 - y0) > MAX_WINDOW_PIXELS) return null
+        return intArrayOf(x0, y0, x1, y1)
+    }
+
+    private fun attempt(bmp: Bitmap, seed: IntArray, others: List<IntArray>, win: IntArray?): Fit? {
+        if (win == null) return null
+        val x0 = win[0]; val y0 = win[1]; val x1 = win[2]; val y1 = win[3]
         val w = x1 - x0
         val h = y1 - y0
-        if (w < 16 || h < 16 || w.toLong() * h > MAX_WINDOW_PIXELS) return null
         val px = IntArray(w * h)
         try {
             bmp.getPixels(px, 0, w, x0, y0, w, h)
