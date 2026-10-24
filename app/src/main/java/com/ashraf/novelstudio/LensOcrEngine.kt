@@ -14,6 +14,7 @@ import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.net.URL
 import java.security.SecureRandom
 import java.security.cert.CertificateException
@@ -442,7 +443,14 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                 }
                 last = e
             } catch (e: IOException) {
-                last = e    // UnknownHostException, ConnectException, SocketException ("Socket closed"), EOF, ...
+                if (e is UnknownHostException) {
+                    // race() has already tried the alternate network route. Retrying the same unresolved
+                    // host in the outer loop only burns the rest of the live-scan deadline without new data.
+                    val why = describe(e)
+                    Breaker.transient("DNS $why")
+                    throw OcrUnavailableException("Google Lens: DNS resolution failed ($why)", e)
+                }
+                last = e    // ConnectException, SocketException ("Socket closed"), EOF, ...
             }
             val jitter = (random.nextInt(120)).toLong()
             val elapsed = SystemClock.elapsedRealtime() - started
