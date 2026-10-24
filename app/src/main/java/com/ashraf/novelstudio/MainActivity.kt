@@ -2236,6 +2236,7 @@ return t.length>=40?'TXT:'+t:'';
     private var currentBotKey = ""
     private lateinit var urlBar: EditText
     private lateinit var tabCountBtn: TextView
+    private lateinit var pillTabCountBtn: TextView
     private lateinit var content: FrameLayout
     private lateinit var scanDot: View
     private var scanDotPhase = false
@@ -3612,6 +3613,18 @@ return t.length>=40?'TXT:'+t:'';
             }, LinearLayout.LayoutParams(MP, WC))
         }
         val pillDivider = View(this).apply { setBackgroundColor(UiTheme.role(UiTheme.Role.STROKE)) }
+        pillTabCountBtn = TextView(this).apply {
+            text = browserTabs.size.toString()
+            gravity = Gravity.CENTER
+            textSize = 13.5f
+            typeface = boldMedium
+            setTextColor(UiTheme.role(UiTheme.Role.TEXT))
+            background = Glass.ripple(this@MainActivity,
+                Glass.solid(this@MainActivity, UiTheme.role(UiTheme.Role.CONTROL), 21, UiTheme.role(UiTheme.Role.STROKE)), null)
+            contentDescription = "Open tabs"
+            setOnClickListener { showTabGrid() }
+            setOnLongClickListener { newBrowserTab("https://www.google.com/"); true }
+        }
         expandBarPill = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -3626,7 +3639,7 @@ return t.length>=40?'TXT:'+t:'';
                 LinearLayout.LayoutParams(dp(44), dp(48)))
             addView(iconButton(Ic.CLOCK, "Reader activity and status", 19, 44, UiTheme.role(UiTheme.Role.ICON)) { showReaderStatusSheet() },
                 LinearLayout.LayoutParams(dp(44), dp(48)))
-            addView(tabCountBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
+            addView(pillTabCountBtn, LinearLayout.LayoutParams(dp(36), dp(36)))
             addView(iconButton(Ic.RELOAD, "Reload page", 19, 44, UiTheme.role(UiTheme.Role.ICON)) { reloadPage() },
                 LinearLayout.LayoutParams(dp(44), dp(48)))
             addView(iconButton(Ic.DOTS, "Reader controls and settings", 20, 44, UiTheme.role(UiTheme.Role.ICON)) { readerControlsSheet() },
@@ -4859,6 +4872,7 @@ return t.length>=40?'TXT:'+t:'';
         if (!::tabStrip.isInitialized) return
         tabStrip.removeAllViews()
         if (::tabCountBtn.isInitialized) tabCountBtn.text = browserTabs.size.toString()
+        if (::pillTabCountBtn.isInitialized) pillTabCountBtn.text = browserTabs.size.toString()
         if (::tabRail.isInitialized) tabRail.visibility = if (browserTabs.size > 1) View.VISIBLE else View.GONE
 
         var activeChip: View? = null
