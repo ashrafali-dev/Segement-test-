@@ -640,7 +640,7 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
                     ellipsize = TextUtils.TruncateAt.END
                 })
                 addView(TextView(ctx).apply {
-                    text = listOfNotNull(e.kind, e.host, if (e.langs.isNotEmpty()) e.langs.joinToString(", ") else null).joinToString(" · ")
+                    text = e.kind
                     textSize = Type.caption
                     setTextColor(UiTheme.role(UiTheme.Role.FAINT))
                     maxLines = 2
@@ -828,7 +828,6 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
             else -> "Novel Studio"
         }
         backBtn.visibility = if (tab == HomeTab.HOME) View.GONE else View.VISIBLE
-        syncDock()
     }
 
     private fun bodyHome() {
