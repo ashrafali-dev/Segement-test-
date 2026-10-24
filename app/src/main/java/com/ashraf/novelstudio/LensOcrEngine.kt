@@ -67,6 +67,10 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
     override fun recognizeFast(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script, fastMode = true)
     override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script)
 
+    /** Force a genuine Lens request for manual Extract / Rescan instead of replaying cached OCR. */
+    fun recognizeFresh(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult =
+        read(bitmap, script, fastMode = fastMode, bypassCache = true)
+
     /**
      * The router can request a fallback pass after a partial read. Return the cached Lens result for
      * the same bitmap (read() hits its image cache) rather than reporting an artificial empty result,
@@ -78,7 +82,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
 
     // ---------------------------------------------------------------------------------------------
 
-    private fun read(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult {
+    private fun read(
+        bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false, bypassCache: Boolean = false
+    ): OcrResult {
         if (bitmap.isRecycled) throw OcrUnavailableException("Google Lens: bitmap was recycled")
         if (bitmap.width < MIN_SIDE || bitmap.height < MIN_SIDE) return OcrResult(emptyList())
 
@@ -89,8 +95,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         val key = fnv64(prepared.jpeg) xor (prepared.w.toLong() shl 32) xor prepared.h.toLong()
 
         // Lens detects the image language itself. This cache is mainly for external callers that repeat one bitmap.
-        val cachedLines = cached(key)
+        val cachedLines = if (bypassCache) null else cached(key)
         val keyCacheMs = SystemClock.elapsedRealtime() - keyStart
+        if (bypassCache) Log.i(TAG, "CACHE_BYPASS imageId=${java.lang.Long.toHexString(key)} reason=manual_extract")
         if (cachedLines != null) {
             val cachedLetters = cachedLines.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } }
             val result = finish(cachedLines, bitmap, script)
@@ -251,8 +258,24 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                 }
             }
             var jpeg = encode(work, JPEG_QUALITY)
-            if (jpeg.size > MAX_UPLOAD_BYTES) jpeg = encode(work, 60)
-            if (jpeg.size > MAX_UPLOAD_BYTES) throw OcrUnavailableException("Google Lens: picture too large to upload")
+            if (jpeg.size > MAX_UPLOAD_BYTES) jpeg = encode(work, 25)
+            var shrinkAttempt = 0
+            while (jpeg.size > MAX_UPLOAD_BYTES && shrinkAttempt < 3 &&
+                work.width > MIN_SIDE * 2 && work.height > MIN_SIDE * 2) {
+                val sw = (work.width * 0.75f).toInt().coerceAtLeast(MIN_SIDE)
+                val sh = (work.height * 0.75f).toInt().coerceAtLeast(MIN_SIDE)
+                val scaled = Bitmap.createScaledBitmap(work, sw, sh, true)
+                if (scaled !== work) {
+                    val old = owned
+                    owned = scaled
+                    work = scaled
+                    if (old != null && old !== src && old !== scaled && !old.isRecycled) old.recycle()
+                }
+                jpeg = encode(work, 25)
+                shrinkAttempt++
+            }
+            if (jpeg.size > MAX_UPLOAD_BYTES) jpeg = encode(work, 15)
+            if (jpeg.size > MAX_UPLOAD_BYTES) throw OcrUnavailableException("Google Lens: picture too large after JPEG compression and resize")
             return Prepared(jpeg, work.width, work.height)
         } finally {
             val o = owned
