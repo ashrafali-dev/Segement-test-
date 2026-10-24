@@ -362,6 +362,9 @@ internal class RoutingOcrEngine : OcrEngine {
                     Log.w("NovelStudioOCR", "ML Kit fallback also failed after Lens error", fallback)
                     OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
                     OcrResult(emptyList())
+                } catch (oom: OutOfMemoryError) {
+                    OcrEngineStatus.lastError += "; ML Kit fallback ran out of memory"
+                    OcrResult(emptyList())
                 }
             }
             val blockCount = lens?.blocks?.size ?: 0
@@ -392,6 +395,9 @@ internal class RoutingOcrEngine : OcrEngine {
             return try { run(mlKit) } catch (fallback: Exception) {
                 Log.w("NovelStudioOCR", "ML Kit fallback failed after empty Lens result", fallback)
                 OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
+                OcrResult(emptyList())
+            } catch (oom: OutOfMemoryError) {
+                OcrEngineStatus.lastError += "; ML Kit fallback ran out of memory"
                 OcrResult(emptyList())
             }
         }
