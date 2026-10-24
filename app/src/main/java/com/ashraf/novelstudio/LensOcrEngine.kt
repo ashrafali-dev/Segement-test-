@@ -739,13 +739,13 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private const val MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
         // Realtime screenshot reading is latency-sensitive; a slow endpoint must not stall the reader.
-        private const val FAST_TOTAL_DEADLINE_MS = 6_500L
-        private const val FAST_MIN_ATTEMPT_MS = 1_000L
+        private const val FAST_TOTAL_DEADLINE_MS = 4_000L
+        private const val FAST_MIN_ATTEMPT_MS = 650L
         private const val FAST_MAX_ATTEMPTS = 2
         private const val CONNECT_MS = 7_000L
-        private const val FAST_CONNECT_MS = 3_000L
+        private const val FAST_CONNECT_MS = 1_800L
         // Start the same request on the other network path if no answer after this long (see race()).
-        private const val FAST_HEDGE_MS = 1_800L
+        private const val FAST_HEDGE_MS = 900L
         private const val HEDGE_MS = 3_000L
         // Warm sockets stay in the pool ~5 min; refresh a little before that.
         private const val WARM_INTERVAL_MS = 150_000L
