@@ -363,6 +363,7 @@ internal class RoutingOcrEngine : OcrEngine {
                     OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
                     OcrResult(emptyList())
                 }
+            }
             val blockCount = lens?.blocks?.size ?: 0
             val letterCount = lens?.blocks?.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } } ?: 0
             if (lens != null && useful(lens)) {
