@@ -192,30 +192,16 @@ internal fun View.clickable(onClick: () -> Unit): View {
     return this
 }
 
-/** Library section filter (the chips under the Library title). */
-private enum class LibSection { ALL, BOOKS, COMICS, DOWNLOADED, BOOKMARKS, HISTORY }
+private enum class LibSection { ALL, BOOKS, DOWNLOADED }
 private enum class LibSort { RECENT, TITLE, CHAPTERS }
 
-/**
- * Full-screen home ("Calm").
- *
- * One quiet title bar, content-first body, one dock at the bottom — [Library] [Search] [Browse] — where
- * Search expands the field in place. Library, Updates and Sources render in this same view and share one
- * card/row language: section chips, counts, honest statuses and empty states with a real next step.
- */
 class HomeView(private val ctx: Context) : FrameLayout(ctx) {
     var onOpen: (String) -> Unit = {}
     var onSearch: (String) -> Unit = {}
     var onMenu: () -> Unit = {}
     var onHub: (Hub.Part) -> Unit = {}
-    var onOpenLibrary: () -> Unit = {}
     var onOpenUpdates: () -> Unit = {}
     var onOpenSources: () -> Unit = {}
-    /** Opens the Library manager pre-filtered to bookmarks / history (those lists live in MainActivity). */
-    var onOpenBookmarks: () -> Unit = {}
-    var onOpenHistory: () -> Unit = {}
-    /** MainActivity inserts its mode switch + view tiles into the dock's search slot (idle state). */
-    var onDockHost: ((View?) -> Unit)? = null
 
     private val mp = ViewGroup.LayoutParams.MATCH_PARENT
     private val wc = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -225,21 +211,14 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
     private val backBtn = ImageView(ctx)
     private val titleView = TextView(ctx)
     private val menuBtn = ImageView(ctx)
-    private val tilesHost = LinearLayout(ctx)
     private val input = EditText(ctx)
     private val searchIcon = ImageView(ctx)
-    private val searchBar = LinearLayout(ctx)
     private val searchField = LinearLayout(ctx)
-    private val dockTiles = LinearLayout(ctx)
-    private var notice: Snackbar? = null
-    private var dockTileIcons = ArrayList<Pair<Ic, ImageView>>()
 
     private var iconIsUrl = false
     private var token = 0
     private var riseIndex = 0
-    private var searchActive = false
     private var tab = HomeTab.HOME
-    private var searchQ = ""
 
     private var recents: List<HomeRecent> = emptyList()
     private var novelSites: List<HomeSite> = emptyList()
@@ -284,69 +263,12 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         menuBtn.setOnClickListener { onMenu() }
         topBar.addView(backBtn, LinearLayout.LayoutParams(ctx.dpi(48), ctx.dpi(48)))
         topBar.addView(titleView, LinearLayout.LayoutParams(0, wc, 1f))
-        topBar.addView(menuBtn, LinearLayout.LayoutParams(ctx.dpi(48), ctx.dpi(48)))
 
+        topBar.addView(menuBtn, LinearLayout.LayoutParams(ctx.dpi(48), ctx.dpi(48)))
         buildSearchBar()
-        buildDock()
-        tilesHost.visibility = View.GONE
 
         addView(scroll, LayoutParams(mp, mp))
         addView(topBar, LayoutParams(mp, wc, Gravity.TOP))
-    }
-
-    // ---------------------------------------------------------------- dock + search
-
-    private var dockRoot: ViewGroup? = null
-
-    private fun buildDock() {
-        dockTiles.orientation = LinearLayout.HORIZONTAL
-        dockTiles.gravity = Gravity.CENTER_VERTICAL
-        dockTiles.background = Glass.floating(ctx, 26)
-        dockTiles.elevation = ctx.dpf(8)
-        dockTiles.setPadding(ctx.dpi(4), 0, ctx.dpi(4), 0)
-        dockTiles.addView(dockTile(Ic.LIBRARY, "Library") { if (tab == HomeTab.LIBRARY) resetToHome() else openTab(HomeTab.LIBRARY) },
-            LinearLayout.LayoutParams(0, ctx.dpi(56), 1f))
-        dockTiles.addView(dockTile(Ic.SEARCH, "Search") { focusSearch() },
-            LinearLayout.LayoutParams(0, ctx.dpi(56), 1f))
-        dockTiles.addView(dockTile(Ic.GLOBE, "Browse") { if (tab == HomeTab.SOURCES) resetToHome() else openTab(HomeTab.SOURCES) },
-            LinearLayout.LayoutParams(0, ctx.dpi(56), 1f))
-    }
-
-    private fun dockTile(ic: Ic, label: String, onClick: () -> Unit): View {
-        val icon = ImageView(ctx).apply {
-            setImageDrawable(IconDrawable(ic, UiTheme.role(UiTheme.Role.ICON)))
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        }
-        val tile = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            contentDescription = label
-            background = Glass.ripple(ctx, null)
-            addView(icon, LinearLayout.LayoutParams(ctx.dpi(21), ctx.dpi(21)))
-            addView(TextView(ctx).apply {
-                text = label
-                textSize = Type.overline
-                typeface = Type.medium()
-                setTextColor(UiTheme.role(UiTheme.Role.DIM))
-                gravity = Gravity.CENTER
-                setPadding(0, ctx.dpi(3), 0, 0)
-            })
-            setOnClickListener { onClick() }
-        }
-        dockTileIcons.add(ic to icon)
-        return tile
-    }
-
-    /** Marks the dock tile of the open section (Library / Browse) with the accent. */
-    private fun syncDock() {
-        val active = when (tab) {
-            HomeTab.LIBRARY -> Ic.LIBRARY
-            HomeTab.SOURCES -> Ic.GLOBE
-            else -> null
-        }
-        for ((ic, icon) in dockTileIcons) {
-            icon.setImageDrawable(IconDrawable(ic, if (ic == active) UiTheme.role(UiTheme.Role.ACCENT) else UiTheme.role(UiTheme.Role.ICON)))
-        }
     }
 
     private fun buildSearchBar() {
@@ -398,42 +320,15 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         searchField.addView(input, LinearLayout.LayoutParams(0, wc, 1f))
         searchField.addView(closeBtn, LinearLayout.LayoutParams(ctx.dpi(44), ctx.dpi(44)))
         searchField.addView(go, LinearLayout.LayoutParams(ctx.dpi(40), ctx.dpi(40)))
-        searchBar.orientation = LinearLayout.HORIZONTAL
-        searchBar.gravity = Gravity.CENTER_VERTICAL
-        searchBar.setPadding(ctx.dpi(8), 0, ctx.dpi(8), 0)
-        searchBar.addView(searchField, LinearLayout.LayoutParams(0, ctx.dpi(50), 1f))
-        searchBar.addView(tilesHost, LinearLayout.LayoutParams(0, ctx.dpi(50), 1f))
-        searchBar.visibility = View.GONE
-    }
-
-    /** MainActivity supplies the mode switch + view control that the reading dock used to hold. */
-    fun setToolbar(toolbar: View?) {
-        tilesHost.removeAllViews()
-        if (toolbar != null) tilesHost.addView(toolbar, LinearLayout.LayoutParams(mp, ctx.dpi(46)))
-    }
-
-    private fun focusSearch() {
-        searchActive = true
-        searchBar.visibility = View.VISIBLE
-        dockTiles.visibility = View.GONE
-        tilesHost.visibility = if (tilesHost.childCount > 0) View.VISIBLE else View.GONE
-        input.requestFocus()
-        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
     }
 
     private fun closeSearch() {
-        searchActive = false
-        searchBar.visibility = View.GONE
-        dockTiles.visibility = View.VISIBLE
-        tilesHost.visibility = View.GONE
         hideKeyboard()
         if (tab == HomeTab.LIBRARY && libQuery.isNotEmpty()) { libQuery = ""; rerender() }
     }
 
     /** The system back button; true when home consumed it. */
     fun handleBack(): Boolean = when {
-        searchActive -> { closeSearch(); true }
         tab != HomeTab.HOME -> { resetToHome(); true }
         else -> false
     }
@@ -447,7 +342,6 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         val url = looksLikeUrl(text)
         if (url == iconIsUrl) return
         iconIsUrl = url
-        searchIcon.setImageDrawable(IconDrawable(if (url) Ic.GLOBE else Ic.SEARCH, UiTheme.role(UiTheme.Role.FAINT)))
     }
 
     private fun submit() {
@@ -869,8 +763,6 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
                 ctx.startActivity(android.content.Intent(ctx, ReaderActivity::class.java).putExtra("novel", s.name).putExtra("id", it.id))
             }
         }, LinearLayout.LayoutParams(0, ctx.dpi(42), 1f).also { it.marginEnd = ctx.dpi(8) })
-        actions.addView(act("Export", Buttons.Style.TONAL) { detail.dismiss(); onExport(s.name) },
-            LinearLayout.LayoutParams(0, ctx.dpi(42), 1f).also { it.marginEnd = ctx.dpi(8) })
         actions.addView(act("More", Buttons.Style.TONAL) { detail.dismiss(); onShelfMore(s) },
             LinearLayout.LayoutParams(0, ctx.dpi(42), 1f))
         box.addView(actions, LinearLayout.LayoutParams(mp, wc))
@@ -917,8 +809,7 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         detail.show()
     }
 
-    /** Hooks filled in by MainActivity (export / rename / delete need activity-scoped helpers). */
-    lateinit var onExport: (String) -> Unit
+    /** Hook filled in by MainActivity (rename / delete need activity-scoped helpers). */
     lateinit var onShelfMore: (LibraryModel.Shelf) -> Unit
 
     private fun rerender() {
@@ -938,7 +829,6 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         }
         backBtn.visibility = if (tab == HomeTab.HOME) View.GONE else View.VISIBLE
         syncDock()
-        if (searchActive) closeSearch()
     }
 
     private fun bodyHome() {
@@ -947,7 +837,7 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         val fresh = updates.firstOrNull { it.newCount > 0 }
         if (fresh != null) content.addView(pad(updatesBanner(fresh)), LinearLayout.LayoutParams(mp, wc))
         if (recents.isNotEmpty()) {
-            content.addView(rise(sectionLabel("CONTINUE READING", "History", { onOpenHistory() })), LinearLayout.LayoutParams(mp, wc))
+            content.addView(rise(sectionLabel("CONTINUE READING")), LinearLayout.LayoutParams(mp, wc))
             recents.take(3).forEach { content.addView(rise(recentRow(it)), LinearLayout.LayoutParams(mp, wc)) }
         }
         content.addView(
@@ -990,10 +880,7 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         val items = listOf(
             LibSection.ALL to "All",
             LibSection.BOOKS to "Novels",
-            LibSection.COMICS to "Comics",
             LibSection.DOWNLOADED to "Downloaded",
-            LibSection.BOOKMARKS to "Bookmarks",
-            LibSection.HISTORY to "History"
         )
         items.forEach { (sec, label) ->
             row.addView(filterPill(label, libSection == sec) { libSection = sec; rerender() },
@@ -1013,12 +900,7 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         }
         val all = shelves.filter { match(it) }
         return listOfNotNull(
-            ("Fresh translations" to updates.filter { it.newCount > 0 }.mapNotNull { u -> all.firstOrNull { it.name == u.novel } })
-                .takeIf { it.second.isNotEmpty() && libSection in listOf(LibSection.ALL, LibSection.BOOKS, LibSection.DOWNLOADED) },
-            ("Novels" to sorted(all.filter { !it.isComic }))
-                .takeIf { it.second.isNotEmpty() && libSection in listOf(LibSection.ALL, LibSection.BOOKS) },
-            ("Comics & webtoons" to sorted(all.filter { it.isComic }))
-                .takeIf { it.second.isNotEmpty() && libSection in listOf(LibSection.ALL, LibSection.COMICS) }
+            ("Books" to sorted(all)).takeIf { it.second.isNotEmpty() }
         )
     }
 
@@ -1080,26 +962,6 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         libBody = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         content.addView(libBody!!, LinearLayout.LayoutParams(mp, wc))
         rebuildLibraryBody()
-
-        if (libSection == LibSection.BOOKMARKS) {
-            content.addView(pad(emptyCard(
-                "Bookmarks",
-                "Pages and chapters you bookmarked live in the Library manager, with the same search and delete tools.",
-                "Open bookmarks"
-                , Ic.BOOKMARK) { onOpenBookmarks() }))
-        }
-        if (libSection == LibSection.HISTORY) {
-            content.addView(pad(emptyCard(
-                "Reading history",
-                "Recently opened pages and chapters, newest first.",
-                "Open history"
-                , Ic.CLOCK) { onOpenHistory() }))
-        }
-        content.addView(pad(emptyCard(
-            "Library manager",
-            "Search, rename, export and delete across every saved book.",
-            "Manage library"
-            , Ic.SLIDERS) { onOpenLibrary() }))
     }
 
     private var libBody: LinearLayout? = null
@@ -1359,41 +1221,5 @@ class HomeView(private val ctx: Context) : FrameLayout(ctx) {
         }
         part("Webtoon hub", Ic.LAYERS, Hub.Part.WEBTOON)
         part("Novel hub", Ic.BOOK, Hub.Part.NOVEL)
-    }
-
-    // ---------------------------------------------------------------- notifications
-
-    fun showNotice(message: String, kind: Snackbar.Kind) {
-        val root = dockRoot ?: return
-        val n = notice ?: Snackbar(ctx).also { notice = it }
-        val slot = noticeSlot ?: FrameLayout(ctx).also {
-            noticeSlot = it
-            addView(it, LayoutParams(mp, wc, Gravity.BOTTOM))
-        }
-        if (n.parent == null) {
-            slot.removeAllViews()
-            slot.addView(n, LayoutParams(mp, wc, Gravity.CENTER))
-        }
-        slot.visibility = View.VISIBLE
-        slot.bringToFront()
-        n.show(message, kind, autoHideMs = (3200L + message.length * 26L).coerceIn(3200L, 7000L))
-        n.postDelayed(object : Runnable {
-            override fun run() {
-                if (n.shown) n.postDelayed(this, 220L) else slot.visibility = View.GONE
-            }
-        }, 220L)
-        // never leave a stale root reference (kept for symmetry with attachDock)
-        if (root.childCount == 0) root.requestLayout()
-    }
-
-    private var noticeSlot: FrameLayout? = null
-
-    /** Lets MainActivity place the dock where the window insets allow. */
-    fun attachDock(d: View) {
-        dockRoot = d as? ViewGroup
-        if (d is ViewGroup) {
-            d.addView(dockTiles, LayoutParams(mp, ctx.dpi(56), Gravity.CENTER))
-            d.addView(searchBar, LayoutParams(mp, ctx.dpi(56), Gravity.CENTER))
-        }
     }
 }

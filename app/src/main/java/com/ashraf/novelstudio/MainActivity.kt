@@ -3180,10 +3180,6 @@ return t.length>=40?'TXT:'+t:'';
                 return@runOnUiThread
             }
             snackKindLast = kind
-            if (::homeView.isInitialized && homeView.visibility == View.VISIBLE) {
-                homeView.showNotice(text, kind)
-                return@runOnUiThread
-            }
             snack.show(text, kind, autoHideMs = (2600L + text.length * 24L).coerceIn(2600L, 6000L))
             updateDockVisibility()
         }
@@ -3199,7 +3195,6 @@ return t.length>=40?'TXT:'+t:'';
     /** The dock controls are swapped for the notification strip while a message is visible. */
     private fun updateDockVisibility() {
         if (!::snackSlot.isInitialized || !::dockRowHost.isInitialized) return
-        if (::homeView.isInitialized && homeView.visibility == View.VISIBLE) return   // home has its own dock
         val showing = ::snack.isInitialized && snack.shown
         snackSlot.visibility = if (showing) View.VISIBLE else View.GONE
         dockRowHost.visibility = if (showing) View.INVISIBLE else View.VISIBLE
@@ -3964,10 +3959,6 @@ return t.length>=40?'TXT:'+t:'';
             override val isSnackbarVisible: Boolean get() = ::snack.isInitialized && snack.shown
             override fun show(message: String, kind: Snackbar.Kind, actionLabel: String?, onAction: (() -> Unit)?, autoHideMs: Long) {
                 snackKindLast = kind
-                if (::homeView.isInitialized && homeView.visibility == View.VISIBLE) {
-                    homeView.showNotice(message, kind)
-                    return
-                }
                 snack.show(message, kind, actionLabel, onAction, autoHideMs)
                 updateDockVisibility()
             }
@@ -3998,11 +3989,8 @@ return t.length>=40?'TXT:'+t:'';
             onSearch = { q -> go(q) }
             onMenu = { menu() }
             onHub = { part -> Hub.open(this@MainActivity, part) }
-            onDockHost = { toolbar -> homeView.setToolbar(toolbar) }
-            onOpenLibrary = { openLibraryManager() }
             onOpenUpdates = { openLibraryManager() }
             onOpenSources = { openLibraryManager() }
-            onExport = { novel -> exportAll(novel) }
             onShelfMore = { s -> shelfMoreSheet(s) }
         }
         val homeDock = FrameLayout(this).apply {
@@ -4010,7 +3998,6 @@ return t.length>=40?'TXT:'+t:'';
             clipToPadding = false
             setPadding(dp(12), dp(6), dp(12), dp(6))
         }
-        homeView.attachDock(homeDock)
         homeView.setRefreshHook { refreshHome() }
         homeViewRefreshPending = false
         val root = FrameLayout(this).apply {
@@ -4068,15 +4055,16 @@ return t.length>=40?'TXT:'+t:'';
      * the view control (the same handlers as the reading dock). Moved back out when Search closes.
      */
     private fun bindHomeToolbar(homeDock: View) {
-        val bar = LinearLayout(this).apply {
+        // This base's HomeView has no dock of its own, so the reading-mode switch and menu live in a
+        // small floating bar over the home view instead.
+        homeDock.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), 0, dp(4), 0)
+            background = floatingBarBg(26)
             addView(modeChip, LinearLayout.LayoutParams(0, dp(44), 1.0f))
-            addView(dockBtn(Ic.SPLIT, "Page view") { cycleMode() }, LinearLayout.LayoutParams(dp(44), dp(44)))
             addView(dockBtn(Ic.DOTS, "Menu") { menu() }, LinearLayout.LayoutParams(dp(44), dp(44)))
-        }
-        homeView.setToolbar(bar)
+        }, FrameLayout.LayoutParams(MP, dp(52)))
         // Reposition the window's bottom inset onto the floating home dock (it overlays the home view).
         homeDock.setPadding(homeDock.paddingLeft, homeDock.paddingTop, homeDock.paddingRight, Insets.bottom)
     }
@@ -4543,9 +4531,9 @@ return t.length>=40?'TXT:'+t:'';
 
     private fun refreshHome() {
         if (!::homeView.isInitialized) return
-        val novel = siteShortcuts().map { HomeSite(it.first, it.second) }
+        val sites = siteShortcuts().map { HomeSite(it.first, it.second) }
         homeView.render(
-            homeRecents(), novel, comicSiteShortcuts(),
+            homeRecents(), sites, comicSiteShortcuts(),
             LibraryModel.shelves(this), LibraryModel.updates(this), LibraryModel.sources(this)
         )
     }
