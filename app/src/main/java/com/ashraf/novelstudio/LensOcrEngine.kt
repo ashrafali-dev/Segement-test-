@@ -334,8 +334,12 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         return h
     }
 
-    // The reference Lens client sends an empty OCR language hint so Lens detects text language itself.
-    private fun languageHint(): String = ""
+    // Auto keeps Lens's own detector; a pinned OCR language is also sent in locale_context as a hint.
+    // This changes recognition context only—Lens still returns source text and never translates it.
+    private fun languageHint(): String = when (Prefs.get(app, "ocrLang", "auto").lowercase(Locale.ROOT)) {
+        "en", "ko", "ja", "zh" -> Prefs.get(app, "ocrLang", "auto").lowercase(Locale.ROOT)
+        else -> ""
+    }
 
     private fun regionHint(): String = Locale.getDefault().country.takeIf { it.length == 2 } ?: "US"
     private fun zoneHint(): String = TimeZone.getDefault().id.takeIf { it.isNotBlank() } ?: "America/New_York"
