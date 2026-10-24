@@ -314,10 +314,10 @@ internal class RoutingOcrEngine : OcrEngine {
         } catch (e: Exception) {
             Log.w("NovelStudioOCR", "Could not select ${selectedMode}: ${e.message}")
             if (selectedMode == "lens") {
-                OcrEngineStatus.lastError = "lens ${script.name}: ${e.message ?: e.javaClass.simpleName}"
-                report("lens(error)", false)
+                OcrEngineStatus.lastError = "lens ${script.name}: ${e.message ?: e.javaClass.simpleName}; using ML Kit"
+                report("mlkit(lens-select-error)", true)
                 lensThread.set(false)
-                return OcrResult(emptyList())
+                return run(mlKit)
             }
             mlKit
         } catch (e: OutOfMemoryError) {
