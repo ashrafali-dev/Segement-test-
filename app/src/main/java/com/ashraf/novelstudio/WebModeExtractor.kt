@@ -2906,6 +2906,32 @@ return JSON.stringify({m:window.__nsWmMut||0,l:window.__nsWmLoad||0,p:p});
 var sc=scroller(),c=cands(sc,undefined,true,true),vw=window.innerWidth||de.clientWidth||0,vh=window.innerHeight||0,o=[];
 for(var i=0;i<c.length;i++){var p=c[i];
   if(p.d&&p.vb>0&&p.vt<vh&&(p.vl+p.fw)>0&&p.vl<vw)o.push(p);}
+// A tainted manga canvas can be visible but cands() may fail to export it as a data URL. Expose
+// its measured rectangle as a synthetic source anyway: forceOcr() can crop the WebView screenshot
+// and keep stable canvas geometry for translation + page-transition fingerprints.
+try{
+  var cvs=document.querySelectorAll("canvas"),wy=window.pageYOffset||de.scrollTop||0,sr=sc?sc.getBoundingClientRect():null;
+  for(var ci=0;ci<cvs.length&&ci<16;ci++){
+    var cv=cvs[ci],cr=cv.getBoundingClientRect();
+    if(cr.width<150||cr.height<150||cr.right<=0||cr.bottom<=0||cr.left>=vw||cr.top>=vh)continue;
+    var cs=null;try{cs=getComputedStyle(cv);}catch(ig){}
+    if(cs&&(cs.visibility==="hidden"||cs.display==="none"||parseFloat(cs.opacity||"1")<0.05))continue;
+    var pin=!!(sc&&sc.contains(cv));
+    var pt=pin?(cr.top-sr.top+sc.scrollTop):(cr.top+wy);
+    var key="ns-canvas:"+Math.round(cr.left)+","+Math.round(pt)+","+Math.round(cr.width)+"x"+Math.round(cr.height);
+    var duplicate=false;
+    for(var oi=0;oi<o.length;oi++){
+      var q=o[oi],ql=Number(q.vl),qt=Number(q.vt),qw=Number(q.fw),qh=Number(q.fh);
+      if(!isFinite(ql)||!isFinite(qt)||!(qw>0)||!(qh>0))continue;
+      var ox=Math.min(cr.right,ql+qw)-Math.max(cr.left,ql),oy=Math.min(cr.bottom,qt+qh)-Math.max(cr.top,qt);
+      var ov=Math.max(0,ox)*Math.max(0,oy),qa=qw*qh,ca=cr.width*cr.height;
+      if(ov>=0.75*Math.min(qa,ca)&&ca<=2*qa&&ca>=0.5*qa){duplicate=true;break;}
+    }
+    if(duplicate)continue;
+    var seen=false;for(var si=0;si<o.length;si++)if(o[si].s===key){seen=true;break;}if(seen)continue;
+    o.push({s:key,t:Math.round(pt),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:2});
+  }
+}catch(canvasFallbackError){}
 return JSON.stringify({vw:vw,vh:vh,sy:(sc?sc.scrollTop:(window.pageYOffset||de.scrollTop||0)),sh:(sc?sc.scrollHeight:(de.scrollHeight||0)),imgs:o});
 """
 
