@@ -3614,12 +3614,19 @@ return t.length>=40?'TXT:'+t:'';
             val tapDetector = GestureDetector(this@MainActivity,
                 object : GestureDetector.SimpleOnGestureListener() {
                     override fun onDown(e: MotionEvent): Boolean = true
+                    override fun onSingleTapUp(e: MotionEvent): Boolean {
+                        if (manualRealtimeExtractEnabled()) {
+                            extractCopy()
+                            return true
+                        }
+                        return true
+                    }
                     override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                        extractCopy()
+                        if (!manualRealtimeExtractEnabled()) extractCopy()
                         return true
                     }
                     override fun onDoubleTap(e: MotionEvent): Boolean {
-                        insertSavedTranslation()
+                        if (manualRealtimeExtractEnabled()) extractCopy() else insertSavedTranslation()
                         return true
                     }
                     override fun onLongPress(e: MotionEvent) {
@@ -6852,6 +6859,10 @@ return t.length>=40?'TXT:'+t:'';
         handler.removeCallbacks(overlayGuard)
         handler.postDelayed(overlayGuard, 1500L)
     }
+
+    private fun manualRealtimeExtractEnabled(): Boolean =
+        DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
+            !Prefs.bool(this, "rtAutoOcrEnabled", true)
 
     private fun extractCopy() {
         // Auto Real-time OFF turns Extract into an explicit fresh OCR + translation action.
