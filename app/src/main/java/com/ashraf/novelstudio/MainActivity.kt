@@ -5039,6 +5039,10 @@ return t.length>=40?'TXT:'+t:'';
     /** Toggle auto page/panel detection separately from the overall Real-time reading mode. */
     private fun setRealtimeAutoOcrEnabled(enabled: Boolean) {
         Prefs.putBool(this, "rtAutoOcrEnabled", enabled)
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) {
+            toast("Auto Real-time OCR " + (if (enabled) "ON" else "OFF") + " — applies when Real-time mode is enabled")
+            return
+        }
         if (enabled) {
             deepSeekVisibleSignature = ""
             deepSeekLastOcrAtMs = 0L
