@@ -554,31 +554,50 @@ internal object WebModeWriter {
           needH:Math.max(0,(Number(b.__nsReqHRatio)||0)*bh),angle:angle,rot:angle!==0,
           x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,hidden:false});
       }
-      resolve(L);
-      for(var n=0;n<L.length;n++){
-        var R=L[n],bb=R.b,gg=R.g;
-        var cw=R.x1-R.x0,ch=R.y1-R.y0,cx=(R.x0+R.x1)/2,cy=(R.y0+R.y1)/2;
-        var key=Math.round(cx)+','+Math.round(cy)+','+Math.round(cw)+','+Math.round(ch);
-        var sz=Math.round(cw)+','+Math.round(ch);
-        var szChanged=bb.getAttribute('data-sz')!==sz;
-        if(bb.getAttribute('data-k')!==key){
-          bb.setAttribute('data-k',key);
-          bb.style.width=cw+'px'; bb.style.height=ch+'px';
-          // Interior cover rectangles are laid out against the NOMINAL box, so they stay put when the box was cut.
-          var cvs=bb.querySelectorAll('.__ns_cv');
-          for(var ci=0;ci<cvs.length;ci++){
-            var f=cvs[ci].getAttribute('data-f').split(','),cs=cvs[ci].style;
-            cs.left=(R.ox0+f[0]*R.ow-R.x0)+'px';cs.top=(R.oy0+f[1]*R.oh-R.y0)+'px';
-            cs.width=((f[2]-f[0])*R.ow)+'px';cs.height=((f[3]-f[1])*R.oh)+'px';
+      var requestedRelayout=false;
+      for(var layoutPass=0;layoutPass<3;layoutPass++){
+        resolve(L);
+        var expanded=false;
+        for(var n=0;n<L.length;n++){
+          var R=L[n],bb=R.b,gg=R.g;
+          if(R.hidden){if(bb.style.display!=='none')bb.style.display='none';if(bb.__nsCover)bb.__nsCover.style.display='none';continue;}
+          var cw=R.x1-R.x0,ch=R.y1-R.y0;
+          var key=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
+          var keyChanged=bb.getAttribute('data-k')!==key;
+          var sz=Math.round(cw)+','+Math.round(ch),szChanged=bb.getAttribute('data-sz')!==sz;
+          if(keyChanged){
+            bb.setAttribute('data-k',key);bb.style.width=cw+'px';bb.style.height=ch+'px';
+            bb.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
           }
-          bb.style.transform='translate3d('+(cx-cw/2)+'px,'+(cy-ch/2)+'px,0)'+((gg[4]*1)?' rotate('+gg[4]+'deg)':'');
+          // Background/fill stays at the original OCR box in a lower global layer;
+          // only the text moves. Therefore no later fill can cover an earlier label.
+          var cover=bb.__nsCover;
+          if(cover){
+            var ck=Math.round(R.ox0)+','+Math.round(R.oy0)+','+Math.round(R.ow)+','+Math.round(R.oh)+','+R.angle;
+            if(cover.getAttribute('data-k')!==ck){
+              cover.setAttribute('data-k',ck);cover.style.width=R.ow+'px';cover.style.height=R.oh+'px';
+              cover.style.transform='translate3d('+R.ox0+'px,'+R.oy0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
+            }
+            if(cover.style.display!=='block')cover.style.display='block';
+          }
+          // All background paints are below this layer; z-order no longer resolves collisions.
+          if(bb.style.zIndex!=='')bb.style.zIndex='';
+          if(bb.style.display!=='flex')bb.style.display='flex';
+          var fw=String(Math.round(R.rw));
+          if(szChanged||bb.getAttribute('data-fw')!==fw){
+            bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);
+            var requiredH=fit(bb,(Number(gg[5])||0.01)*R.rw);
+            if(requiredH>ch+0.5){
+              var ratio=requiredH/Math.max(1,R.oh),oldRatio=Number(bb.__nsReqHRatio)||0;
+              if(ratio>oldRatio+0.005){bb.__nsReqHRatio=ratio;expanded=true;}
+            }
+          }
         }
-        var zz=R.z?String(R.z):'';
-        if(bb.style.zIndex!==zz)bb.style.zIndex=zz;
-        if(bb.style.display!=='flex')bb.style.display='flex';
-        var fw=String(Math.round(R.rw));
-        if(szChanged||bb.getAttribute('data-fw')!==fw){bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);fit(bb,gg[5]*R.rw);}
-      }}
+        if(!expanded)break;
+        requestedRelayout=true;
+      }
+      if(requestedRelayout)schedNow();
+    }
     var raf=0,lastRun=0,forceNext=false,settleT=0,ro=null;
     function sched(){
       if(raf)return;
