@@ -403,6 +403,8 @@ internal object OcrRescan {
     }
     @Volatile private var auditMisses = 0
     @Volatile private var auditPausedUntil = 0L
+    private const val REMOTE_AUDIT_MISS_LIMIT = 2
+    private const val REMOTE_AUDIT_COOLDOWN_MS = 60_000L
 
     /**
      * Speed-neutral completeness check for a remote (Google Lens) read.
@@ -419,7 +421,14 @@ internal object OcrRescan {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now < auditPausedUntil) return base
         val regions: List<Region> = try {
-            findUncovered(bmp, base.blocks, 2)
+            // Remote audit is a low-latency safety net, not a second full OCR pass. One plausible
+            // line-shaped region per successful screen read is enough; near-square UI/border fragments
+            // are the common source of one-character Lens calls on canvas screenshots.
+            findUncovered(bmp, base.blocks, 1).filter { region ->
+                val rw = region.r - region.l
+                val rh = region.b - region.t
+                rw >= 60 && rh >= 24 && rw.toFloat() / rh.toFloat() >= 1.2f
+            }
         } catch (_: Exception) { emptyList() } catch (_: OutOfMemoryError) { emptyList() }
         if (regions.isEmpty()) return base
         val tasks = regions.map { reg ->
@@ -449,9 +458,17 @@ internal object OcrRescan {
             if (before != current) recovered += usable.size
         }
         if (recovered == 0) {
-            if (++auditMisses >= 3) { auditPausedUntil = now + 20_000L; auditMisses = 0 }
-        } else auditMisses = 0
-        Log.i(TAG, "lens-audit regions=${regions.size} recovered=$recovered ms=${android.os.SystemClock.elapsedRealtime() - now}")
+            if (++auditMisses >= REMOTE_AUDIT_MISS_LIMIT) {
+                auditPausedUntil = now + REMOTE_AUDIT_COOLDOWN_MS
+                auditMisses = 0
+            }
+        } else {
+            auditMisses = 0
+            auditPausedUntil = 0L
+        }
+        Log.i(TAG, "lens-audit regions=${regions.size} recovered=$recovered " +
+            "missStreak=$auditMisses cooldownMs=${(auditPausedUntil - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L)} " +
+            "ms=${android.os.SystemClock.elapsedRealtime() - now}")
         return if (recovered > 0) OcrResult(current) else base
     }
 
