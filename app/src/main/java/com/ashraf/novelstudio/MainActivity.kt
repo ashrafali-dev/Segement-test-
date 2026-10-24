@@ -6803,8 +6803,8 @@ return t.length>=40?'TXT:'+t:'';
                             }
                         }
                     }
-                    onHandled?.invoke()
                 }
+                onHandled?.invoke()
             }
         ))
     }
