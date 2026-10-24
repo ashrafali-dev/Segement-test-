@@ -2566,7 +2566,12 @@ var PH=/placeholder|blank\.|spacer|loading|lazy[-_.]?(img|load)|1x1|transparen|p
 var LAZY=['data-src','data-original','data-lazy-src','data-lazy','data-url','data-echo','data-actualsrc','data-orig-src','data-pc-src','data-original-src','data-src-original','data-image','data-img','data-bg','data-background','data-background-image','data-ks-lazyload','data-cfsrc','data-defer-src'];
 var de=document.scrollingElement||document.documentElement;
 function absUrl(s){try{return s?new URL(String(s).trim(),document.baseURI).href:'';}catch(e){return '';}}
-function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s);}
+function decorativeUrl(s){
+  s=String(s||"").trim();var p=s.split("#")[0].split("?")[0].toLowerCase();
+  return /(?:^|\/)(?:bg_viewbody|bg_header|bg_footer)(?:\.[^\/]*)?$/.test(p)||
+    /(?:^|\/)webtoon\/detail$/.test(p);
+}
+function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!decorativeUrl(s);}
 function pickSrcset(ss){
   if(!ss)return '';
   var best='',bestScore=-1,parts=String(ss).split(',');
