@@ -408,10 +408,13 @@ class MainActivity : Activity() {
             } catch (_: Exception) { }
             if (srcs.isEmpty()) {
                 whenIdle(0) {
-                    finish(null)
                     navToken++
                     toast("🔎 No image URL found; trying fresh OCR on the visible reader")
-                    startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true)
+                    // Keep Auto Real-time paused until screenshot OCR has been handed to translation;
+                    // resuming here used to start a competing OCR job and cancel the manual read.
+                    startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true, onHandled = {
+                        handler.postDelayed({ finish(null) }, 900L)
+                    })
                 }
                 return@evaluateJavascript
             }
@@ -6571,7 +6574,10 @@ return t.length>=40?'TXT:'+t:'';
      */
     private var deepSeekLastFailToastAtMs = 0L
 
-    private fun startWebModeExtract(token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false) {
+    private fun startWebModeExtract(
+        token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false,
+        onHandled: (() -> Unit)? = null
+    ) {
         // In real-time mode the ahead worker has its own low-priority executor and does not scroll
         // the page. Let it finish caching upcoming panels while the visible panel is scanned and
         // translated; cancelling it on every viewport change made the 9-panel read-ahead starve.
@@ -6797,6 +6803,7 @@ return t.length>=40?'TXT:'+t:'';
                             }
                         }
                     }
+                    onHandled?.invoke()
                 }
             }
         ))
