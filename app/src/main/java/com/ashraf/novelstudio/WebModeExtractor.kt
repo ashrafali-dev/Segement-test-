@@ -99,6 +99,8 @@ internal class WebModeRequest(
     val forceOcrSrc: String? = null,
     /** Normalized rectangle to OCR within forceOcrSrc. */
     val forceOcrRegion: WebModeOcrRegion? = null,
+    /** User-triggered Extract must not replay the engine-level OCR result cache. */
+    val forceFreshOcr: Boolean = false,
     /**
      * Real-time mode: inventory all image URLs currently present in the DOM (up to the page's
      * bounded candidate limit), then process only the next ordered batch. Images not in the DOM
@@ -814,13 +816,13 @@ internal class WebModeExtractor(
                         // Some Android codecs throw while decoding a selected region. Retry with a
                         // bounded downsampled bitmap rather than aborting manual OCR.
                         try {
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted || req.forceFreshOcr)
                         } catch (cropError: RuntimeException) {
                             Log.w(TAG, "Force OCR crop failed; retrying bitmap crop: ${cropError.javaClass.simpleName}: ${cropError.message}")
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true, forceFresh = targeted)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true, forceFresh = targeted || req.forceFreshOcr)
                         }
                     } else {
-                        ocrBytes(bytes, script, p.src, fastMode = fastPass, forceFresh = targeted)
+                        ocrBytes(bytes, script, p.src, fastMode = fastPass, forceFresh = targeted || req.forceFreshOcr)
                     }
                     diag.decoded++
                     if (po == null) continue                      // too small to be a panel: ignored, not an error
