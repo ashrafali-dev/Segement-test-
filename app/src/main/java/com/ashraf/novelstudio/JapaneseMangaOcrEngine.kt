@@ -350,11 +350,19 @@ internal class RoutingOcrEngine : OcrEngine {
             }
             if (failure != null) {
                 OcrEngineStatus.lastError = "lens ${script.name}: $failure"
-                Log.w("NovelStudioOCR", "lens unavailable ($failure); selected Google Lens remains independent")
-                report("lens(error)", false)
+                Log.w("NovelStudioOCR", "lens unavailable ($failure)")
                 lensThread.set(false)
-                return OcrResult(emptyList())
-            }
+                if (failure.endsWith("cancelled", ignoreCase = true)) {
+                    report("lens(cancelled)", false)
+                    return OcrResult(emptyList())
+                }
+                // Lens is an unofficial online endpoint; keep the reading flow alive with on-device OCR.
+                report("mlkit(lens-error-fallback)", true)
+                return try { run(mlKit) } catch (fallback: Exception) {
+                    Log.w("NovelStudioOCR", "ML Kit fallback also failed after Lens error", fallback)
+                    OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
+                    OcrResult(emptyList())
+                }
             val blockCount = lens?.blocks?.size ?: 0
             val letterCount = lens?.blocks?.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } } ?: 0
             if (lens != null && useful(lens)) {
