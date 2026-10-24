@@ -2628,7 +2628,7 @@ function scroller(){
   // candidate container made discovery quadratic and could freeze long comic pages.
   var countByEl=new Map(),imgs=document.images,imgLimit=Math.min(imgs.length,1200);
   for(var i=0;i<imgLimit;i++){
-    var im=imgs[i],src=imageSrc(im);if(!src)continue;
+    var im=imgs[i],src=imageSrc(im);if(!src||!goodUrl(src))continue;
     var imMeta=(im.className&&im.className.baseVal!==undefined?im.className.baseVal:im.className||'')+' '+(im.id||'')+' '+(im.alt||'');
     if(BAD.test(imMeta))continue;
     var ir=im.getBoundingClientRect(),nw=im.naturalWidth||0,nh=im.naturalHeight||0;
@@ -2700,7 +2700,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
   }
   for(var i=0;i<imgs.length;i++){
     var im=imgs[i],src=imageSrc(im);
-    if(!src)continue;
+    if(!src||!goodUrl(src))continue;
     if(/\/link-slot-|\/(?:banner|banners|promotion|promo)\//i.test(src))continue;
     // Page furniture is not a panel: background strips (bg_viewbody.jpg is 420x19000 and 634 bytes), icons, buttons,
     // spinners, and "images" whose address is really a web page. Reading them wasted time and made the site look
@@ -2749,7 +2749,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     if(xr.width<100||xr.height<60)continue;
     if(String(xe.tagName).toLowerCase()==='video')xs=xe.getAttribute('poster')||'';
     else xs=(xe.href&&xe.href.baseVal)||xe.getAttribute('href')||xe.getAttribute('xlink:href')||'';
-    xs=absUrl(xs);if(!xs||seen[xs])continue;
+    xs=absUrl(xs);if(!xs||!goodUrl(xs)||seen[xs])continue;
     var xmeta=(xe.className&&xe.className.baseVal!==undefined?xe.className.baseVal:xe.className||'')+' '+(xe.id||'');
     if(BAD.test(xmeta))continue;
     seen[xs]=1;
