@@ -46,7 +46,31 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle testDebugUnitTest assembleDebug --no-daemon
+        run: gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon
+      - name: Verify permanent release signing certificate
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER" && test -x "$APKSIGNER"
+          SIGNATURE_REPORT="$("$APKSIGNER" verify --verbose --print-certs "$APK")"
+          printf '%s\n' "$SIGNATURE_REPORT"
+          ACTUAL_CERT_SHA256="$(printf '%s\n' "$SIGNATURE_REPORT" | awk '/certificate SHA-256 digest:/ {print tolower($NF); exit}')"
+          EXPECTED_CERT_SHA256="3e783739eb6e9aadf8bd9f5b23f8fb99a65c4cfabdcb8ec8fb09c2921dcbb44b"
+          if [ "$ACTUAL_CERT_SHA256" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "::error::Release signing certificate does not match the established Novel Studio certificate."
+            echo "::error::Expected $EXPECTED_CERT_SHA256; got ${ACTUAL_CERT_SHA256:-missing}"
+            exit 1
+          fi
+          echo "PASS: APK uses the established Novel Studio release certificate."
+      - name: Upload signed release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovelStudio-SIGNED-RELEASE-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v4
         with:
