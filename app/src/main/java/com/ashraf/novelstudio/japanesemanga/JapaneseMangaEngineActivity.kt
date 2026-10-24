@@ -238,7 +238,7 @@ class JapaneseMangaEngineActivity : Activity() {
             when (result) {
                 JapaneseMangaModelManager.Result.Success -> {
                     JapaneseMangaRuntime.invalidate()
-                    resultView.text = "✅ Japanese Manga Engine ইনস্টল হয়েছে। এখন থেকে Realtime/Scan মোডে জাপানিজ মাঙ্গায় এই মডেল নিজে থেকেই ব্যবহার হবে; অন্য ভাষায় আগের OCR-ই চলবে।"
+                    resultView.text = "✅ Japanese Manga Engine ইনস্টল হয়েছে। ব্যবহার করতে OCR Engine সেটিংসে Japanese Manga OCR নির্বাচন করো। অন্য OCR engine (যেমন Google Lens) নির্বাচন থাকলে সেটিই চলবে।"
                     loadRuntime()
                     status.text = "ইঞ্জিন ইনস্টল সম্পন্ন। OCR runtime প্রস্তুত হচ্ছে…"
                 }
