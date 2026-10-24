@@ -1300,14 +1300,10 @@ internal class WebModeExtractor(
             val accs = LinkedHashMap<String, ForceAcc>()
             // In visible-only recovery, collect image candidates exactly once and include CSS
             // backgrounds; full-chapter Force Extract retains its original throttled scan.
-            val forceInfoScript = if (req.forceScreenOcr) {
-                // A link-slot/thumb URL is not the manga artwork. Do not crop that DOM element from the screenshot;
-                // read the captured WebView viewport itself so unrelated ad assets cannot become OCR paragraphs.
-                JS_FORCE_INFO.replaceFirst(
-                    "var sc=scroller(),c=cands(sc,undefined,true,true),vw=",
-                    "var sc=scroller(),c=[],vw="
-                )
-            } else if (req.visibleOnly) {
+            val forceInfoScript = if (req.visibleOnly) {
+                // Keep canvas placeholders so screenshots are cropped to the actual manga canvas, not the whole WebView.
+                // The link-slot source is already excluded by decorativeUrl/goodUrl; dropping ALL candidates here
+                // would reintroduce app/header text into viewport OCR and lose the precise canvas bounds.
                 JS_FORCE_INFO.replaceFirst(
                     "var sc=scroller(),c=cands(sc,undefined,true,true),vw=",
                     "var sc=scroller(),c=cands(sc,true,true,true),vw="
