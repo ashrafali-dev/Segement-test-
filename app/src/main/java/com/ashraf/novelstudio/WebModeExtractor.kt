@@ -2399,7 +2399,7 @@ internal class WebModeExtractor(
             // Do exactly one remote OCR pass. The generic sparse-result retry and language-fallback logic
             // below is for local recognisers; here it merely re-encodes/re-uploads the same bitmap.
             if ((engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true) {
-                val lensResult = if (forceFresh) routing?.recognizeFresh(bmp, st.current, fastMode) ?: engine.recognize(bmp, st.current)
+                val lensResult = if (forceFresh) (engine as? RoutingOcrEngine)?.recognizeFresh(bmp, st.current, fastMode) ?: engine.recognize(bmp, st.current)
                     else if (fastMode) engine.recognizeFast(bmp, st.current) else engine.recognize(bmp, st.current)
                 if (lensResult.text.count { it.isLetterOrDigit() } >= 2) st.locked = true
                 return lensResult
