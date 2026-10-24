@@ -33,6 +33,8 @@ internal object WebModeInpainter {
     private val warming = AtomicBoolean(false)
     /** Set when one inpaint took longer than 9 s on this phone: AI is skipped from then on (until the app restarts). */
     @Volatile var tooSlow = false
+    @Volatile var lastLoadError: String = ""
+        private set
     @Volatile private var session: OrtSession? = null
     @Volatile private var sessionFailed = false
     @Volatile private var imageName = "image"
@@ -44,6 +46,22 @@ internal object WebModeInpainter {
     fun isReady(ctx: Context): Boolean = modelFile(ctx).let { it.isFile && it.length() in MIN_BYTES..MAX_BYTES }
     fun isDownloading(): Boolean = downloading.get()
     fun isLoaded(): Boolean = session != null
+
+    /** Remove an interrupted partial download and reset load failures after an explicit retry. */
+    fun restore(ctx: Context) {
+        runCatching { File(File(ctx.applicationContext.filesDir, "wm_inpaint"), "$MODEL_NAME.part").delete() }
+    }
+
+    fun resetFailures(ctx: Context) {
+        sessionFailed = false
+        tooSlow = false
+        lastLoadError = ""
+    }
+
+    fun fileState(ctx: Context): String {
+        val file = modelFile(ctx)
+        return "Model file: exists=${file.isFile}, bytes=${if (file.isFile) file.length() else 0}, ready=${isReady(ctx)}"
+    }
 
     /** Loads the model in the background (several seconds), so the first scanned page never waits for it. */
     fun warmUpAsync(ctx: Context) {
@@ -138,8 +156,9 @@ internal object WebModeInpainter {
             maskName = if (names.contains("mask")) "mask" else names[names.size - 1]
             session = s
             s
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
             sessionFailed = true
+            lastLoadError = t.message ?: t.javaClass.simpleName
             null
         }
     }
