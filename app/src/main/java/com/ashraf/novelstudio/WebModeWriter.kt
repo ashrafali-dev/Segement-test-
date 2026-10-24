@@ -418,12 +418,17 @@ internal object WebModeWriter {
         }
         t.style.overflow='visible';
         if(fits())return boxH;
-        // Still too tall at full allowed width: the box also grows taller (never clipped).
+        // Still too tall at the widest allowed box. The box may grow a little taller (bounded), then the font keeps
+        // shrinking: a slightly smaller text that sits in its bubble beats a giant card over the artwork.
         t.style.overflowWrap='anywhere';   // a word wider than the box breaks instead of asking for endless height
-        var rq=t.getBoundingClientRect(),needH=Math.max(rq.height,t.scrollHeight);
-        if(needH<=availH+1)return boxH;    // nothing taller is needed; never grow "just in case"
         var shr=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
-        return Math.ceil(needH/shr)+4;
+        var maxH=Math.max(boxH,Number(b.__nsMaxH)||boxH),capAvail=Math.max(availH,maxH*shr);
+        function heightNow(){var q=t.getBoundingClientRect();return Math.max(q.height,t.scrollHeight);}
+        var fpx=parseFloat(t.style.fontSize)||floorPx,gd=0;
+        while(heightNow()>capAvail+1&&fpx>3.5&&gd++<60){fpx*=0.94;t.style.fontSize=fpx+'px';}
+        var needH=heightNow();
+        if(needH<=availH+1)return boxH;    // nothing taller is needed; never grow "just in case"
+        return Math.min(maxH,Math.ceil(needH/shr)+4);
       }
       t.style.fontSize=best+'px';
       for(var pass=0;pass<4;pass++){
@@ -488,6 +493,19 @@ internal object WebModeWriter {
             iy=Math.max(0,Math.min(ar.b,br.b)-Math.max(ar.t,br.t)),ov=ix*iy,small=Math.min(area(ar),area(br));
         if(small>0&&ov/small>=0.82){B.hidden=true;B.x0=B.x1=B.y0=B.y1=-99999;}
       }
+      // Free horizontal room of every box: up to the nearest neighbour that shares its rows (or the picture edge).
+      for(var i=0;i<n;i++){
+        var A=L[i];if(A.hidden)continue;
+        var fl=Number.isFinite(A.il)?A.il+1:-Infinity,fr=Number.isFinite(A.ir)?A.ir-1:Infinity;
+        for(var j=0;j<n;j++){
+          if(j===i)continue;var B=L[j];if(B.hidden||B.s!==A.s)continue;
+          var vo=Math.min(A.oy1,B.oy1)-Math.max(A.oy0,B.oy0);
+          if(vo<=2)continue;
+          if(B.ox1<=A.ox0+1)fl=Math.max(fl,B.ox1+GAP);
+          else if(B.ox0>=A.ox1-1)fr=Math.min(fr,B.ox0-GAP);
+        }
+        A.freeL=fl;A.freeR=fr;
+      }
       // Seed connected collision groups from the original geometry.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
         var A=L[i],B=L[j];if(A.hidden||B.hidden)continue;
@@ -497,9 +515,11 @@ internal object WebModeWriter {
         for(var ri=0;ri<n;ri++){
           var RB=L[ri];if(RB.hidden)continue;
           var ocx=(RB.ox0+RB.ox1)/2,ocy=(RB.oy0+RB.oy1)/2;
-          RB.w=Math.max(RB.ow,RB.needW||0);RB.h=Math.max(RB.oh,RB.needH||0);
-          var lb0=Number.isFinite(RB.il)?RB.il+1:-Infinity,rb0=Number.isFinite(RB.ir)?RB.ir-1:Infinity;
-          if(rb0-lb0>=RB.w&&RB.w>RB.ow+0.5){var cx0=Math.max(lb0+RB.w/2,Math.min(rb0-RB.w/2,ocx));RB.x0=cx0-RB.w/2;RB.x1=cx0+RB.w/2;}
+          var wantW=Math.max(RB.ow,RB.needW||0);
+          var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?RB.freeR-RB.freeL:Infinity;
+          RB.w=Math.min(wantW,Math.max(RB.ow,room),RB.ow*1.35);RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
+          if(RB.w>RB.ow+0.5&&Number.isFinite(RB.freeL)&&Number.isFinite(RB.freeR)){
+            var cx0=Math.max(RB.freeL+RB.w/2,Math.min(RB.freeR-RB.w/2,ocx));RB.x0=cx0-RB.w/2;RB.x1=cx0+RB.w/2;}
           else{RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;}
           RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
         }
@@ -521,11 +541,11 @@ internal object WebModeWriter {
           if(!(rightBound>leftBound+2)){leftBound=0;rightBound=window.innerWidth||400;}
           var available=Math.max(1,rightBound-leftBound-4),gap=Math.min(GAP,available/Math.max(4,G.length*2)),
               widths=0;
-          for(var q=0;q<G.length;q++)widths+=Math.max(geom(G[q],true).w,G[q].needW||0);
+          for(var q=0;q<G.length;q++)widths+=geom(G[q],true).w;
           var scale=Math.min(1,Math.max(0.001,(available-gap*(G.length-1))/Math.max(1,widths)));
           var cursor,totalNow=0;
           for(var q=0;q<G.length;q++){
-            var R=G[q],origW=Math.max(R.ow,R.needW||0),origH=R.oh,ang=Number(R.angle)||0,need=Math.max(origH,R.needH||0);
+            var R=G[q],origW=R.ow,origH=R.oh,ang=Number(R.angle)||0,need=Math.max(origH,R.needH||0);
             R.w=origW*scale;R.h=ang?Math.max(origH*scale,R.needH||0):need;
             var vis=geom({x0:0,x1:R.w,y0:0,y1:R.h,angle:ang},false);R._visW=vis.w;totalNow+=vis.w;
           }
@@ -559,6 +579,7 @@ internal object WebModeWriter {
       }
     }
     function bw0(R){return R.ow;}
+    var orgX=0,orgY=0;
     function ensureLabelCover(bb){
       var labelCover=bb.__nsLabelCover;
       if(!labelCover){
@@ -585,10 +606,13 @@ internal object WebModeWriter {
         var bh=R.y1-R.y0,bw=R.x1-R.x0;
         if(!R.rot&&(th>bh+1.5||tw>bw+1.5)){
           overflow++;
-          var ratio=Math.min(4,(th/0.86+4)/Math.max(1,R.oh));
+          var ratio=Math.min(1.8,(th/0.86+4)/Math.max(1,R.oh));
           if(th>bh+1.5&&ratio>(Number(R.b.__nsReqHRatio)||0)+0.005){R.b.__nsReqHRatio=ratio;need=true;}
         }
-        vis.push({R:R,l:tr.left,r:tr.right,t:tr.top,b:tr.bottom});
+        // the real ink area of the lines (the text block itself can be wider than its last line)
+        var ink=tr;try{var rg=document.createRange();rg.selectNodeContents(t);var ib=rg.getBoundingClientRect();if(ib&&ib.width>0&&ib.height>0)ink=ib;}catch(e){}
+        R.inkL=ink.left;R.inkT=ink.top;R.inkW=ink.width;R.inkH=ink.height;
+        vis.push({R:R,l:ink.left,r:ink.right,t:ink.top,b:ink.bottom});
       }
       vis.sort(function(a,b){return a.t-b.t;});
       for(var i=0;i<vis.length;i++)for(var j=i+1;j<vis.length;j++){
@@ -603,9 +627,17 @@ internal object WebModeWriter {
         var cw=R.x1-R.x0,ch=R.y1-R.y0;
         bb.setAttribute('data-k',Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch));
         bb.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
-        var lc=ensureLabelCover(bb),lk='v'+Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
-        if(lc.getAttribute('data-k')!==lk){lc.setAttribute('data-k',lk);lc.style.width=cw+'px';lc.style.height=ch+'px';
-          lc.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');}
+        bb.__nsPushed=true;
+      }
+      // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
+      for(var i=0;i<vis.length;i++){
+        var R=vis[i].R,bb=R.b;
+        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed)||R.rot||bb.getAttribute('data-cl')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
+        var pad=Math.max(3,Math.min(8,R.inkH*0.15));
+        var lc=ensureLabelCover(bb),cx=vis[i].l-orgX-pad,cy=vis[i].t-orgY-pad,cwid=vis[i].r-vis[i].l+2*pad,chei=vis[i].b-vis[i].t+2*pad;
+        var lk='t'+Math.round(cx)+','+Math.round(cy)+','+Math.round(cwid)+','+Math.round(chei);
+        if(lc.getAttribute('data-k')!==lk){lc.setAttribute('data-k',lk);lc.style.width=cwid+'px';lc.style.height=chei+'px';
+          lc.style.transform='translate3d('+cx+'px,'+cy+'px,0)';}
         lc.style.display='block';
       }
       window.__nsLayoutReport={visible:vis.length,overflow:overflow,overlaps:overlaps,pushed:pushed,t:Date.now()};
@@ -628,6 +660,7 @@ internal object WebModeWriter {
         for(var u=0;u<bs.length;u++)bs[u].removeAttribute('data-k');
       }
       var o=ABS?w.getBoundingClientRect():null;
+      orgX=ABS?o.left:0;orgY=ABS?o.top:0;
       var L=[],needsIndex=false,lookupNow=Date.now();
       // Most Webtoon images stay in the DOM, so cached source-to-image references are enough.
       // Only build the per-pass index when a cached image disappeared or an image has not yet
@@ -667,6 +700,7 @@ internal object WebModeWriter {
         for(var n=0;n<L.length;n++){
           var R=L[n],bb=R.b,gg=R.g;
           if(R.hidden){if(bb.style.display!=='none')bb.style.display='none';if(bb.__nsCover)bb.__nsCover.style.display='none';continue;}
+          bb.__nsPushed=false;
           var cw=R.x1-R.x0,ch=R.y1-R.y0;
           var key=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
           var keyChanged=bb.getAttribute('data-k')!==key;
@@ -693,17 +727,8 @@ internal object WebModeWriter {
           // If the text moved away from its source bubble, retain the source cover AND add a
           // matching card under the relocated text so it stays readable over artwork.
           // Every card lives in coverLayer, below textLayer, so it cannot occlude another label.
-          if(moved){
-            var labelCover=ensureLabelCover(bb);
-            var labelKey=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch)+','+R.angle;
-            if(labelCover.getAttribute('data-k')!==labelKey){
-              labelCover.setAttribute('data-k',labelKey);labelCover.style.width=cw+'px';labelCover.style.height=ch+'px';
-              labelCover.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
-            }
-            if(labelCover.style.display!=='block')labelCover.style.display='block';
-          }else if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none'){
-            bb.__nsLabelCover.style.display='none';
-          }
+          // A text that left its own bubble gets a small card under the TEXT ITSELF (never the whole box): see verify().
+          if(!moved&&bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';
           // All background paints are below this layer; z-order no longer resolves collisions.
           if(bb.style.zIndex!=='')bb.style.zIndex='';
           if(bb.style.display!=='flex')bb.style.display='flex';
@@ -711,12 +736,14 @@ internal object WebModeWriter {
           if(szChanged||bb.getAttribute('data-fw')!==fw){
             bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);
             // A box that shares its row with neighbours may not take more width than the row gave it.
-            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(bw0(R),R.rw-4);
+            var roomW=(Number.isFinite(R.freeR)&&Number.isFinite(R.freeL))?R.freeR-R.freeL-2:R.rw-4;
+            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(R.ow*1.35,roomW));
+            bb.__nsMaxH=R.oh*1.8;
             var prevW=Number(bb.__nsReqWRatio)||0;
             var requiredH=fit(bb,(Number(gg[5])||0.01)*R.rw);
             if((Number(bb.__nsReqWRatio)||0)>prevW+0.005)expanded=true;   // wider box wanted: lay out again with it
             if(requiredH>ch+0.5){
-              var ratio=Math.min(4,requiredH/Math.max(1,R.oh)),oldRatio=Number(bb.__nsReqHRatio)||0;
+              var ratio=Math.min(1.8,requiredH/Math.max(1,R.oh)),oldRatio=Number(bb.__nsReqHRatio)||0;
               if(ratio>oldRatio+0.005){bb.__nsReqHRatio=ratio;expanded=true;}
             }
           }
