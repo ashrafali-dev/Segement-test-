@@ -435,6 +435,15 @@ internal class RoutingOcrEngine : OcrEngine {
     override fun recognize(bitmap: Bitmap, script: OcrScript): OcrResult =
         route(bitmap, script) { it.recognize(bitmap, script) }
 
+    /** A user-triggered Extract bypasses the Google Lens result cache. */
+    fun recognizeFresh(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult =
+        route(bitmap, script) {
+            when (it) {
+                is LensOcrEngine -> it.recognizeFresh(bitmap, script, fastMode)
+                else -> if (fastMode) it.recognizeFast(bitmap, script) else it.recognize(bitmap, script)
+            }
+        }
+
     override fun recognizeFast(bitmap: Bitmap, script: OcrScript): OcrResult =
         route(bitmap, script) { it.recognizeFast(bitmap, script) }
 
