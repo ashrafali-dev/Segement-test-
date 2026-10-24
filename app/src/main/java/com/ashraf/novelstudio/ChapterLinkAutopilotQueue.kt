@@ -115,7 +115,8 @@ internal object ChapterLinkAutopilotQueue {
         val jobs=read(c).toMutableList(); var n=0
         for(i in jobs.indices) if(jobs[i].status==FAILED) {
             val old=jobs[i]
-            jobs[i]=old.copy(status=QUEUED,stage=if(old.rawText.isNotBlank()) "Retrying saved OCR text" else "Queued for retry",
+            jobs[i]=old.copy(status=if(old.rawText.isNotBlank()) TRANSLATING else QUEUED,
+                stage=if(old.rawText.isNotBlank()) "Retrying saved OCR text" else "Queued for retry",
                 progress=if(old.rawText.isNotBlank()) 82 else 0,error="",updatedAt=System.currentTimeMillis())
             n++
         }
@@ -275,7 +276,8 @@ internal class ChapterLinkAutopilotRunner(
         current?.let { job ->
             val latest=ChapterLinkAutopilotQueue.list(app).firstOrNull { it.id==job.id }
             if(latest!=null && latest.status!=ChapterLinkAutopilotQueue.READY && latest.status!=ChapterLinkAutopilotQueue.FAILED)
-                ChapterLinkAutopilotQueue.update(app,job.id,status=ChapterLinkAutopilotQueue.QUEUED,
+                ChapterLinkAutopilotQueue.update(app,job.id,
+                    status=if(latest.rawText.isNotBlank()) ChapterLinkAutopilotQueue.TRANSLATING else ChapterLinkAutopilotQueue.QUEUED,
                     stage=if(latest.rawText.isNotBlank()) "Resuming saved OCR text" else "Will resume chapter scan",
                     progress=if(latest.rawText.isNotBlank()) 82 else 0)
         }
