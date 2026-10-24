@@ -405,6 +405,33 @@ internal object OcrRescan {
     @Volatile private var auditPausedUntil = 0L
     private const val REMOTE_AUDIT_MISS_LIMIT = 2
     private const val REMOTE_AUDIT_COOLDOWN_MS = 60_000L
+    private const val MIN_REMOTE_AUDIT_WIDTH = 200
+    private const val MIN_REMOTE_AUDIT_HEIGHT = 80
+    private const val MIN_REMOTE_AUDIT_DARK_RATIO = 0.10f
+
+    /** Sample a bounded number of pixels; skip near-white blank regions before paying for a Lens request. */
+    private fun hasDarkPixelRatio(bmp: Bitmap, region: Region, minRatio: Float): Boolean {
+        val l = region.l.coerceIn(0, bmp.width)
+        val t = region.t.coerceIn(0, bmp.height)
+        val r = region.r.coerceIn(l, bmp.width)
+        val b = region.b.coerceIn(t, bmp.height)
+        val w = r - l; val h = b - t
+        if (w < 1 || h < 1) return false
+        val stride = maxOf(1, maxOf(w, h) / 120)
+        var sampled = 0
+        var dark = 0
+        var y = t
+        while (y < b) {
+            var x = l
+            while (x < r) {
+                if (luma(bmp.getPixel(x, y)) < 160) dark++
+                sampled++
+                x += stride
+            }
+            y += stride
+        }
+        return sampled > 0 && dark.toFloat() / sampled >= minRatio
+    }
 
     /**
      * Speed-neutral completeness check for a remote (Google Lens) read.
@@ -421,13 +448,13 @@ internal object OcrRescan {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now < auditPausedUntil) return base
         val regions: List<Region> = try {
-            // Remote audit is a low-latency safety net, not a second full OCR pass. One plausible
-            // line-shaped region per successful screen read is enough; near-square UI/border fragments
-            // are the common source of one-character Lens calls on canvas screenshots.
+            // Remote audit is a conservative safety net, not a second full OCR pass.
+            // Tiny screen-edge/border components are overwhelmingly noise for Lens and cost ~1 s each.
             findUncovered(bmp, base.blocks, 1).filter { region ->
                 val rw = region.r - region.l
                 val rh = region.b - region.t
-                rw >= 60 && rh >= 24 && rw.toFloat() / rh.toFloat() >= 1.2f
+                rw >= MIN_REMOTE_AUDIT_WIDTH && rh >= MIN_REMOTE_AUDIT_HEIGHT &&
+                    hasDarkPixelRatio(bmp, region, MIN_REMOTE_AUDIT_DARK_RATIO)
             }
         } catch (_: Exception) { emptyList() } catch (_: OutOfMemoryError) { emptyList() }
         if (regions.isEmpty()) return base
