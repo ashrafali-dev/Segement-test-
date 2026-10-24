@@ -1455,7 +1455,7 @@ internal class WebModeExtractor(
                 if (!alive()) return false
                 val t0 = SystemClock.elapsedRealtime()
                 val result = try {
-                    recognize(bmp, st, fastMode = req.visibleOnly, forceFresh = req.forceFreshOcr)
+                    recognize(bmp, st, fastMode = req.visibleOnly && !req.forceFreshOcr, forceFresh = req.forceFreshOcr)
                 } catch (e: OcrUnavailableException) {
                     OcrDiag.log("SCREEN_OCR", "engine unavailable: ${e.message}")
                     throw e
@@ -1582,7 +1582,8 @@ internal class WebModeExtractor(
                         for ((index, task) in pending.withIndex()) {
                             futures.add(completion.submit(java.util.concurrent.Callable {
                                 val result = try {
-                                    engine.recognizeFast(task.bitmap, st.current)
+                                    if (req.forceFreshOcr) routing!!.recognizeFresh(task.bitmap, st.current, fastMode = false)
+                                    else engine.recognizeFast(task.bitmap, st.current)
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "parallel Lens viewport OCR failed for crop $index: ${e.javaClass.simpleName}")
                                     null
@@ -1619,7 +1620,7 @@ internal class WebModeExtractor(
                             readSlice(
                                 task.bitmap, st, task.offY, 1, task.fullW, task.fullH, task.src,
                                 task.acc.texts, task.acc.bubbles, task.first, task.last, task.offX,
-                                fastMode = true, preRecognized = recognized
+                                fastMode = req.visibleOnly && !req.forceFreshOcr, forceFresh = req.forceFreshOcr, preRecognized = recognized
                             )
                         }
                     } finally {
@@ -1631,7 +1632,7 @@ internal class WebModeExtractor(
                         readSlice(
                             task.bitmap, st, task.offY, 1, task.fullW, task.fullH, task.src,
                             task.acc.texts, task.acc.bubbles, task.first, task.last, task.offX,
-                            fastMode = true
+                            fastMode = req.visibleOnly && !req.forceFreshOcr, forceFresh = req.forceFreshOcr
                         )
                     }
                 }
