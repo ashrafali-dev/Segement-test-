@@ -429,55 +429,93 @@ internal object WebModeWriter {
     var MARGIN=1400;
     // Two bubbles whose boxes overlap partly (joined / burst bubbles): the later one used to paint its
     // background over the first one's text. Cut the overlap away so both stay fully readable.
+    // Collision resolution is horizontal-only: Y centres never move to make room.
+    // Comparable boxes are packed side-by-side in their shared image bounds. If the
+    // row is too wide, widths shrink proportionally and fit() re-typesets the full text.
     function resolve(L){
-      for(var i=0;i<L.length;i++)for(var j=i+1;j<L.length;j++){
-        var A=L[i],B=L[j];
-        if(A.s!==B.s||A.rot||B.rot)continue;
-        // Bubbles that bring their own interior shape paint only inside their own outline: overlapping boxes are harmless.
-        if(A.cvd&&B.cvd)continue;
-        var ox=Math.min(A.x1,B.x1)-Math.max(A.x0,B.x0),oy=Math.min(A.y1,B.y1)-Math.max(A.y0,B.y0);
-        if(ox<=2||oy<=2)continue;
-        var aA=(A.x1-A.x0)*(A.y1-A.y0),aB=(B.x1-B.x0)*(B.y1-B.y0);
-        if(ox*oy>0.6*Math.min(aA,aB)){
-          if(Math.min(aA,aB)>=0.3*Math.max(aA,aB)){
-            // Two comparable boxes on the same spot are two readings of one bubble (e.g. its two lines). Drawn on
-            // top of each other they garble each other (the cleaned picture has no cover box), so stack them
-            // top to bottom inside their union, sharing the height by text length.
-            var tA=(A.b.textContent||''),tB=(B.b.textContent||'');
-            var T=(A.y0+A.y1<=B.y0+B.y1)?A:B,Bo=(T===A)?B:A;
-            if(tA===tB){Bo.x0=Bo.x1=Bo.y0=Bo.y1=-99999;continue;}   // exact duplicate: draw once
-            var U0=Math.min(A.y0,B.y0),U1=Math.max(A.y1,B.y1),X0=Math.min(A.x0,B.x0),X1=Math.max(A.x1,B.x1);
-            var lt=Math.max(1,(T.b.textContent||'').length),lb=Math.max(1,(Bo.b.textContent||'').length);
-            var cut=U0+(U1-U0)*lt/(lt+lb);
-            T.x0=Bo.x0=X0;T.x1=Bo.x1=X1;T.y0=U0;T.y1=cut-1;Bo.y0=cut+1;Bo.y1=U1;
-            continue;
+      var n=L.length,GAP=3,parent=new Array(n);
+      function root(i){while(parent[i]!==i){parent[i]=parent[parent[i]];i=parent[i];}return i;}
+      function join(a,b){var ra=root(a),rb=root(b);if(ra===rb)return false;parent[rb]=ra;return true;}
+      function geom(R,original){
+        var x0=original?R.ox0:R.x0,x1=original?R.ox1:R.x1,
+            y0=original?R.oy0:R.y0,y1=original?R.oy1:R.y1;
+        var w=Math.max(0,x1-x0),h=Math.max(0,y1-y0),cx=(x0+x1)/2,cy=(y0+y1)/2,
+            a=(Number(R.angle)||0)*Math.PI/180,co=Math.abs(Math.cos(a)),si=Math.abs(Math.sin(a)),
+            rw=co*w+si*h,rh=si*w+co*h;
+        return {l:cx-rw/2,r:cx+rw/2,t:cy-rh/2,b:cy+rh/2,w:rw,h:rh,cx:cx,cy:cy};
+      }
+      function hits(a,b,g){return a.l<b.r+g&&a.r+g>b.l&&a.t<b.b+g&&a.b+g>b.t;}
+      function area(r){return Math.max(0,r.r-r.l)*Math.max(0,r.b-r.t);}
+      for(var i=0;i<n;i++){
+        parent[i]=i;L[i].hidden=false;
+        L[i].needH=Math.max(L[i].needH||0,L[i].b.__nsReqH||0);
+      }
+      // Exact duplicate OCR/translation at the same place is one label, not two.
+      for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s)continue;
+        var at=(A.b.textContent||'').trim(),bt=(B.b.textContent||'').trim();
+        if(!at||at!==bt)continue;
+        var ar=geom(A,true),br=geom(B,true),ix=Math.max(0,Math.min(ar.r,br.r)-Math.max(ar.l,br.l)),
+            iy=Math.max(0,Math.min(ar.b,br.b)-Math.max(ar.t,br.t)),ov=ix*iy,small=Math.min(area(ar),area(br));
+        if(small>0&&ov/small>=0.82){B.hidden=true;B.x0=B.x1=B.y0=B.y1=-99999;}
+      }
+      // Seed connected collision groups from the original geometry.
+      for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s)continue;
+        if(hits(geom(A,true),geom(B,true),GAP))join(i,j);
+      }
+      for(var pass=0;pass<n+1;pass++){
+        var groups=Object.create(null);
+        for(var i=0;i<n;i++){if(L[i].hidden)continue;var k=root(i);(groups[k]=groups[k]||[]).push(L[i]);}
+        for(var k in groups){
+          var G=groups[k];if(G.length<2)continue;
+          G.sort(function(a,b){var dx=(a.ox0+a.ox1)-(b.ox0+b.ox1);return dx||((a.oy0+a.oy1)-(b.oy0+b.oy1));});
+          var leftBound=-Infinity,rightBound=Infinity,centre=0,total=0;
+          for(var q=0;q<G.length;q++){
+            var R=G[q];
+            leftBound=Math.max(leftBound,Number.isFinite(R.il)?R.il:0);
+            rightBound=Math.min(rightBound,Number.isFinite(R.ir)?R.ir:(window.innerWidth||400));
+            centre+=(R.ox0+R.ox1)/2;
+            var rg=geom(R,true);total+=rg.w;
           }
-          // a small note inside a much bigger box: the smaller one is drawn on top
-          if(aA<=aB){A.z=2;B.z=1;}else{B.z=2;A.z=1;}
-          continue;
+          if(!(rightBound>leftBound+2)){leftBound=0;rightBound=window.innerWidth||400;}
+          var available=Math.max(1,rightBound-leftBound-4),gap=Math.min(GAP,available/Math.max(4,G.length*2)),
+              widths=0;
+          for(var q=0;q<G.length;q++)widths+=geom(G[q],true).w;
+          var scale=Math.min(1,Math.max(0.001,(available-gap*(G.length-1))/Math.max(1,widths)));
+          var cursor,totalNow=0;
+          for(var q=0;q<G.length;q++){
+            var R=G[q],origW=R.ow,origH=R.oh,ang=Number(R.angle)||0,need=Math.max(origH,R.needH||0);
+            R.w=origW*scale;R.h=ang?Math.max(origH*scale,R.needH||0):need;
+            var vis=geom({x0:0,x1:R.w,y0:0,y1:R.h,angle:ang},false);R._visW=vis.w;totalNow+=vis.w;
+          }
+          if(totalNow+gap*(G.length-1)>available){
+            // A tall rotated box has a horizontal footprint even when its width shrinks.
+            // For those rare cases, reduce the whole footprint further before placing it.
+            var extra=Math.max(0.001,(available-gap*(G.length-1))/Math.max(1,totalNow));
+            for(var q=0;q<G.length;q++){var R=G[q];R.w*=extra;if((Number(R.angle)||0)!==0&&!(R.needH>R.oh))R.h*=extra;
+              R._visW=geom({x0:0,x1:R.w,y0:0,y1:R.h,angle:R.angle},false).w;}
+            totalNow=0;for(var q=0;q<G.length;q++)totalNow+=G[q]._visW;
+          }
+          var target=centre/G.length,packed=totalNow+gap*(G.length-1),
+              startX=target-packed/2;
+          if(packed<=available)startX=Math.max(leftBound+2,Math.min(rightBound-2-packed,startX));
+          else startX=leftBound+2;
+          cursor=startX;
+          for(var q=0;q<G.length;q++){
+            var R=G[q],ang=Number(R.angle)||0,cx=cursor+R._visW/2,cy=(R.oy0+R.oy1)/2;
+            R.x0=cx-R.w/2;R.x1=cx+R.w/2;R.y0=cy-R.h/2;R.y1=cy+R.h/2;
+            cursor+=R._visW+gap;
+          }
         }
-        var vOk=(A.y0<B.y0&&A.y1<B.y1)||(B.y0<A.y0&&B.y1<A.y1);
-        var hOk=(A.x0<B.x0&&A.x1<B.x1)||(B.x0<A.x0&&B.x1<A.x1);
-        var useV=vOk&&(!hOk||oy<=ox);
-        if(!useV&&!hOk)continue;
-        var P,Q;
-        if(useV){P=(A.y0<B.y0)?A:B;}else{P=(A.x0<B.x0)?A:B;}
-        Q=(P===A)?B:A;
-        var k0=useV?'y0':'x0',k1=useV?'y1':'x1';
-        var pA=(P.x1-P.x0)*(P.y1-P.y0),qA=(Q.x1-Q.x0)*(Q.y1-Q.y0);
-        var cutP=pA>=qA;                                  // cut the bigger box: it has the room
-        var gap=1.5;
-        if(cutP){
-          var n1=Q[k0]-gap,m1=Math.max(14,(useV?P.oh:P.ow)*0.4);
-          if(n1-P[k0]>=m1){P[k1]=n1;continue;}
-        }else{
-          var n0=P[k1]+gap,m0=Math.max(14,(useV?Q.oh:Q.ow)*0.4);
-          if(Q[k1]-n0>=m0){Q[k0]=n0;continue;}
+        // Moving one collision group can meet a formerly separate box. Merge those groups
+        // and re-pack instead of letting render order decide which text disappears.
+        var merged=false;
+        for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+          var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s||root(i)===root(j))continue;
+          if(hits(geom(A,false),geom(B,false),GAP))if(join(i,j))merged=true;
         }
-        // the bigger box would become too small: share the overlap between both
-        var mid=(Q[k0]+P[k1])/2;
-        P[k1]=Math.max(P[k0]+4,mid-gap);
-        Q[k0]=Math.min(Q[k1]-4,mid+gap);
+        if(!merged)break;
       }
     }
     function layout(){
