@@ -101,6 +101,8 @@ internal class WebModeRequest(
     val forceOcrRegion: WebModeOcrRegion? = null,
     /** User-triggered Extract must not replay the engine-level OCR result cache. */
     val forceFreshOcr: Boolean = false,
+    /** The supplied DOM image was identified as a non-manga link-slot/ad; OCR the actual visible WebView instead. */
+    val forceScreenOcr: Boolean = false,
     /**
      * Real-time mode: inventory all image URLs currently present in the DOM (up to the page's
      * bounded candidate limit), then process only the next ordered batch. Images not in the DOM
@@ -273,7 +275,7 @@ internal class WebModeExtractor(
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
                 "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
             progress("Discovering chapter panels", 1)
-            if (req.force && !req.visibleOnly) {
+            if ((req.force && !req.visibleOnly) || req.forceScreenOcr) {
                 worker.execute { runCatching { processForce() }.onFailure {
                     Log.w(TAG, "force job $id crashed: ${it.javaClass.simpleName}")
                     fail(WebModeError.DECODE_FAILED, "Force extract crashed: ${it.javaClass.simpleName}")
@@ -1298,7 +1300,14 @@ internal class WebModeExtractor(
             val accs = LinkedHashMap<String, ForceAcc>()
             // In visible-only recovery, collect image candidates exactly once and include CSS
             // backgrounds; full-chapter Force Extract retains its original throttled scan.
-            val forceInfoScript = if (req.visibleOnly) {
+            val forceInfoScript = if (req.forceScreenOcr) {
+                // A link-slot/thumb URL is not the manga artwork. Do not crop that DOM element from the screenshot;
+                // read the captured WebView viewport itself so unrelated ad assets cannot become OCR paragraphs.
+                JS_FORCE_INFO.replaceFirst(
+                    "var sc=scroller(),c=cands(sc,undefined,true,true),vw=",
+                    "var sc=scroller(),c=[],vw="
+                )
+            } else if (req.visibleOnly) {
                 JS_FORCE_INFO.replaceFirst(
                     "var sc=scroller(),c=cands(sc,undefined,true,true),vw=",
                     "var sc=scroller(),c=cands(sc,true,true,true),vw="
@@ -2574,7 +2583,8 @@ function absUrl(s){try{return s?new URL(String(s).trim(),document.baseURI).href:
 function decorativeUrl(s){
   s=String(s||"").trim();var p=s.split("#")[0].split("?")[0].toLowerCase();
   return /(?:^|\/)(?:bg_viewbody|bg_header|bg_footer)(?:\.[^\/]*)?$/.test(p)||
-    /(?:^|\/)webtoon\/detail$/.test(p);
+    /(?:^|\/)webtoon\/detail$/.test(p)||
+    /\/public\/uploaded-content\/link_slo(?:t)?(?:[\/_.-]|$)/.test(p);
 }
 function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!decorativeUrl(s);}
 function pickSrcset(ss){
