@@ -753,8 +753,8 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private const val TRANSIENT_PAUSE_MS = 15_000L
         private const val PERMANENT_PAUSE_MS = 10 * 60_000L
 
-        private const val CACHE_SIZE = 8
+        private const val CACHE_SIZE = 32
         private const val CACHE_TTL_MS = 3 * 60_000L
-        private const val EMPTY_CACHE_TTL_MS = 1_000L
+        private const val EMPTY_CACHE_TTL_MS = 20_000L
     }
 }
