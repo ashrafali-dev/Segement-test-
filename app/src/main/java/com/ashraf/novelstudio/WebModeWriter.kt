@@ -430,7 +430,7 @@ internal object WebModeWriter {
       function area(r){return Math.max(0,r.r-r.l)*Math.max(0,r.b-r.t);}
       for(var i=0;i<n;i++){
         parent[i]=i;L[i].hidden=false;
-        L[i].needH=Math.max(L[i].needH||0,L[i].b.__nsReqH||0);
+        L[i].needH=Math.max(L[i].needH||0,(Number(L[i].b.__nsReqHRatio)||0)*L[i].oh);
       }
       // Exact duplicate OCR/translation at the same place is one label, not two.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
@@ -447,6 +447,12 @@ internal object WebModeWriter {
         if(hits(geom(A,true),geom(B,true),GAP))join(i,j);
       }
       for(var pass=0;pass<n+1;pass++){
+        for(var ri=0;ri<n;ri++){
+          var RB=L[ri];if(RB.hidden)continue;
+          var ocx=(RB.ox0+RB.ox1)/2,ocy=(RB.oy0+RB.oy1)/2;
+          RB.w=RB.ow;RB.h=Math.max(RB.oh,RB.needH||0);
+          RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
+        }
         var groups=Object.create(null);
         for(var i=0;i<n;i++){if(L[i].hidden)continue;var k=root(i);(groups[k]=groups[k]||[]).push(L[i]);}
         for(var k in groups){
@@ -530,9 +536,9 @@ internal object WebModeWriter {
       var imgIndex=needsIndex?buildImgIndex():null;
       for(var i=0;i<bs.length;i++){
         var b=bs[i],im=findImg(b.getAttribute('data-s'),imgIndex);
-        if(!im){if(b.style.display!=='none')b.style.display='none';continue;}
+        if(!im){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var r=im.getBoundingClientRect();
-        if(r.width<8){if(b.style.display!=='none')b.style.display='none';continue;}
+        if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
         var cleanUrl=b.getAttribute('data-cl');
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
@@ -540,10 +546,13 @@ internal object WebModeWriter {
         var bw=g[2]*r.width,bh=g[3]*r.height;
         var vx=r.left+g[0]*r.width,vy=r.top+g[1]*r.height;       // centre in the viewport
         var near=!(vy+bh/2<-MARGIN||vy-bh/2>vh+MARGIN);
-        if(!near){if(b.style.display!=='none')b.style.display='none';continue;}
+        if(!near){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var px=ABS?(vx-o.left):vx,py=ABS?(vy-o.top):vy;          // centre in the overlay's own space
-        L.push({b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,ox0:px-bw/2,oy0:py-bh/2,cvd:!!b.querySelector('.__ns_cv'),
-          x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,rot:((g[4]*1)!==0),z:0});
+        var imgX=ABS?(r.left-o.left):r.left,angle=Number(g[4])||0;
+        L.push({b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
+          ox0:px-bw/2,ox1:px+bw/2,oy0:py-bh/2,oy1:py+bh/2,il:imgX,ir:imgX+r.width,
+          needH:Math.max(0,(Number(b.__nsReqHRatio)||0)*bh),angle:angle,rot:angle!==0,
+          x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,hidden:false});
       }
       resolve(L);
       for(var n=0;n<L.length;n++){
