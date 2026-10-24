@@ -359,72 +359,54 @@ internal object WebModeWriter {
     // Largest font (up to maxPx) at which the text still fits inside its box.
     function fit(b,maxPx){
       var t=b&&b.firstChild;
-      if(!t)return;
-      // The OCR rectangle is not always the full usable speech-balloon interior (curved
-      // edges and connected/two-lobed bubbles are especially easy to overestimate).
-      // Keep a safety inset so Bengali vowel signs and the last wrapped line remain inside.
+      if(!t)return 0;
       var boxW=b.clientWidth,boxH=b.clientHeight;
-      if(boxW<8||boxH<8)return;
-      var availW=Math.max(12,boxW*0.88);
-      var availH=Math.max(12,boxH*0.86);
-      var hasTb=false;
+      if(boxW<8||boxH<8)return boxH;
+      var availW=Math.max(8,boxW*0.88),availH=Math.max(8,boxH*0.86),hasTb=false,cW=boxW,cH=boxH;
       var tbs=b.getAttribute('data-tb');
       if(tbs){
-        var q=tbs.split(',');
-        var pl=q[0]*boxW,pt=q[1]*boxH,pr=q[2]*boxW,pb=q[3]*boxH;
-        var cW=boxW-pl-pr,cH=boxH-pt-pb;
+        var q=tbs.split(','),pl=q[0]*boxW,pt=q[1]*boxH,pr=q[2]*boxW,pb=q[3]*boxH;
+        cW=boxW-pl-pr;cH=boxH-pt-pb;
         if(isFinite(cW)&&isFinite(cH)&&cW>=boxW*0.25&&cH>=boxH*0.25&&cW>=8&&cH>=8){
-          // The text lives in the bubble's inscribed rectangle: padding = the cover box minus that rectangle.
           b.style.padding=Math.max(0,pt)+'px '+Math.max(0,pr)+'px '+Math.max(0,pb)+'px '+Math.max(0,pl)+'px';
-          availW=Math.max(12,cW*0.96);
-          availH=Math.max(12,cH*0.94);
-          hasTb=true;
+          availW=Math.max(8,cW*0.96);availH=Math.max(8,cH*0.94);hasTb=true;
         }
       }
       if(!hasTb)b.style.padding='3px';
-      t.style.width=availW+'px';
-      t.style.maxWidth=availW+'px';
-      t.style.minWidth='0';
-      t.style.height='auto';
-      t.style.maxHeight='none';
-      t.style.boxSizing='border-box';
-      t.style.margin='0 auto';
-      // Start with the OCR-estimated cap, but never let an invalid estimate break fitting.
-      var cap=Number(maxPx);
-      if(!isFinite(cap)||cap<2)cap=4;
-      // With a known bubble interior the OCR font size is only a hint (it was measured on the old, often
-      // longer or shorter, lettering): let the translation grow to what the bubble really offers.
-      var lo=1.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
+      t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
+      t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
+      t.style.whiteSpace='normal';t.style.textOverflow='clip';t.style.maxBlockSize='none';
+      // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
+      // as a last resort, then request a taller geometry instead of clipping the final lines.
+      var cap=Number(maxPx);if(!isFinite(cap)||cap<2)cap=4;
+      var lo=0.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
       function fits(){
-        // Read layout after changing font size; DOM metrics account for the loaded Bengali
-        // font and actual line wrapping, unlike character-count estimates.
         var r=t.getBoundingClientRect();
-        return r.height<=availH+0.5 &&
-          t.scrollHeight<=availH+1 &&
-          t.scrollWidth<=t.clientWidth+1 &&
-          r.width<=availW+1;
+        return r.height<=availH+0.5&&t.scrollHeight<=availH+1&&
+          t.scrollWidth<=t.clientWidth+1&&r.width<=availW+1;
       }
-      // Binary-search the largest size that fits both axes, with a conservative inner box.
-      for(var n=0;n<16;n++){
-        var mid=(lo+hi)/2;
-        t.style.fontSize=mid+'px';
+      for(var n=0;n<18;n++){
+        var mid=(lo+hi)/2;t.style.fontSize=mid+'px';
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
       }
       t.style.fontSize=best+'px';
-      // Final post-layout guard for WebView/font shaping differences: if measured ink/line
-      // metrics still exceed the safe area, reduce a little more rather than clipping text.
       for(var pass=0;pass<4;pass++){
-        var r=t.getBoundingClientRect();
-        var actualH=Math.max(r.height,t.scrollHeight);
-        var actualW=Math.max(r.width,t.scrollWidth);
+        var r=t.getBoundingClientRect(),actualH=Math.max(r.height,t.scrollHeight),actualW=Math.max(r.width,t.scrollWidth);
         var scale=Math.min(1,availH/Math.max(1,actualH),availW/Math.max(1,actualW));
         if(scale>=0.995)break;
-        var current=parseFloat(t.style.fontSize)||best;
-        var next=Math.max(1.5,current*scale*0.96);
-        if(next>=current-0.02)break;
-        t.style.fontSize=next+'px';
+        var current=parseFloat(t.style.fontSize)||best,next=Math.max(0.5,current*scale*0.96);
+        if(next>=current-0.02)break;t.style.fontSize=next+'px';
       }
       t.style.overflow='visible';
+      if(fits())return boxH;
+      // A single long word or very long translation may need more room even at minimum size.
+      // Break an over-wide word as a last resort; if height still does not fit, expand the box and
+      // let collision resolution move it sideways on the next frame. The text itself is never cut.
+      t.style.overflowWrap='anywhere';t.style.wordBreak='normal';t.style.fontSize='0.5px';
+      if(fits())return boxH;
+      var rr=t.getBoundingClientRect(),requiredContentH=Math.max(rr.height,t.scrollHeight);
+      var safeHeightRatio=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
+      return Math.max(boxH+1,Math.ceil(requiredContentH/safeHeightRatio)+4);
     }
     var MARGIN=1400;
     // Two bubbles whose boxes overlap partly (joined / burst bubbles): the later one used to paint its
