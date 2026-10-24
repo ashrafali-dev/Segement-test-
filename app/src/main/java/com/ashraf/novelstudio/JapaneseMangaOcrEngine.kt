@@ -194,6 +194,9 @@ internal class RoutingOcrEngine : OcrEngine {
         val requested = Prefs.get(context, "ocrEngine", "mlkit")
         // Keep the Lens connection warm (cheap no-op unless it has been idle for a while).
         if (requested == "lens") LensOcrEngine.warmUp(context)
+        // The manga runtime must also be initialized for viewport/screenshot OCR paths that do not call ocrBytes().
+        // init() is process-wide and idempotent; actual model work still starts lazily on the first Japanese OCR.
+        if (requested == "manga") JapaneseMangaRuntime.init(context)
         // Initialise only the model pack the user selected, and only when switching engines.
         // Lens and ML Kit do not use the downloadable ONNX/Paddle model stores.
         if (requested != selectedMode) {
