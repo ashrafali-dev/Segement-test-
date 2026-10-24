@@ -88,6 +88,14 @@ internal object WebModeWriter {
     var cleanLayer=document.createElement('div'); cleanLayer.id='__ns_wm_clean_layer';
     cleanLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:0;';
     w.appendChild(cleanLayer);
+    // Keep opaque bubble fills below every translated label. A text box can move horizontally
+    // to resolve collisions without carrying its background over a neighbouring translation.
+    var coverLayer=document.createElement('div'); coverLayer.id='__ns_wm_cover_layer';
+    coverLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:1;';
+    w.appendChild(coverLayer);
+    var textLayer=document.createElement('div'); textLayer.id='__ns_wm_text_layer';
+    textLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2;';
+    w.appendChild(textLayer);
     var cleanImgs=Object.create(null);
     var holes=Object.create(null);   // per picture: rectangles (image fractions) where the ORIGINAL must show through
     function ensureCleanImage(im,s,url,r,o0){
@@ -126,12 +134,10 @@ internal object WebModeWriter {
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
+      // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
       b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
-        // If the underlying source image was cleaned, do not put an opaque box over it:
-        // untouched nearby lettering/line art stays visible instead of disappearing under the translation.
-        +'background:'+((it.cl||(it.cv&&it.cv.length>=4))?'transparent':it.bg)+';color:'+it.fg+';font-family:'+fam+';font-weight:600;'
-        +((it.cl||(it.cv&&it.cv.length>=4))?'border-radius:0;box-shadow:none;':(it.sf?'border-radius:12px;box-shadow:0 0 7px 5px '+it.bg+';':'border-radius:4px;box-shadow:0 0 0 3px '+it.bg+';'));
+        +'background:transparent;color:'+it.fg+';font-family:'+fam+';font-weight:600;border-radius:0;box-shadow:none;';
       var t=document.createElement('div'); t.textContent=it.t;
       // Preserve Bengali grapheme clusters/ conjuncts and use a shaping-friendly text layout.
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
@@ -158,19 +164,26 @@ internal object WebModeWriter {
         t.style.webkitTextFillColor='transparent'; t.style.color='transparent';
       }
       b.appendChild(t);
-      // Not cleaned in the picture: paint the paper colour over the WHOLE bubble interior (rectangles that stay inside
-      // the outline), behind the text. Lettering the recogniser missed is hidden too, and no box edge shows outside the bubble.
-      if(!it.cl&&it.cv&&it.cv.length>=4){
-        for(var ci=0;ci+3<it.cv.length;ci+=4){
-          var cd=document.createElement('div');
-          cd.className='__ns_cv';
-          cd.setAttribute('data-f',it.cv[ci]+','+it.cv[ci+1]+','+it.cv[ci+2]+','+it.cv[ci+3]);
-          cd.style.cssText='position:absolute;pointer-events:none;z-index:-1;margin:0;padding:0;left:0;top:0;width:0;height:0;'
-            +'background:'+it.bg+';';
-          b.appendChild(cd);
+      var cover=null;
+      if(!it.cl){
+        cover=document.createElement('div');cover.className='__ns_cover';
+        cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+          +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
+        if(it.cv&&it.cv.length>=4){
+          for(var ci=0;ci+3<it.cv.length;ci+=4){
+            var cd=document.createElement('div');cd.className='__ns_cv';
+            cd.style.cssText='position:absolute;pointer-events:none;margin:0;padding:0;left:'+(it.cv[ci]*100)+'%;top:'+(it.cv[ci+1]*100)+'%;'
+              +'width:'+((it.cv[ci+2]-it.cv[ci])*100)+'%;height:'+((it.cv[ci+3]-it.cv[ci+1])*100)+'%;background:'+it.bg+';';
+            cover.appendChild(cd);
+          }
+        }else{
+          cover.style.borderRadius=it.sf?'12px':'4px';
+          cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
         }
+        coverLayer.appendChild(cover);
       }
-      w.appendChild(b);
+      b.__nsCover=cover;
+      textLayer.appendChild(b);
     }
     var allS=[],seenSources=Object.create(null);
     for(var si=0;si<(sources||[]).length;si++){
