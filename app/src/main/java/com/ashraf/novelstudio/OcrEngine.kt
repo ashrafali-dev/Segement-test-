@@ -291,7 +291,7 @@ internal object OcrPost {
      * sit right next to each other. Before, vertical blocks were never joined, so each column became its own bubble:
      * one got the translation and the other kept its original lettering, and the sentence reached the chatbot in pieces.
      */
-    private fun joinableColumns(a: OcrBlock, b: OcrBlock): Boolean {
+    internal fun joinableColumns(a: OcrBlock, b: OcrBlock): Boolean {
         if (Math.abs(a.angle) >= 6f || Math.abs(b.angle) >= 6f) return false
         val fa = if (a.fontPx > 0f) a.fontPx else a.w
         val fb = if (b.fontPx > 0f) b.fontPx else b.w
