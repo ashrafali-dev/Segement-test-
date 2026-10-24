@@ -39,7 +39,9 @@ internal data class WmBubble(
      * image). Painted in the paper colour when the picture itself could not be cleaned, so lettering the recogniser
      * missed (a second line, "!!") cannot stay visible next to the translation. Empty = not known.
      */
-    val cv: List<Float> = emptyList()
+    val cv: List<Float> = emptyList(),
+    /** Original text orientation for Japanese manga: vertical columns when true. */
+    val vertical: Boolean = false
 )
 
 /**
@@ -56,7 +58,7 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             .put("fg2", b.fg2).put("sf", b.soft)
             .put("srcText", b.sourceText).put("tr", b.translatedText).put("so", b.stroke)
             .put("tcx", r5(b.tcx)).put("tcy", r5(b.tcy)).put("tbw", r5(b.tbw)).put("tbh", r5(b.tbh))
-            .put("cv", JSONArray().also { arr -> for (v in b.cv) arr.put(r5(v)) }))
+            .put("cv", JSONArray().also { arr -> for (v in b.cv) arr.put(r5(v)) }).put("vertical", b.vertical))
         return JSONObject().put("v", 2).put("to", titleOffset).put("b", a).toString()
     }
 
@@ -79,7 +81,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                     b.optString("srcText", ""), b.optString("tr", ""), b.optInt("so", 0),
                     b.optDouble("tcx", 0.0).toFloat(), b.optDouble("tcy", 0.0).toFloat(),
                     b.optDouble("tbw", 0.0).toFloat(), b.optDouble("tbh", 0.0).toFloat(),
-                    b.optJSONArray("cv")?.let { ja -> List(ja.length()) { k -> ja.optDouble(k, 0.0).toFloat() } } ?: emptyList()
+                    b.optJSONArray("cv")?.let { ja -> List(ja.length()) { k -> ja.optDouble(k, 0.0).toFloat() } } ?: emptyList(),
+                    b.optBoolean("vertical", false)
                 ))
             }
             WebModeLayout(o.optInt("to", 1), list)
