@@ -2,6 +2,13 @@ const fs = require("node:fs");
 const assert = require("node:assert/strict");
 
 const writer = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt", "utf8");
+const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeExtractor.kt", "utf8");
+const recognizeAt = extractor.indexOf("private fun recognizeInner(");
+const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
+assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
+const recognizeInner = extractor.slice(recognizeAt, recognizeEnd);
+assert.ok(!recognizeInner.includes("wv.url"), "OCR worker must not access WebView.url");
+assert.ok(recognizeInner.includes("hostOf(startUrl)"), "canvas-site detection must use the UI-thread-captured URL");
 const bodyMatch = writer.match(/private const val BUBBLES = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(bodyMatch, "could not locate the embedded WebView overlay script");
 new Function(bodyMatch[1]); // compile the real embedded JavaScript without executing browser APIs
