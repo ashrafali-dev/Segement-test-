@@ -1985,7 +1985,7 @@ var vids=document.querySelectorAll('video[poster]');
 for(var vi=0;vi<vids.length;vi++){var ve=vids[vi],vr=ve.getBoundingClientRect();if(vr.width>=80&&vr.height>=60&&vr.right>0&&vr.bottom>0&&vr.left<vw&&vr.top<vh)add('POSTER',ve.getAttribute('poster'),vr,'');}
 var cvs=document.querySelectorAll('canvas');
 for(var ci=0;ci<cvs.length;ci++){var ce=cvs[ci],cr=ce.getBoundingClientRect();if(cr.width>=100&&cr.height>=70&&cr.right>0&&cr.bottom>0&&cr.left<vw&&cr.top<vh&&cr.width*cr.height>12000){if(cr.width*cr.height>=Math.max(18000,vw*vh*0.12))hasLargeImage=true;var cs='';try{var tc=window.__nsRtTc||(window.__nsRtTc=document.createElement('canvas'));tc.width=8;tc.height=8;var tx=tc.getContext('2d');tx.drawImage(ce,0,0,8,8);var px=tx.getImageData(0,0,8,8).data,hv=0;for(var pi=0;pi<px.length;pi+=4){hv=(hv*31+(px[pi]>>3)*3+(px[pi+1]>>3)*5+(px[pi+2]>>3))|0;}cs=':'+hv;}catch(ignore){}
-add('CANVAS','canvas:'+location.hostname+':'+Math.round(cr.width)+'x'+Math.round(cr.height)+cs,cr,'#'+(ce.width||0)+'x'+(ce.height||0));}}
+add('CANVAS','canvas:'+location.hostname+':'+Math.round(cr.width)+'x'+Math.round(cr.height)+'@'+Math.round(cr.left)+','+Math.round(cr.top)+cs,cr,'#'+(ce.width||0)+'x'+(ce.height||0));}}
 // CSS-background scanning is a slow fallback, not the normal path. In particular,
 // never let an empty cached result force a 7,000-node sweep on every 150 ms poll.
 var bgSig=window.__nsRtBgSignature||'';
