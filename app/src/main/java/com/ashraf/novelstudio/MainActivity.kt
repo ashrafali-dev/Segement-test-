@@ -2068,10 +2068,10 @@ return t.length>=40?'TXT:'+t:'';
                 val periodicRecheck = hasImages && !runningAhead &&
                     signature != deepSeekStallBlockedSignature &&
                     now - deepSeekLastOcrAtMs >= 10000L
-                // While the reader is still flicking through panels, let the current image settle briefly
-                // without imposing a full 300 ms pause before the real-time OCR can start.
+                // Wait for scrolling to settle before starting network OCR. This ~300 ms debounce
+                // avoids competing with fast flick-scrolls and prevents repeated OCR on transient panels.
                 if (signature != deepSeekPendingSig) { deepSeekPendingSig = signature; deepSeekPendingSince = now }
-                val settled = now - deepSeekPendingSince >= 120L
+                val settled = now - deepSeekPendingSince >= 300L
                 // Foreground OCR may pre-empt only an ahead-translation job; it must never interrupt
                 // a visible-panel translation or a user-initiated extraction.
                 val idle = webModeHandle == null &&
