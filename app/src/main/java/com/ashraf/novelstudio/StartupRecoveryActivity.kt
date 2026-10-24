@@ -84,7 +84,7 @@ class StartupRecoveryActivity : Activity() {
         }, LinearLayout.LayoutParams(-1, dp(48)).also { it.topMargin = dp(8) })
 
         root.addView(actionButton("Try opening Novel Studio") {
-            openNovelStudio()
+            openNovelStudio(clearPreviousReport = true)
         }, LinearLayout.LayoutParams(-1, dp(48)).also { it.topMargin = dp(8) })
 
         setContentView(root)
@@ -101,7 +101,10 @@ class StartupRecoveryActivity : Activity() {
         setOnClickListener { onClick() }
     }
 
-    private fun openNovelStudio() {
+    private fun openNovelStudio(clearPreviousReport: Boolean = false) {
+        // The crash log is persistent. When the user explicitly retries, consume the old report first;
+        // if MainActivity crashes again, CrashLog writes a fresh report for the next launch.
+        if (clearPreviousReport) CrashLog.clear()
         try {
             startActivity(Intent(this, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
