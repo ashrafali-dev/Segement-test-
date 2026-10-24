@@ -1121,6 +1121,16 @@ interface SnackbarHost {
 // ============================================================================ sheets
 
 object Sheets {
+    /** Small informational dialog used for non-blocking onboarding and scan tips. */
+    @Suppress("UNUSED_PARAMETER")
+    fun info(activity: Activity, title: String, message: CharSequence, icon: Ic? = null): Dialog =
+        android.app.AlertDialog.Builder(activity)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .create()
+            .also { it.show() }
+
     /** A borderless dialog hosting [content]; bottom-anchored, translucent, blurs the app behind it on Android 12+. */
     fun create(activity: Activity, content: View, fullScreen: Boolean = false, bottom: Boolean = true, dim: Float = 0.6f): Dialog {
         val d = Dialog(activity)
