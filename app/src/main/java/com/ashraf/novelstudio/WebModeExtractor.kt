@@ -1464,7 +1464,7 @@ internal class WebModeExtractor(
                 if (!alive()) return false
                 val t0 = SystemClock.elapsedRealtime()
                 val result = try {
-                    recognize(bmp, st, fastMode = req.visibleOnly && !req.forceFreshOcr, forceFresh = req.forceFreshOcr)
+                    recognize(bmp, st, fastMode = req.visibleOnly && !req.forceFreshOcr && !req.forceScreenOcr, forceFresh = req.forceFreshOcr || req.forceScreenOcr)
                 } catch (e: OcrUnavailableException) {
                     OcrDiag.log("SCREEN_OCR", "engine unavailable: ${e.message}")
                     throw e
