@@ -384,9 +384,15 @@ internal class RoutingOcrEngine : OcrEngine {
             OcrEngineStatus.setLensDiagnostic(emptyWhy)
             Log.w("NovelStudioOCR", emptyWhy)
             // Empty Lens OCR is still a Lens result; keep engines independent.
-            report("lens(empty)", false)
+            OcrEngineStatus.lastError = "Google Lens returned no usable text for ${script.name}; trying ML Kit fallback"
+            Log.w("NovelStudioOCR", OcrEngineStatus.lastError)
+            report("mlkit(lens-empty-fallback)", true)
             lensThread.set(false)
-            return OcrResult(emptyList())
+            return try { run(mlKit) } catch (fallback: Exception) {
+                Log.w("NovelStudioOCR", "ML Kit fallback failed after empty Lens result", fallback)
+                OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
+                OcrResult(emptyList())
+            }
         }
 
         return try {
