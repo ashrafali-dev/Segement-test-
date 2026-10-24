@@ -114,7 +114,6 @@ class MainActivity : Activity() {
     // Web Mode (OCR for image chapters). Off by default; the menu switch only picks the extraction strategy.
     private val webModeLazy = lazy {
         // The writer reads placement toggles (outline fit) while building the in-page script.
-        WebModeWriter.ctx = applicationContext
         WebModeExtractor(handler, UA)
     }
     private val webMode: WebModeExtractor get() = webModeLazy.value
@@ -4080,7 +4079,7 @@ return t.length>=40?'TXT:'+t:'';
      * Home dock, search state: the empty slot next to the search field becomes the reading-mode switch and
      * the view control (the same handlers as the reading dock). Moved back out when Search closes.
      */
-    private fun bindHomeToolbar(homeDock: View) {
+    private fun bindHomeToolbar(homeDock: ViewGroup) {
         // This base's HomeView has no dock of its own, so the reading-mode switch and menu live in a
         // small floating bar over the home view instead.
         homeDock.addView(LinearLayout(this).apply {
@@ -4989,7 +4988,7 @@ return t.length>=40?'TXT:'+t:'';
             maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
             setPadding(0, dp(4), 0, dp(10))
-            isTextSelectable = true
+            setTextIsSelectable(true)
         })
         lateinit var dlg: Dialog
         val g = sheetGroup()
@@ -6927,7 +6926,7 @@ return t.length>=40?'TXT:'+t:'';
             if (Prefs.adblock(this@MainActivity) && view === novelWv && url != null) {
                 // Debug evidence only: what the cosmetic filter touched + how much text the page has.
                 handler.postDelayed({
-                    if (novelWv.url == url) novelWv.evaluateJavascript(AdBlock.probeJs()) { AdBlock.recordProbe(this@MainActivity, url, it) }
+                    if (novelWv.url == url) novelWv.evaluateJavascript(AdBlock.probeJs()) { AdBlock.recordProbe(url, it) }
                 }, 2500)
             }
             if (darkMode() == 2) view?.evaluateJavascript(Js.DARK_ON, null)
@@ -9393,21 +9392,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 updateProgressUi()
 
                 when {
-                    // Hand the reply this poll already read to finishJob. Only live bubble batches use it
-                    // (they carry no page markers to strip); every other path re-reads exactly as before.
-                    completed && isDeepSeekLivePanel(ch) && ReplyHandoff.usablePollText(
-                        pollText, got, completed
-                    ) != null -> {
-                        val reply = pollText!!
-                        val cacheStarted = android.os.SystemClock.elapsedRealtime()
-                        chatWv.evaluateJavascript(Js.cacheReply(reply)) {
-                            Log.i(
-                                "NovelStudioOCR",
-                                "REPLY_HANDOFF cacheMs=${android.os.SystemClock.elapsedRealtime() - cacheStarted} chars=${reply.length}"
-                            )
-                            finishJob(tok, ch, reply)
-                        }
-                    }
                     completed -> finishJob(tok, ch)
                     livePanelBatch && got && !meaningfulReply && !(filledReply && allMarkers) && !streaming && st >= 8 && elapsed >= 12_000L ->
                         failJob(tok, ch, "The chatbot returned only paragraph markers, not a translation. Tap ⚡ to retry.")
@@ -9490,9 +9474,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 // the chatbot failed: the DOM tracker can miss the answer's own nodes for one poll and
                 // the page still shows it. Re-read the page a couple of times before declaring that
                 // nothing was sent; the answer usually appears on the first re-read.
-                if (ReplyHandoff.shouldReRead(meaningful = false, attempts = replyReReads)) {
+                // A blank DOM read can be transient while the chatbot replaces its response node.
+                // Re-read the same reply a small bounded number of times before marking it failed.
+                if (replyReReads < 2) {
                     replyReReads++
-                    Log.i("NovelStudioOCR", "REPLY_EMPTY re-read ${replyReReads}/${ReplyHandoff.MAX_RE_READS} (${rawTranslation.length} chars after clean)")
+                    Log.i("NovelStudioOCR", "REPLY_EMPTY re-read ${replyReReads}/2 (${rawTranslation.length} chars after clean)")
                     handler.postDelayed({ finishJob(tok, ch) }, 250L)
                     return@run
                 }
