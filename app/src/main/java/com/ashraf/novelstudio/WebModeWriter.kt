@@ -419,10 +419,11 @@ internal object WebModeWriter {
         t.style.overflow='visible';
         if(fits())return boxH;
         // Still too tall at full allowed width: the box also grows taller (never clipped).
-        availH=Math.max(availH,1);
+        t.style.overflowWrap='anywhere';   // a word wider than the box breaks instead of asking for endless height
         var rq=t.getBoundingClientRect(),needH=Math.max(rq.height,t.scrollHeight);
+        if(needH<=availH+1)return boxH;    // nothing taller is needed; never grow "just in case"
         var shr=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
-        return Math.max(boxH+1,Math.ceil(needH/shr)+4);
+        return Math.ceil(needH/shr)+4;
       }
       t.style.fontSize=best+'px';
       for(var pass=0;pass<4;pass++){
@@ -447,10 +448,11 @@ internal object WebModeWriter {
       if(fits())return boxH;
       // No font size fits even with emergency wrapping; grow the box and let the side-by-side
       // collision pass make room. This fallback is preferable to clipping a line or glyph.
-      t.style.fontSize='0.5px';
+      t.style.fontSize=Math.max(1,floorPx)+'px';
       var rr=t.getBoundingClientRect(),requiredContentH=Math.max(rr.height,t.scrollHeight);
+      if(requiredContentH<=availH+1)return boxH;
       var safeHeightRatio=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
-      return Math.max(boxH+1,Math.ceil(requiredContentH/safeHeightRatio)+4);
+      return Math.ceil(requiredContentH/safeHeightRatio)+4;
     }
     var MARGIN=1400;
     // Two bubbles whose boxes overlap partly (joined / burst bubbles): the later one used to paint its
@@ -583,7 +585,7 @@ internal object WebModeWriter {
         var bh=R.y1-R.y0,bw=R.x1-R.x0;
         if(!R.rot&&(th>bh+1.5||tw>bw+1.5)){
           overflow++;
-          var ratio=(th/0.86+4)/Math.max(1,R.oh);
+          var ratio=Math.min(4,(th/0.86+4)/Math.max(1,R.oh));
           if(th>bh+1.5&&ratio>(Number(R.b.__nsReqHRatio)||0)+0.005){R.b.__nsReqHRatio=ratio;need=true;}
         }
         vis.push({R:R,l:tr.left,r:tr.right,t:tr.top,b:tr.bottom});
@@ -714,7 +716,7 @@ internal object WebModeWriter {
             var requiredH=fit(bb,(Number(gg[5])||0.01)*R.rw);
             if((Number(bb.__nsReqWRatio)||0)>prevW+0.005)expanded=true;   // wider box wanted: lay out again with it
             if(requiredH>ch+0.5){
-              var ratio=requiredH/Math.max(1,R.oh),oldRatio=Number(bb.__nsReqHRatio)||0;
+              var ratio=Math.min(4,requiredH/Math.max(1,R.oh)),oldRatio=Number(bb.__nsReqHRatio)||0;
               if(ratio>oldRatio+0.005){bb.__nsReqHRatio=ratio;expanded=true;}
             }
           }

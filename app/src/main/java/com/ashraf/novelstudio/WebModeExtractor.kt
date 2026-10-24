@@ -242,6 +242,8 @@ internal class WebModeExtractor(
         @Volatile private var fellBackToForce = false
         /** How this job really read the page: dom (image URLs), canvas (exported canvas pixels) or screen (screenshot). */
         @Volatile private var how = "dom"
+        /** The selected image vanished (canvas readers re-create their nodes): the visible screen was read instead. */
+        @Volatile private var ignoreForceSrc = false
 
         private fun fail(e: WebModeError, msg: String = e.label) {
             // Realtime viewport mode must also recover when DOM discovery reports NO_IMAGES:
@@ -614,6 +616,18 @@ internal class WebModeExtractor(
                                 fail(WebModeError.DECODE_FAILED, "Screen OCR failed: ${crashInfo(it)}")
                             }
                         }
+                    } else if (req.visibleOnly) {
+                        // The picked source no longer exists (a canvas reader replaced its node, or the page moved on).
+                        // Failing here left manual/auto extraction dead on such sites: read what is on screen instead.
+                        Log.i(TAG, "selected image missing; reading the visible screen instead; " + lastDiscoveryDebug)
+                        OcrDiag.log("FALLBACK", "selected source not on page -> visible screen OCR")
+                        ignoreForceSrc = true
+                        worker.execute {
+                            runCatching { processForce() }.onFailure {
+                                Log.w(TAG, "selected-source screen fallback crashed: ${crashInfo(it)}", it)
+                                fail(WebModeError.DECODE_FAILED, "Screen OCR failed: ${crashInfo(it)}")
+                            }
+                        }
                     } else {
                         fail(WebModeError.NO_IMAGES, if (targetSrc.isNullOrBlank()) WebModeError.NO_IMAGES.label
                             else "Selected image could not be found on the page")
@@ -925,7 +939,7 @@ internal class WebModeExtractor(
             for (l in layouts) if (l != null) allBubbles.addAll(l)
             val titleOffset = if (req.visibleOnly || title.isBlank()) 0 else 1
             val scanLayout = WebModeLayout(titleOffset, allBubbles)
-            if (!req.forceOcrSrc.isNullOrBlank() && req.forceOcrRegion != null) {
+            if (!ignoreForceSrc && !req.forceOcrSrc.isNullOrBlank() && req.forceOcrRegion != null) {
                 // Deliberate Force OCR must replace geometry in the selected region instead of
                 // letting the ordinary merge logic keep stale text/boxes from an earlier pass.
                 WebModeLayoutStore.replaceRegion(wv.context, meta.url, req.forceOcrSrc, req.forceOcrRegion, scanLayout)
