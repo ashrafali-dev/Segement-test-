@@ -6543,12 +6543,12 @@ return t.length>=40?'TXT:'+t:'';
      */
     private var deepSeekLastFailToastAtMs = 0L
 
-    private fun startWebModeExtract(token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false) {
+    private fun startWebModeExtract(token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false) {
         // In real-time mode the ahead worker has its own low-priority executor and does not scroll
         // the page. Let it finish caching upcoming panels while the visible panel is scanned and
         // translated; cancelling it on every viewport change made the 9-panel read-ahead starve.
         // For a manual/full-chapter extraction, stop read-ahead so foreground extraction gets priority.
-        if (!realtimeViewport) {
+        if (!realtimeViewport || forceFresh) {
             aheadOcrHandle?.cancel()
             aheadOcrHandle = null
             aheadOcrSeq++
@@ -6577,6 +6577,7 @@ return t.length>=40?'TXT:'+t:'';
             isOccluded = { mode == Mode.CHAT },
             // Force Extract may scroll the screen; real-time OCR must stay viewport-only.
             force = Prefs.bool(this, "wmForce") && !realtimeViewport,
+            forceFreshOcr = forceFresh,
             isValid = { token == navToken && jobSeq == webModeJobSerial },
             onProgress = { stage, pct ->
                 if (token == navToken && jobSeq == webModeJobSerial) {
@@ -6617,10 +6618,12 @@ return t.length>=40?'TXT:'+t:'';
                                             if (hash in deepSeekInFlightTextHashes) continue
                                             // A bubble the reader long-pressed is sent again even though it was translated.
                                             val forced = retranslateTargetFor(bubble)
-                                            if (hash !in deepSeekTranslatedTextHashes || forced != null) {
+                                            val forceAgain = forceFresh || forced != null
+                                            if (hash !in deepSeekTranslatedTextHashes || forceAgain) {
                                                 selected.add(bubble)
                                                 hashes.add(hash)
-                                                if (forced != null) { usedTargets.add(forced); forcedHashes.add(hash) }
+                                                if (forced != null) usedTargets.add(forced)
+                                                if (forceAgain) forcedHashes.add(hash)
                                             }
                                         }
                                         deepSeekInFlightTextHashes.addAll(hashes)
@@ -6833,7 +6836,10 @@ return t.length>=40?'TXT:'+t:'';
         // Auto Real-time OFF turns Extract into an explicit fresh OCR + translation action.
         if (DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
             !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
-            reOcrVisiblePanels()
+            if (webModeHandle != null) { toast("⏳ OCR is already running"); return }
+            navToken++
+            toast("🔎 Extracting visible panels for translation…")
+            startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true)
             return
         }
         // ● is always a real extraction. Never wait for WebView.progress and
