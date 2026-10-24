@@ -2485,6 +2485,8 @@ return t.length>=40?'TXT:'+t:'';
     private lateinit var modeChipText: TextView
     private lateinit var modeChipDot: View
     private lateinit var modeCapsule: ModeCapsule
+    // Separate mode control for the home overlay; Android Views cannot belong to both the page dock and home dock.
+    private lateinit var homeModeCapsule: ModeCapsule
     private lateinit var homeView: HomeView
     private lateinit var tourOverlay: TourOverlay
     private var menuBtnView: View? = null
@@ -4073,12 +4075,26 @@ return t.length>=40?'TXT:'+t:'';
     private fun bindHomeToolbar(homeDock: ViewGroup) {
         // This base's HomeView has no dock of its own, so the reading-mode switch and menu live in a
         // small floating bar over the home view instead.
+        val homeModeChip = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
+            contentDescription = "Reading mode"
+            homeModeCapsule = ModeCapsule(this@MainActivity).apply {
+                onSelect = { idx ->
+                    setReadMode(when (idx) {
+                        0 -> ReadMode.NOVEL
+                        1 -> ReadMode.SCAN
+                        else -> ReadMode.REALTIME
+                    })
+                }
+            }
+            addView(homeModeCapsule, LinearLayout.LayoutParams(MP, dp(38)))
+        }
         homeDock.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), 0, dp(4), 0)
             background = floatingBarBg(26)
-            addView(modeChip, LinearLayout.LayoutParams(0, dp(44), 1.0f))
+            addView(homeModeChip, LinearLayout.LayoutParams(0, dp(44), 1.0f))
             addView(dockBtn(Ic.DOTS, "Menu") { menu() }, LinearLayout.LayoutParams(dp(44), dp(44)))
         }, FrameLayout.LayoutParams(MP, dp(52)))
         // Reposition the window's bottom inset onto the floating home dock (it overlays the home view).
@@ -5685,6 +5701,7 @@ return t.length>=40?'TXT:'+t:'';
             // Any mode change (capsule tap, menu row, ...) gets the little scanner animation in the page centre.
             if (changed && !first && ::modeOverlay.isInitialized) modeOverlay.play(idx)
         }
+        if (::homeModeCapsule.isInitialized) homeModeCapsule.setSelectedIndex(idx, false)
         if (::extractBtn.isInitialized) extractBtn.modeIndex = idx
         if (::expandLabel.isInitialized && ::expandBarPill.isInitialized && expandBarPill.visibility == View.VISIBLE) {
             expandLabel.text = pageTitleShort()
