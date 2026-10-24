@@ -105,8 +105,8 @@ internal object ChapterLinkAutopilotQueue {
     fun hasRunnable(c: Context): Boolean = !isPaused(c) && list(c).any { it.status in runnable }
     fun hasBackgroundWork(c: Context): Boolean {
         val jobs=list(c)
-        return jobs.any { it.status == EXTRACTING || it.status == SCANNING || it.status == TRANSLATING } ||
-            (!isPaused(c) && jobs.any { it.status == QUEUED })
+        // Queued-only work does not start a keep-alive by itself; the user must press Start.
+        return jobs.any { it.status == EXTRACTING || it.status == SCANNING || it.status == TRANSLATING }
     }
     fun nextRunnable(c: Context): ChapterLinkAutopilotJob? =
         if (isPaused(c)) null else list(c).firstOrNull { it.status in runnable }
@@ -252,14 +252,16 @@ internal class ChapterLinkAutopilotRunner(
     }
 
     fun onTranslationSaved(ch: Chapter) {
-        val job=current ?: return
+        val snapshot=current ?: return
+        val job=ChapterLinkAutopilotQueue.list(app).firstOrNull { it.id==snapshot.id } ?: snapshot
         if(job.status!=ChapterLinkAutopilotQueue.TRANSLATING || !ChapterLinkAutopilotQueue.matches(job,ch.url)) return
         val saved=Store.find(app,ch) ?: return
         if(Store.readRaw(app,saved.id).trim().length>=30) ready(job.id)
     }
 
     fun onTranslationFailed(ch: Chapter, message: String) {
-        val job=current ?: return
+        val snapshot=current ?: return
+        val job=ChapterLinkAutopilotQueue.list(app).firstOrNull { it.id==snapshot.id } ?: snapshot
         if(job.status!=ChapterLinkAutopilotQueue.TRANSLATING || !ChapterLinkAutopilotQueue.matches(job,ch.url)) return
         handler.postDelayed({ if(current?.id==job.id) fail(job.id,message.ifBlank { "Chatbot translation failed." }) },650L)
     }
