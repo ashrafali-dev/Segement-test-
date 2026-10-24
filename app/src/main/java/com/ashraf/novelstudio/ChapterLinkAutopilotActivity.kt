@@ -77,7 +77,7 @@ class ChapterLinkAutopilotActivity : Activity() {
 
         val scroll=ScrollView(this).apply {
             clipToPadding=false; setPadding(dp(16),0,dp(16),dp(22))
-            addView(LinearLayout(this@ChapterLinkAutopilotActivity).apply { orientation=LinearLayout.VERTICAL; jobs=this },
+            addView(LinearLayout(this@ChapterLinkAutopilotActivity).apply { orientation=LinearLayout.VERTICAL; this@ChapterLinkAutopilotActivity.jobs=this },
                 ViewGroup.LayoutParams(-1,ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
