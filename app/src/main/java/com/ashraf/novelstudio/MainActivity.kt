@@ -407,10 +407,12 @@ class MainActivity : Activity() {
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { srcs.add(it) }
             } catch (_: Exception) { }
             if (srcs.isEmpty()) {
-                finish(null)
-                navToken++
-                toast("🔎 No image URL found; trying fresh OCR on the visible reader")
-                startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true)
+                whenIdle(0) {
+                    finish(null)
+                    navToken++
+                    toast("🔎 No image URL found; trying fresh OCR on the visible reader")
+                    startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true)
+                }
                 return@evaluateJavascript
             }
             fun step(i: Int) {
