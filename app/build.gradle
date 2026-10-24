@@ -15,8 +15,8 @@ android {
         applicationId 'com.ashraf.novelstudio'
         minSdk 24
         targetSdk 33
-        versionCode 70
-        versionName '1.7.0'
+        versionCode 68
+        versionName '1.6.8'
 
         // Build one ARM APK compatible with both 32-bit and 64-bit ARM devices.
         ndk {
@@ -75,6 +75,13 @@ dependencies {
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.21.1'
     implementation 'com.quickbirdstudios:opencv:4.5.3'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    // OPTIONAL precise speech-bubble detector (YOLO26s-seg model of Manga Translator, imported from the menu:
+    // "Bubble Detector (YOLO, optional)"). The app works without it (light pixel-based bubble finder is used).
+    // To switch the detector on, remove the two slashes of ONE of the lines below and rebuild. The classes are reached by
+    // reflection, so nothing else has to change. (Manga Translator itself uses 2.2.0, which needs compileSdk 35/36.)
+    // implementation 'com.google.ai.edge.litert:litert:1.4.0'
+    // implementation 'com.google.ai.edge.litert:litert:2.2.0'
 
     testImplementation 'junit:junit:4.13.2'
 }
