@@ -12,6 +12,7 @@ assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploade
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false, "actual manga assets must remain eligible");
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
+assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
