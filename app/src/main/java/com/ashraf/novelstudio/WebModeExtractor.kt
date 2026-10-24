@@ -2372,9 +2372,12 @@ internal class WebModeExtractor(
             // Lens is a single-pass remote OCR engine, including when it returns no text. Never send
             // the same image through a second audit request; it only adds another upload/cache encode.
             if (lensSelected) {
-                // Selective, speed-neutral completeness audit (see OcrRescan.augmentRemote): free when nothing is
-                // uncovered, otherwise only the suspicious crops are re-read, in parallel and under a deadline.
-                if (!Prefs.bool(wv.context, "lensAudit", true) || core.blocks.isEmpty() && fastMode) return core
+                // Shonen Jump+ renders manga into CORS-tainted canvases. The viewport screenshot already
+                // contains the whole visible page, while the pixel audit sees artwork/UI edges as uncovered
+                // lettering and previously launched several useless 100x96 Lens requests per scroll.
+                val currentHost = hostOf(wv.url.orEmpty()).lowercase().removePrefix("www.")
+                val canvasReader = currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")
+                if (canvasReader || !Prefs.bool(wv.context, "lensAudit", true) || core.blocks.isEmpty() && fastMode) return core
                 return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
                 catch (_: Exception) { core } catch (_: OutOfMemoryError) { core }
             }
