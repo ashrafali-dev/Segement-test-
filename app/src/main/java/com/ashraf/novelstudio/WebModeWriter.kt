@@ -477,12 +477,27 @@ internal object WebModeWriter {
             rw=co*w+si*h,rh=si*w+co*h;
         return {l:cx-rw/2,r:cx+rw/2,t:cy-rh/2,b:cy+rh/2,w:rw,h:rh,cx:cx,cy:cy};
       }
-      function hits(a,b,g){return a.l<b.r+g&&a.r+g>b.l&&a.t<b.b+g&&a.b+g>b.t;}
+      // Boxes only COLLIDE when they really overlap. Text blocks that merely touch (lines of one caption, a button label
+      // under a sentence) used to be treated as a collision and were then packed side by side, which threw every
+      // translation sideways, away from the words it replaces. A thin vertical overlap is trimmed instead.
+      function hits(a,b,g){
+        var ox=Math.min(a.r,b.r)-Math.max(a.l,b.l),oy=Math.min(a.b,b.b)-Math.max(a.t,b.t);
+        return ox>2&&oy>Math.max(2,0.22*Math.min(a.h,b.h));
+      }
       function area(r){return Math.max(0,r.r-r.l)*Math.max(0,r.b-r.t);}
       for(var i=0;i<n;i++){
         parent[i]=i;L[i].hidden=false;
         L[i].needH=Math.max(L[i].needH||0,(Number(L[i].b.__nsReqHRatio)||0)*L[i].oh);
         L[i].needW=Math.max(L[i].needW||0,(Number(L[i].b.__nsReqWRatio)||0)*L[i].ow);
+      }
+      // Thin vertical overlaps (neighbouring lines/labels): move the two touching edges apart, keep everything in place.
+      for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s||A.rot||B.rot)continue;
+        var ox=Math.min(A.ox1,B.ox1)-Math.max(A.ox0,B.ox0),oy=Math.min(A.oy1,B.oy1)-Math.max(A.oy0,B.oy0);
+        if(ox<=2||oy<=0||oy>Math.max(2,0.22*Math.min(A.oh,B.oh)))continue;
+        var U=(A.oy0+A.oy1<=B.oy0+B.oy1)?A:B,V=(U===A)?B:A,cut=oy/2+1;
+        U.oy1-=cut;U.oh=Math.max(4,U.oy1-U.oy0);U.y1=U.oy1;
+        V.oy0+=cut;V.oh=Math.max(4,V.oy1-V.oy0);V.y0=V.oy0;
       }
       // Exact duplicate OCR/translation at the same place is one label, not two.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
