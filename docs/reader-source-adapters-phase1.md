@@ -1,46 +1,48 @@
-# Reader View source adapters — Phase 1
+# Reader View source adapters — Phase 1 and current prototype
 
 ## Goal
 
-Keep Novel Studio's existing browser behavior unchanged while creating a safe foundation for an optional Reader View hand-off on supported sites.
+Keep Novel Studio's existing browser behavior unchanged while offering an optional native Reader View for chapters that a built-in source adapter can extract. Unsupported pages must keep working in the normal WebView.
 
-## Current code found in this branch
+## Existing source architecture
 
-The app already has a small adapter architecture:
+The base branch already contains four built-in text-source adapters:
 
-- `SiteAdapter` defines extraction, chapter navigation, prefetch and translation insertion.
-- `SiteRegistry` currently registers WebNovel, WTR-LAB, Qidian and Novel543 adapters.
-- Each source has its own navigator/extractor/writer implementation.
-- `Chapter` is the shared extracted-content model.
-- `ReaderActivity` currently reads saved text chapters from `Store`; it is not yet the image/chapter Reader View requested for browser pages.
+- `WebNovelSystem`
+- `WtrLabSystem`
+- `QidianSystem`
+- `Novel543System`
 
-Phase 1 does not replace or rewire these existing systems.
+They implement the existing `SiteAdapter` contract and share the `Chapter` model. This work added **zero new website adapters**. It adds URL validation and a safe registry-resolution entry point, then reuses the existing extractors.
 
-## Phase 1 contract
+## Work added on `feat/reader-source-adapters-phase1`
 
-1. Validate that a candidate URL is an ordinary HTTP(S) web URL before handing it to source routing.
-2. Ask the existing registry whether a known adapter matches the URL's domain.
-3. Treat a domain match as a *candidate only*. A site can also show a home page, search results, catalog, paywall or login page.
-4. Offer Reader View only after the adapter has successfully extracted a real chapter and its content is usable.
-5. If validation or source matching fails, leave the current WebView navigation alone.
-6. Keep extraction and translation behind the existing `SiteAdapter` contract so the next phase can pass extracted content to a dedicated reader without creating a second translation engine.
+- `ReaderSourceUrl` validates ordinary HTTP(S) URLs before source routing.
+- `SiteRegistry.resolve` returns a matching built-in adapter only after URL validation.
+- `offerReaderViewIfSupported` runs on browser page completion, asks the matching adapter to extract the visible page, and offers **Open in Reader View** only when there is evidence that the page is a chapter.
+- `SourceReaderActivity` provides a clean native text-reading screen, source-page return, font-size controls, and original/translated text switching.
+- `ReaderViewBridge` sends translation requests into MainActivity's existing chatbot queue and returns a completed translation to the source reader instead of inserting it into the underlying web page when that reader is active.
+- Unit tests cover HTTP(S) URL validation and host normalization.
 
-## Future flow
+## Current vertical-slice limits
 
-`WebView URL -> ReaderSourceUrl validation -> SiteRegistry match -> adapter extraction -> user confirms Open in Reader View -> reader presentation -> existing translation pipeline`
+- This prototype covers text chapters returned by the four existing adapters. It does not yet extract manga image lists or build a new image-based comic reader.
+- A domain match is only a candidate. Home pages, search results, catalogues and login pages should not open Reader View unless chapter extraction and chapter-page checks succeed.
+- A site not matched by `SiteRegistry` stays in the existing WebView without being redirected.
+- The build and tests must pass in CI, and the source reader must be tested on-device against a real chapter before this slice should be considered verified.
 
-The UI hand-off and chapter/image reader are intentionally out of scope for Phase 1.
+## Future extension / plugin compatibility
 
-## Plugin / extension compatibility
+Keep source adapters behind a stable contract and the registry as the single lookup point. A future extension system can add source definitions without changing the normal browser fallback. User-installed plugins are **not** enabled by this phase.
 
-Keep source adapters behind a stable contract and keep the registry as the single lookup point. That allows a future extension system to add source definitions without changing the browser fallback. User-installed plugins are **not** enabled by this phase.
+A future plugin system should use explicit manifests, API compatibility checks, source permissions, trusted installation sources, and clear removal/update controls. Do not execute arbitrary downloaded Kotlin/DEX code or grant plugins unrestricted access to cookies, local files, chatbot credentials, or page contents.
 
-A future plugin system should use explicit manifests, version/API compatibility checks, source permissions, trusted installation sources, and clear removal/update controls. Do not execute arbitrary downloaded Kotlin/DEX code or grant plugins unrestricted access to cookies, local files, chatbot credentials, or page contents.
+## Future Home / Library compatibility
 
-## Planned library compatibility
+The later Home / Library feature should store source-neutral metadata (title, source ID, canonical page URL, chapter URL, last-read position, and optional cache metadata). Opening a saved item should route through the same source registry and reader hand-off. The library should not depend directly on any single source's extractor class.
 
-The later Home / Library feature should store a source-neutral item (title, source ID, canonical page URL, chapter URL, last-read position, and optional cached content metadata). Opening a saved item should route through the same source registry and reader hand-off. Do not make the library depend directly on any single source's extractor class.
+## Intended flow
 
-## Validation
+`Google / URL -> existing WebView -> validated URL -> built-in source adapter -> chapter extraction -> user confirms Reader View -> native text reader -> existing chatbot translation`
 
-Unit tests cover HTTP(S) URL validation, malformed URLs, unsupported schemes, and host normalization. A full Android build and device-level source extraction test must still be run before calling the feature production-ready.
+If source matching or extraction fails, keep the normal browser behavior.
