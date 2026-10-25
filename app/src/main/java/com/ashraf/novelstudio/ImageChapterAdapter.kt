@@ -224,13 +224,14 @@ internal class NaverComicImageAdapter : ImageChapterAdapter {
       var declared = im.getAttribute('src') || '';
       var live = im.currentSrc || declared || '';
       var src = absolute(live);
+      var naturalWidth = im.naturalWidth || 0;
       var isPlaceholder = !src ||
         /^(?:data:|about:)/i.test(live) ||
-        /(?:transparent|placeholder|spacer|blank-image|loading[-_.])/i.test(live);
+        /(?:transparent|placeholder|spacer|blank|loading|lazy[-_.])/i.test(live);
       // Mihon's mobile reader uses data-src before src. Desktop viewer prefers src/currentSrc,
-      // except when that source is only a tiny lazy-loading placeholder.
+      // except when that source is a placeholder or the browser has not loaded any pixels yet.
       if (preferLazy && lazy) return lazy;
-      if (lazy && (isPlaceholder || ((im.naturalWidth || 0) > 0 && (im.naturalWidth || 0) <= 2))) return lazy;
+      if (lazy && (isPlaceholder || !im.complete || naturalWidth <= 2)) return lazy;
       return src || lazy;
     }
     function collect(selector, preferLazy) {
