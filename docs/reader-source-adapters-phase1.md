@@ -28,7 +28,9 @@ They implement the existing `SiteAdapter` contract and share the `Chapter` model
 - `NaverComicImageAdapter` recognizes Naver comic episode-detail URLs with `titleId` and `no` query values.
 - The adapter reads page URLs from Naver's chapter-specific viewer elements (including `.wt_viewer img` and `.toon_view_lst img.toon_image`), handles common lazy-image attributes, removes duplicate/invalid URLs, and preserves DOM page order.
 - `ComicReaderActivity` creates a clean image-only reader from those URLs; the normal browser page remains underneath and can be revisited with Back/Source.
-- Pressing **OCR + Translate** sends the clean reader WebView to the existing `WebModeExtractor`, then sends the recognized chapter text through the existing chatbot queue.
+- The Reader View header exposes the app's three existing reading modes: **Novel**, **WebToon Scanning**, and **WebToon Real-time**. Choosing a mode updates the existing app mode state rather than adding a separate prompt/settings implementation.
+- **Novel** and **WebToon Scanning** run chapter-wide OCR; the existing active mode determines which saved translation prompt the chatbot uses.
+- **WebToon Real-time** runs viewport-only OCR on the currently visible page and schedules another scan after the user scrolls. Its detected bubble geometry is registered with the existing real-time batch path so a viewport reply is not saved as if it were a complete chapter.
 - The OCR metadata bridge preserves the original source URL/title so bubble geometry and translation alignment remain keyed to the source chapter.
 - The translated bubbles are drawn over the images in the clean reader. Normal browser real-time scanning is paused while the native comic reader is active and scheduled again when it closes.
 - Unit tests cover Naver episode URL matching and image URL validation, deduplication and ordering.
