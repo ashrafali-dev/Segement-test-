@@ -65,7 +65,8 @@ internal object WebModeInpainter {
         val mi = android.app.ActivityManager.MemoryInfo()
         am.getMemoryInfo(mi)
         val is64 = android.os.Process.is64Bit()
-        val needMb = if (is64) 700L else 1100L
+        // The crash marker above switches the painter off for good if a run ever kills the app, so the limit can be modest.
+        val needMb = (Prefs.get(app, "wmAiMinFreeMb", "").toLongOrNull()) ?: if (is64) 600L else 520L
         val availMb = mi.availMem / 1048576L
         if (mi.lowMemory || availMb < needMb) {
             lastNote = "skipped: low RAM (${availMb}MB free)"

@@ -36,7 +36,7 @@ internal object BubbleDetectorCore {
      */
     fun planTiles(w: Int, h: Int): List<IntArray> {
         if (w < 16 || h < 16) return emptyList()
-        val maxAspect = 1.5f
+        val maxAspect = 1.9f   // was 1.5: a 700x1280 webtoon slice needed 2 model runs (about 3.9 s on the A13), now 1
         if (h > w * maxAspect) {
             val th = Math.round(w * maxAspect).coerceIn(16, h)
             return strips(h, th).map { intArrayOf(0, it[0], w, it[1]) }

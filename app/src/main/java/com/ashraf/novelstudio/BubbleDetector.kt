@@ -206,6 +206,11 @@ internal object BubbleDetector {
     @Synchronized
     private fun detectLocked(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
+        // Speech bubbles do not live in banners, thumbnails or thin strips; one model run costs ~1.9 s on a mid-range phone.
+        if (bmp.width < 200 || bmp.height < 200 || bmp.width > bmp.height * 2.2f) {
+            lastInfo = "skipped (small/banner ${bmp.width}x${bmp.height})"
+            return null
+        }
         return try {
             val file = modelFile(c)
             var s = session
