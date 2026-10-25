@@ -5187,6 +5187,23 @@ return t.length>=40?'TXT:'+t:'';
         trackReadModeSelection()
     }
 
+    /** Expose the same app reading modes to native Reader View without duplicating mode state. */
+    internal fun readerViewReadModeKey(): String = when (currentReadMode()) {
+        ReadMode.NOVEL -> "novel"
+        ReadMode.SCAN -> "scanning"
+        ReadMode.REALTIME -> "realtime"
+    }
+
+    internal fun selectReaderViewReadMode(key: String): Boolean {
+        val target = when (key.trim().lowercase()) {
+            "novel" -> ReadMode.NOVEL
+            "realtime", "real-time", "rt" -> ReadMode.REALTIME
+            else -> ReadMode.SCAN
+        }
+        setReadMode(target)
+        return currentReadMode() == target
+    }
+
     private fun showModeSheet() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -6268,7 +6285,8 @@ return t.length>=40?'TXT:'+t:'';
      */
     internal fun requestComicReaderTranslation(
         readerWebView: WebView,
-        imageChapter: ImageChapter
+        imageChapter: ImageChapter,
+        visibleOnly: Boolean
     ): Boolean {
         val sourceUrl = ReaderSourceUrl.validate(imageChapter.url) ?: return false
         if (isFinishing || isDestroyed ||
@@ -6300,6 +6318,7 @@ return t.length>=40?'TXT:'+t:'';
         ReaderViewBridge.comicOcrProgress(sourceUrl, "Preparing comic pages for OCR…", 1)
         comicReaderOcrHandle = webMode.start(WebModeRequest(
             webView = readerWebView,
+            visibleOnly = visibleOnly,
             isValid = {
                 token == comicReaderOcrToken &&
                     !isFinishing && !isDestroyed &&
@@ -6338,12 +6357,15 @@ return t.length>=40?'TXT:'+t:'';
                         onChapter(chapter)
                         ReaderViewBridge.comicOcrProgress(sourceUrl, "OCR complete; preparing translation…", 100)
 
-                        // Reuse a full saved chapter translation when it matches this exact source.
-                        val saved = Store.find(this, chapter)
-                        val savedRaw = saved?.let { Store.readRaw(this, it.id) }.orEmpty()
-                        if (savedRaw.length >= 30 &&
-                            ReaderViewBridge.comicTranslationCompleted(sourceUrl, savedRaw)) {
-                            return@done
+                        // Register viewport geometry with the existing live-bubble pipeline. This
+                        // prevents a visible-page result from being saved over the entire chapter.
+                        if (visibleOnly && DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn()) {
+                            val layout = WebModeLayoutStore.getScan(sourceUrl)
+                                ?: WebModeLayoutStore.get(this, sourceUrl)
+                            if (layout != null && layout.bubbles.isNotEmpty()) {
+                                val hashes = layout.bubbles.map { WebModeLayout.fingerprint(it) }.toSet()
+                                registerRealtimeBatch(chapter, hashes, layout)
+                            }
                         }
 
                         val key = keyOf(chapter)
