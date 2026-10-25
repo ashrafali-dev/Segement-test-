@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const writer = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt", "utf8");
 const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeExtractor.kt", "utf8");
+const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
 const libMatch = extractor.match(/private const val LIB = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(libMatch, "could not locate WebModeExtractor page-discovery JavaScript");
@@ -19,6 +20,13 @@ assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canv
 const forceInfoBlock = extractor.slice(forceInfoAt, forceInfoEnd);
 assert.ok(forceInfoBlock.includes("cands(sc,true,true,true)"), "manual screen OCR must retain actual canvas bounds");
 assert.ok(!forceInfoBlock.includes("c=[]"), "manual screen OCR must not scan unrelated whole-WebView UI text");
+// Lens completeness audit must retry compact, fully missed labels (e.g. a short "Skip" button),
+// rather than filtering them out with the previous 200x80-pixel floor or inspecting one region only.
+assert.ok(rescan.includes("MIN_REMOTE_AUDIT_WIDTH = 32"), "Lens audit must allow short button labels");
+assert.ok(rescan.includes("MIN_REMOTE_AUDIT_HEIGHT = 12"), "Lens audit must allow short button labels");
+assert.ok(rescan.includes("findUncovered(bmp, base.blocks, REMOTE_AUDIT_CANDIDATE_LIMIT)"), "Lens audit must inspect multiple candidates");
+assert.ok(rescan.includes("REMOTE_AUDIT_MAX_REGIONS = 2"), "Lens audit must retry up to two likely missed regions");
+assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed labels must be prioritized over partial re-reads");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
