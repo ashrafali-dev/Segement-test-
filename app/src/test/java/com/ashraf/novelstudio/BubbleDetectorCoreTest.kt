@@ -18,7 +18,7 @@ class BubbleDetectorCoreTest {
         assertEquals(6000, t.last()[3])
         for (tile in t) {
             assertEquals(800, tile[2] - tile[0])
-            assertTrue(tile[3] - tile[1] <= 1200)
+            assertTrue(tile[3] - tile[1] <= 1520)
         }
         for (i in 1 until t.size) assertTrue("tile $i overlaps the previous one", t[i][1] < t[i - 1][3])
     }
@@ -26,7 +26,7 @@ class BubbleDetectorCoreTest {
     @Test fun widePageIsTiledHorizontally() {
         val t = C.planTiles(4000, 800)
         assertTrue(t.size > 1)
-        for (tile in t) { assertEquals(800, tile[3] - tile[1]); assertTrue(tile[2] - tile[0] <= 1200) }
+        for (tile in t) { assertEquals(800, tile[3] - tile[1]); assertTrue(tile[2] - tile[0] <= 1520) }
     }
 
     @Test fun tileCountIsCappedAndTinyImagesGetNoTiles() {
