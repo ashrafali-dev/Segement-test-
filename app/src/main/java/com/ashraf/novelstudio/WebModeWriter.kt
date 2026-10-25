@@ -543,8 +543,7 @@ internal object WebModeWriter {
           var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?
             2*Math.max(0,Math.min(ocx-RB.freeL,RB.freeR-ocx)):Infinity;
           // Keep the OCR centre fixed. Width can grow for Bengali, but never beyond the lane around that centre.
-          RB.w=Math.max(8,RB.ow*0.5,Math.min(wantW,room,RB.ow*1.35));   // never squeezed below half of its own OCR width
-          if(RB.w>RB.ow*1.35)RB.w=RB.ow*1.35;RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
+          RB.w=Math.max(8,Math.min(wantW,room,RB.ow*1.35));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
           RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;
           RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
         }
@@ -639,8 +638,7 @@ internal object WebModeWriter {
         R.inkL=ink.left;R.inkT=ink.top;R.inkW=ink.width;R.inkH=ink.height;
         vis.push({R:R,l:ink.left,r:ink.right,t:ink.top,b:ink.bottom});
       }
-      for(var rp=0;rp<4;rp++){
-      vis.sort(function(a,b){return a.t-b.t;});overlaps=0;var movedNow=0;
+      vis.sort(function(a,b){return a.t-b.t;});
       for(var i=0;i<vis.length;i++)for(var j=i+1;j<vis.length;j++){
         var A=vis[i],B=vis[j];
         if(A.R.s!==B.R.s)continue;
@@ -651,18 +649,10 @@ internal object WebModeWriter {
         // the later label's font and re-measure; never push it down from the place being translated.
         if(B.R.rot)continue;
         var bb=B.R.b,txt=bb&&bb.firstChild;
-        if(!txt)continue;
+        if(!txt||reduced.indexOf(bb)>=0)continue;
+        reduced.push(bb);
         var fs=parseFloat(txt.style.fontSize)||0,minFs=Math.max(4,Math.min(7,fs*0.65));
-        if(reduced.indexOf(bb)<0&&fs>minFs+0.5){reduced.push(bb);txt.style.fontSize=Math.max(minFs,fs*0.88)+'px';need=true;continue;}
-        // Last resort, only when the font cannot get any smaller: two readable lines beat two lines printed on top of
-        // each other, so the later one moves down by exactly the overlap (text stays whole, nothing is cut).
-        var dy=oy+2,RR=B.R;
-        RR.y0+=dy;RR.y1+=dy;B.t+=dy;B.b+=dy;pushed++;movedNow++;
-        bb.setAttribute('data-k',Math.round(RR.x0)+','+Math.round(RR.y0)+','+Math.round(RR.x1-RR.x0)+','+Math.round(RR.y1-RR.y0));
-        bb.style.transform='translate3d('+RR.x0+'px,'+RR.y0+'px,0)'+(RR.angle?' rotate('+RR.angle+'deg)':'');
-        bb.__nsPushed=true;
-      }
-      if(!movedNow)break;
+        if(fs>minFs+0.5){txt.style.fontSize=Math.max(minFs,fs*0.88)+'px';need=true;}
       }
       // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
       for(var i=0;i<vis.length;i++){
