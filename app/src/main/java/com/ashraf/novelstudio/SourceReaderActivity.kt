@@ -147,7 +147,7 @@ internal class SourceReaderActivity : Activity(), SourceReaderListener {
             setPadding(dp(22), dp(22), dp(22), dp(32))
             setTextIsSelectable(true)
         }
-        scrollView.addView(bodyView, ScrollView.LayoutParams(
+        scrollView.addView(bodyView, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
         root.addView(scrollView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
