@@ -14,6 +14,14 @@ class WebModeLayoutTest {
     private val pageA = listOf(
         b("where are you going", 0.3f, 0.2f), b("I have to leave now", 0.7f, 0.4f), b("please wait for me", 0.4f, 0.7f))
 
+    @Test fun canvasLifecycleIsSelectedByCanvasSourceNotHost() {
+        assertTrue(WebModeLayoutStore.hasCanvasSources(WebModeLayout(0, pageA)))
+        val ordinaryImageLayout = WebModeLayout(0, pageA.map {
+            it.copy(src = "https://cdn.example.test/manga/page-1.jpg")
+        })
+        assertFalse(WebModeLayoutStore.hasCanvasSources(ordinaryImageLayout))
+    }
+
     @Test fun sparseTotallyDifferentReadIsATransition() {
         val fresh = listOf(b("completely other words", 0.5f, 0.1f), b("nothing in common here", 0.2f, 0.9f))
         assertTrue(WebModeLayoutStore.canvasTransitionDetected(pageA, fresh))
