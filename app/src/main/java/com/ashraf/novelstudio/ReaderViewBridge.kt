@@ -14,8 +14,8 @@ internal interface SourceReaderListener {
 }
 
 internal object ReaderViewBridge {
-    private var mainActivity = WeakReference<MainActivity>(null)
-    private var reader = WeakReference<SourceReaderListener>(null)
+    private var mainActivity: WeakReference<MainActivity>? = null
+    private var reader: WeakReference<SourceReaderListener>? = null
 
     @Synchronized
     fun attachMain(activity: MainActivity) {
@@ -24,7 +24,10 @@ internal object ReaderViewBridge {
 
     @Synchronized
     fun detachMain(activity: MainActivity) {
-        if (mainActivity.get() === activity) mainActivity.clear()
+        if (mainActivity?.get() === activity) {
+            mainActivity?.clear()
+            mainActivity = null
+        }
     }
 
     @Synchronized
@@ -34,15 +37,17 @@ internal object ReaderViewBridge {
 
     @Synchronized
     fun detachReader(listener: SourceReaderListener) {
-        if (reader.get() === listener) reader.clear()
+        if (reader?.get() === listener) {
+            reader?.clear()
+            reader = null
+        }
     }
 
     fun requestTranslation(chapter: Chapter): Boolean =
-        mainActivity.get()?.requestReaderTranslation(chapter) ?: false
+        mainActivity?.get()?.requestReaderTranslation(chapter) ?: false
 
     fun translationStarted(url: String) {
-        val target = matchingReader(url) ?: return
-        target.onTranslationStarted(url)
+        matchingReader(url)?.onTranslationStarted(url)
     }
 
     fun translationCompleted(url: String, translatedText: String): Boolean {
@@ -52,12 +57,11 @@ internal object ReaderViewBridge {
     }
 
     fun translationFailed(url: String, message: String) {
-        val target = matchingReader(url) ?: return
-        target.onTranslationFailed(url, message)
+        matchingReader(url)?.onTranslationFailed(url, message)
     }
 
     private fun matchingReader(url: String): SourceReaderListener? {
-        val target = reader.get() ?: return null
+        val target = reader?.get() ?: return null
         return target.takeIf { comparableUrl(it.sourceUrl) == comparableUrl(url) }
     }
 
