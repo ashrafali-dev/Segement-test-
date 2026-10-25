@@ -200,18 +200,17 @@ internal class NaverComicImageAdapter : ImageChapterAdapter {
     }
     var selectors=['.wt_viewer img','.toon_view_lst img.toon_image','#_imageList img','#comic_view_area img'];
     var imgs=[], seen=Object.create(null);
-    for(var si=0;si<selectors.length;si++){
-      var nodes=document.querySelectorAll(selectors[si]);
-      for(var ni=0;ni<nodes.length;ni++){
-        var im=nodes[ni], src=urlOf(im);
-        if(!src || seen[src]) continue;
-        var meta=((im.className||'')+' '+(im.id||'')+' '+(im.alt||'')+' '+src).toLowerCase();
-        if(/logo|avatar|profile|banner|badge|spinner|advert|\/ads?\/|link_slo/.test(meta)) continue;
-        var w=im.naturalWidth||im.width||0, h=im.naturalHeight||im.height||0;
-        if((w>0 && w<180) || (h>0 && h<180)) continue;
-        seen[src]=1;
-        imgs.push(src);
-      }
+    // A single combined selector preserves original DOM order if a page exposes more than one wrapper.
+    var nodes=document.querySelectorAll(selectors.join(','));
+    for(var ni=0;ni<nodes.length;ni++){
+      var im=nodes[ni], src=urlOf(im);
+      if(!src || seen[src]) continue;
+      var meta=((im.className||'')+' '+(im.id||'')+' '+(im.alt||'')+' '+src).toLowerCase();
+      if(/logo|avatar|profile|banner|badge|spinner|advert|\/ads?\/|link_slo/.test(meta)) continue;
+      var w=im.naturalWidth||im.width||0, h=im.naturalHeight||im.height||0;
+      if((w>0 && w<180) || (h>0 && h<180)) continue;
+      seen[src]=1;
+      imgs.push(src);
     }
     function chapterLink(kind) {
       var re=kind==='next'?/(다음화|다음 회|next chapter|next episode)/i:/(이전화|이전 회|previous chapter|previous episode)/i;
