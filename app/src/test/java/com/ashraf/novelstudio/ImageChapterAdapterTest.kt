@@ -21,6 +21,43 @@ class ImageChapterAdapterTest {
         assertFalse(adapter.matches(null))
     }
 
+
+    @Test
+    fun prefersMihonDesktopViewerPagesInSourceOrder() {
+        val pages = NaverComicPageSources.prefer(
+            listOf("https://cdn.example/p2.jpg", "https://cdn.example/p1.jpg", "https://cdn.example/p2.jpg#duplicate"),
+            listOf("https://cdn.example/mobile-p1.jpg"),
+            listOf("https://cdn.example/fallback.jpg")
+        )
+        assertEquals(listOf("https://cdn.example/p2.jpg", "https://cdn.example/p1.jpg"), pages)
+    }
+
+    @Test
+    fun usesMihonMobileDataSrcPagesWhenDesktopViewerIsEmpty() {
+        val pages = NaverComicPageSources.prefer(
+            emptyList(),
+            listOf("https://cdn.example/mobile-1.jpg", "https://cdn.example/mobile-2.jpg"),
+            listOf("https://cdn.example/fallback.jpg")
+        )
+        assertEquals(listOf("https://cdn.example/mobile-1.jpg", "https://cdn.example/mobile-2.jpg"), pages)
+    }
+
+    @Test
+    fun usesKnownNaverFallbackOnlyWhenMihonContainersAreEmpty() {
+        val pages = NaverComicPageSources.prefer(
+            emptyList(),
+            emptyList(),
+            listOf("https://cdn.example/fallback-1.jpg", "https://cdn.example/fallback-2.jpg")
+        )
+        assertEquals(listOf("https://cdn.example/fallback-1.jpg", "https://cdn.example/fallback-2.jpg"), pages)
+    }
+
+    @Test
+    fun selectorPriorityDoesNotDropSmallButValidPageUrls() {
+        val smallPanel = "https://cdn.example/panel-small.webp"
+        assertEquals(listOf(smallPanel), NaverComicPageSources.prefer(listOf(smallPanel), emptyList()))
+    }
+
     @Test
     fun imageUrlsAreValidatedDeduplicatedAndKeepSourceOrder() {
         val urls = ImageChapterPageUrls.orderedDistinct(
