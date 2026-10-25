@@ -1,8 +1,11 @@
 package com.ashraf.novelstudio
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -30,6 +33,17 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
     private lateinit var progressBar: ProgressBar
     private lateinit var translateButton: Button
     private lateinit var originalButton: Button
+    private lateinit var modeButton: Button
+
+    private var selectedMode = "scanning"
+    private var readerReady = false
+    private var realtimeScrollPending = false
+    private val realtimeHandler = Handler(Looper.getMainLooper())
+    private val realtimeScanRunnable = Runnable {
+        if (selectedMode == "realtime" && readerReady) {
+            if (busy) realtimeScrollPending = true else startTranslation()
+        }
+    }
 
     private var busy = false
     private var showingTranslation = false
@@ -52,8 +66,10 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
             finish()
             return
         }
+        selectedMode = normalizeMode(ReaderViewBridge.currentReadModeKey())
         ReaderViewBridge.attachComicReader(this)
         buildUi()
+        refreshModeButton()
         showChapter()
     }
 
@@ -92,7 +108,12 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
         heading.addView(statusView)
         top.addView(back)
         top.addView(heading, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        top.addView(button("Source") { finish() }.apply { textSize = 12f; minWidth = dp(58) })
+        modeButton = button("Mode: Scan") { showTranslationModeDialog() }.apply {
+            textSize = 11f
+            minWidth = dp(82)
+        }
+        top.addView(modeButton)
+        top.addView(button("Source") { finish() }.apply { textSize = 12f; minWidth = dp(54) })
         root.addView(top, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -115,7 +136,18 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_NEVER
             webChromeClient = WebChromeClient()
-            webViewClient = WebViewClient()
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    readerReady = true
+                    if (selectedMode == "realtime") scheduleRealtimeScan(800L)
+                }
+            }
+        }
+        webView.setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+            if (scrollY != oldScrollY && readerReady && selectedMode == "realtime") {
+                scheduleRealtimeScan(500L)
+            }
         }
         root.addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
@@ -143,12 +175,77 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
             setOnClickListener { action() }
         }
 
+    private fun normalizeMode(mode: String): String = when (mode.trim().lowercase()) {
+        "novel" -> "novel"
+        "realtime", "real-time", "rt" -> "realtime"
+        else -> "scanning"
+    }
+
+    private fun modeDescription(): String = when (selectedMode) {
+        "novel" -> "Novel mode"
+        "realtime" -> "Real-time · visible page"
+        else -> "Scanning · full chapter"
+    }
+
+    private fun refreshModeButton() {
+        if (!::modeButton.isInitialized) return
+        modeButton.text = when (selectedMode) {
+            "novel" -> "Mode: Novel"
+            "realtime" -> "Mode: Real-time"
+            else -> "Mode: Scan"
+        }
+        modeButton.contentDescription = "Translation mode: ${modeDescription()}"
+    }
+
+    private fun showTranslationModeDialog() {
+        val keys = arrayOf("novel", "scanning", "realtime")
+        val labels = arrayOf(
+            "Novel — OCR chapter, use Novel prompt",
+            "WebToon Scanning — OCR the full chapter",
+            "WebToon Real-time — OCR visible page automatically while scrolling"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Translation mode")
+            .setSingleChoiceItems(labels, keys.indexOf(selectedMode).coerceAtLeast(0)) { dialog, which ->
+                selectedMode = keys[which]
+                val applied = ReaderViewBridge.selectReadMode(selectedMode)
+                refreshModeButton()
+                statusView.text = "${chapter.pageUrls.size} pages · ${modeDescription()}"
+                if (selectedMode == "realtime" && readerReady) {
+                    scheduleRealtimeScan(350L)
+                } else {
+                    realtimeHandler.removeCallbacks(realtimeScanRunnable)
+                    realtimeScrollPending = false
+                }
+                if (!applied) {
+                    Toast.makeText(this, "Could not update the app reading mode.", Toast.LENGTH_SHORT).show()
+                }
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun scheduleRealtimeScan(delayMs: Long) {
+        if (selectedMode != "realtime" || !readerReady || isFinishing || isDestroyed) return
+        realtimeHandler.removeCallbacks(realtimeScanRunnable)
+        realtimeHandler.postDelayed(realtimeScanRunnable, delayMs.coerceAtLeast(150L))
+    }
+
+    private fun resumeRealtimeIfPending() {
+        if (selectedMode == "realtime" && realtimeScrollPending) {
+            realtimeScrollPending = false
+            scheduleRealtimeScan(450L)
+        }
+    }
+
     private fun showChapter() {
         titleView.text = chapter.title
         statusView.text = buildList {
             add(chapter.novel)
             if (chapter.number.isNotBlank()) add("Episode ${chapter.number}")
             add("${chapter.pageUrls.size} pages")
+            add(modeDescription())
         }.joinToString(" · ")
         webView.loadDataWithBaseURL(
             chapter.url,
@@ -199,19 +296,22 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
 
     private fun startTranslation() {
         if (busy) return
+        val visibleOnly = selectedMode == "realtime"
         busy = true
         translateButton.isEnabled = false
-        translateButton.text = "Preparing OCR…"
+        modeButton.isEnabled = false
+        translateButton.text = if (visibleOnly) "Scanning visible page…" else "Preparing OCR…"
         progressBar.visibility = View.VISIBLE
         progressBar.isIndeterminate = true
-        statusView.text = "Scanning chapter pages…"
-        if (!ReaderViewBridge.requestComicTranslation(webView, chapter)) {
+        statusView.text = if (visibleOnly) "Detecting text on the visible page…" else "Scanning chapter pages…"
+        if (!ReaderViewBridge.requestComicTranslation(webView, chapter, visibleOnly)) {
             busy = false
             translateButton.isEnabled = true
+            modeButton.isEnabled = true
             translateButton.text = "Retry OCR + Translate"
             progressBar.visibility = View.GONE
             progressBar.isIndeterminate = false
-            statusView.text = "${chapter.pageUrls.size} pages"
+            statusView.text = "${chapter.pageUrls.size} pages · ${modeDescription()}"
             Toast.makeText(this, "Could not start chapter OCR. Reopen the chapter and try again.", Toast.LENGTH_LONG).show()
         }
     }
@@ -270,6 +370,7 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         } else {
             "OCR ${percent.coerceIn(0, 100)}%"
         }
+        modeButton.isEnabled = false
         statusView.text = stage.take(90)
     }
 
@@ -279,6 +380,7 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         progressBar.isIndeterminate = true
         progressBar.visibility = View.VISIBLE
         translateButton.text = "Translating…"
+        modeButton.isEnabled = false
         statusView.text = "Sending recognized text to chatbot…"
     }
 
@@ -288,18 +390,25 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         progressBar.visibility = View.GONE
         progressBar.isIndeterminate = false
         translateButton.isEnabled = true
-        translateButton.text = "Translate again"
+        modeButton.isEnabled = true
+        translateButton.text = if (selectedMode == "realtime") "Scan visible page" else "Translate again"
         lastRawTranslation = rawTranslation
         lastLayout = WebModeLayoutStore.getScan(chapter.url) ?: WebModeLayoutStore.get(this, chapter.url)
         lastAligned = lastLayout?.let { WebModeLayout.align(rawTranslation, it) }
         if (lastLayout == null || lastAligned == null || lastAligned?.none { !it.isNullOrBlank() } != false) {
             statusView.text = "OCR complete, but the translation could not be aligned to the bubbles."
             Toast.makeText(this, "Translation saved, but could not be placed on this page.", Toast.LENGTH_LONG).show()
+            resumeRealtimeIfPending()
             return
         }
         applyOverlay()
-        statusView.text = "Translation ready · ${chapter.pageUrls.size} pages"
+        statusView.text = if (selectedMode == "realtime") {
+            "Visible page translated · scroll to detect the next page"
+        } else {
+            "Translation ready · ${chapter.pageUrls.size} pages"
+        }
         Toast.makeText(this, "Comic translation ready", Toast.LENGTH_SHORT).show()
+        resumeRealtimeIfPending()
     }
 
     override fun onImageTranslationFailed(sourceUrl: String, message: String) {
@@ -308,15 +417,18 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         progressBar.visibility = View.GONE
         progressBar.isIndeterminate = false
         translateButton.isEnabled = true
+        modeButton.isEnabled = true
         translateButton.text = "Retry OCR + Translate"
         statusView.text = message.take(90)
         Toast.makeText(this, message.take(180), Toast.LENGTH_LONG).show()
+        resumeRealtimeIfPending()
     }
 
     private fun sameSource(url: String): Boolean =
         url.trim().substringBefore('#') == chapter.url.trim().substringBefore('#')
 
     override fun onDestroy() {
+        realtimeHandler.removeCallbacksAndMessages(null)
         ReaderViewBridge.detachComicReader(this)
         try { webView.stopLoading(); webView.destroy() } catch (_: Exception) {}
         super.onDestroy()
