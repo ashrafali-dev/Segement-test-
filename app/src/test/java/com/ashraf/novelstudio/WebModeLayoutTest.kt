@@ -22,6 +22,26 @@ class WebModeLayoutTest {
         assertFalse(WebModeLayoutStore.hasCanvasSources(ordinaryImageLayout))
     }
 
+    @Test fun resizedCanvasUsesTheSameStableSlot() {
+        val resized = pageA.map { it.copy(src = "ns-canvas:0,0,900x1350") }
+        assertTrue(WebModeLayoutStore.sameCanvasSource(src, "ns-canvas:0,0,900x1350"))
+        assertTrue(WebModeLayoutStore.canvasSourceSlot(src) == WebModeLayoutStore.canvasSourceSlot("ns-canvas:0,0,900x1350"))
+        assertFalse(WebModeLayoutStore.canvasTransitionDetected(pageA, resized))
+    }
+
+    @Test fun changedPageOnResizedCanvasIsStillATransition() {
+        val other = listOf(
+            b("different page line one", 0.1f, 0.1f),
+            b("different page line two", 0.5f, 0.5f),
+            b("different page line three", 0.9f, 0.9f)
+        ).map { it.copy(src = "ns-canvas:0,0,900x1350") }
+        assertTrue(WebModeLayoutStore.canvasTransitionDetected(pageA, other))
+    }
+
+    @Test fun differentCanvasSlotsDoNotMatch() {
+        assertFalse(WebModeLayoutStore.sameCanvasSource(src, "ns-canvas:0,30,800x1200"))
+    }
+
     @Test fun sparseTotallyDifferentReadIsATransition() {
         val fresh = listOf(b("completely other words", 0.5f, 0.1f), b("nothing in common here", 0.2f, 0.9f))
         assertTrue(WebModeLayoutStore.canvasTransitionDetected(pageA, fresh))
