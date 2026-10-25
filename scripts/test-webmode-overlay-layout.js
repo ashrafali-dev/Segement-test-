@@ -41,9 +41,23 @@ assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR 
 const recognizeInner = extractor.slice(recognizeAt, recognizeEnd);
 assert.ok(!recognizeInner.includes("wv.url"), "OCR worker must not access WebView.url");
 assert.ok(recognizeInner.includes("hostOf(startUrl)"), "canvas-site detection must use the UI-thread-captured URL");
-const bodyMatch = writer.match(/private const val BUBBLES = """\r?\n([\s\S]*?)\r?\n\s*"""/);
-assert.ok(bodyMatch, "could not locate the embedded WebView overlay script");
-new Function(bodyMatch[1]); // compile the real embedded JavaScript without executing browser APIs
+const bubbleParts = [...writer.matchAll(/private const val BUBBLES_PART_[12] = """([\\s\\S]*?)"""/g)];
+assert.equal(bubbleParts.length, 2, "could not locate both pieces of the embedded WebView overlay script");
+function modifiedUtf8Length(value) {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    bytes += code === 0 ? 2 : code <= 0x7f ? 1 : code <= 0x7ff ? 2 : 3;
+  }
+  return bytes;
+}
+for (const [index, part] of bubbleParts.entries()) {
+  assert.ok(modifiedUtf8Length(part[1]) < 60000,
+    "overlay script part " + (index + 1) + " must stay safely below the JVM UTF-8 constant limit");
+}
+const bodyMatch = [null, bubbleParts.map(part => part[1]).join("")];
+assert.ok(bodyMatch[1].length > 0, "combined overlay script must not be empty");
+new Function(bodyMatch[1]); // compile the reconstructed production JavaScript without executing browser APIs
 
 function extractFunction(source, marker) {
   const start = source.indexOf(marker);

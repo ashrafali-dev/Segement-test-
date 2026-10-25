@@ -68,7 +68,7 @@ internal object WebModeWriter {
             .replace("__SIZE__", sizePx.toString())
             .replace("__PID__", JSONObject.quote(pageId))
 
-    private const val BUBBLES = """
+    private const val BUBBLES_PART_1 = """
 (function(items,sources,font,pid){
   try{
     if(window.__nsWmStop){try{window.__nsWmStop();}catch(e){}}
@@ -614,7 +614,8 @@ internal object WebModeWriter {
         coverLayer.appendChild(labelCover);bb.__nsLabelCover=labelCover;
       }
       return labelCover;
-    }
+    }"""
+    private const val BUBBLES_PART_2 = """
     // Final check after every layout (font load, resize, scroll, a new OCR result all end up in layout()):
     // (1) every visible text must lie inside its own measured box; if not, request a fitting box;
     // (2) if rendered text overlaps, shrink the later label and re-measure instead of shifting it from
@@ -1118,6 +1119,10 @@ internal object WebModeWriter {
   }catch(e){return 'err:'+e;}
 })(__ITEMS__,__SOURCES__,__FONT__,__PID__)
 """
+    private val BUBBLES: String = buildString(BUBBLES_PART_1.length + BUBBLES_PART_2.length) {
+        append(BUBBLES_PART_1)
+        append(BUBBLES_PART_2)
+    }
 
     /**
      * A tainted canvas reader can replace its bitmap without changing the URL or DOM geometry.
