@@ -26,7 +26,8 @@ They implement the existing `SiteAdapter` contract and share the `Chapter` model
 ## Step 2: Naver image chapter prototype
 
 - `NaverComicImageAdapter` recognizes Naver comic episode-detail URLs with `titleId` and `no` query values.
-- The adapter reads page URLs from Naver's chapter-specific viewer elements (including `.wt_viewer img` and `.toon_view_lst img.toon_image`), handles common lazy-image attributes, removes duplicate/invalid URLs, and preserves DOM page order.
+- The adapter follows Mihon/Keiyoushi's Naver page-list precedence: `.wt_viewer img` first, then `.toon_view_lst img.toon_image` (where `data-src` is preferred), then a narrow fallback for known Naver viewer containers. It no longer drops valid page URLs just because a lazy image currently reports tiny placeholder dimensions. URLs are validated/deduplicated while DOM reading order is preserved.
+- OCR uses the thorough speech-bubble-interior grouping pass for the Comic Reader's visible-page scans as well as full scans. A full-chapter result replaces earlier partial viewport layouts; only Real-time mode merges successive viewport results. This keeps older partial bubbles from duplicating newer full-chapter translations.
 - `ComicReaderActivity` creates a clean image-only reader from those URLs; the normal browser page remains underneath and can be revisited with Back/Source.
 - The Reader View header exposes the app's three existing reading modes: **Novel**, **WebToon Scanning**, and **WebToon Real-time**. Choosing a mode updates the existing app mode state rather than adding a separate prompt/settings implementation.
 - **Novel** and **WebToon Scanning** run chapter-wide OCR; the existing active mode determines which saved translation prompt the chatbot uses.
@@ -46,6 +47,15 @@ They implement the existing `SiteAdapter` contract and share the `Chapter` model
 ## Future extension / plugin compatibility
 
 Keep source adapters behind explicit contracts and keep registries as the single lookup points. A future extension system can add source definitions without changing the browser fallback. A production plugin system should use a signed/validated manifest, API compatibility checks, permission boundaries, trusted installation sources, and clear removal/update controls. Do not execute arbitrary downloaded Kotlin/DEX code or give plugins unrestricted access to cookies, local files, chatbot credentials, or page contents.
+
+## Third-party attribution and license
+
+The Naver image extraction behavior is adapted to Novel Studio's constrained `ImageChapterAdapter` contract using the selector precedence and lazy-image handling in the upstream reference below. Novel Studio does not import, install, or execute Mihon extensions.
+
+- Upstream project: Keiyoushi community `extensions-source` repository.
+- Reference file: `src/ko/navercomic/src/eu/kanade/tachiyomi/extension/ko/navercomic/NaverComic.kt`.
+- Upstream license: Apache License 2.0. The license text and third-party notice are included in `third_party/licenses/Apache-2.0-Mihon-extensions-source.txt` and `THIRD_PARTY_NOTICES.md`.
+- Novel Studio's WebView-specific implementation and security validation are changes made for this app.
 
 ## Mihon source-adapter research references
 
