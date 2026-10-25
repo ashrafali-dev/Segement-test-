@@ -6117,7 +6117,7 @@ return t.length>=40?'TXT:'+t:'';
                 }
                 AlertDialog.Builder(this)
                     .setTitle("Open in Reader View?")
-                    .setMessage("\${chapter.title.ifBlank { chapter.novel }} is available in Novel Studio's clean reader with chatbot translation.")
+                    .setMessage("${chapter.title.ifBlank { chapter.novel }} is available in Novel Studio's clean reader with chatbot translation.")
                     .setPositiveButton("Open in Reader View") { _, _ ->
                         onChapter(chapter)
                         val saved = Store.find(this, chapter)
