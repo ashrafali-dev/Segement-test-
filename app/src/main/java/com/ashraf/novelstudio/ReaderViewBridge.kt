@@ -1,10 +1,11 @@
 package com.ashraf.novelstudio
 
+import android.webkit.WebView
 import java.lang.ref.WeakReference
 
 /**
- * Coordinates the independent source-reader screen with MainActivity's existing chatbot queue.
- * It does not own translation logic; all requests are handed to the current MainActivity.
+ * Coordinates native readers with MainActivity's existing source and chatbot pipelines.
+ * Translation engines stay owned by MainActivity; reader screens only present the result.
  */
 internal interface SourceReaderListener {
     val sourceUrl: String
@@ -13,9 +14,20 @@ internal interface SourceReaderListener {
     fun onTranslationFailed(sourceUrl: String, message: String)
 }
 
+internal interface ComicSourceReaderListener {
+    val sourceUrl: String
+    val sourceWebView: WebView
+    fun onOcrProgress(sourceUrl: String, stage: String, percent: Int)
+    fun onImageTranslationStarted(sourceUrl: String)
+    /** The raw marked reply is passed so it can be aligned to the OCR bubble geometry. */
+    fun onImageTranslationCompleted(sourceUrl: String, rawTranslation: String)
+    fun onImageTranslationFailed(sourceUrl: String, message: String)
+}
+
 internal object ReaderViewBridge {
     private var mainActivity: WeakReference<MainActivity>? = null
     private var reader: WeakReference<SourceReaderListener>? = null
+    private var comicReader: WeakReference<ComicSourceReaderListener>? = null
 
     @Synchronized
     fun attachMain(activity: MainActivity) {
@@ -43,8 +55,47 @@ internal object ReaderViewBridge {
         }
     }
 
+    @Synchronized
+    fun attachComicReader(listener: ComicSourceReaderListener) {
+        comicReader = WeakReference(listener)
+    }
+
+    @Synchronized
+    fun detachComicReader(listener: ComicSourceReaderListener) {
+        if (comicReader?.get() === listener) {
+            comicReader?.clear()
+            comicReader = null
+        }
+    }
+
     fun requestTranslation(chapter: Chapter): Boolean =
         mainActivity?.get()?.requestReaderTranslation(chapter) ?: false
+
+    fun requestComicTranslation(webView: WebView, chapter: ImageChapter): Boolean =
+        mainActivity?.get()?.requestComicReaderTranslation(webView, chapter) ?: false
+
+    fun isActiveComicReader(webView: WebView, url: String): Boolean {
+        val target = comicReader?.get() ?: return false
+        return target.sourceWebView === webView && comparableUrl(target.sourceUrl) == comparableUrl(url)
+    }
+
+    fun comicOcrProgress(url: String, stage: String, percent: Int) {
+        matchingComicReader(url)?.onOcrProgress(url, stage, percent)
+    }
+
+    fun comicTranslationStarted(url: String) {
+        matchingComicReader(url)?.onImageTranslationStarted(url)
+    }
+
+    fun comicTranslationCompleted(url: String, rawTranslation: String): Boolean {
+        val target = matchingComicReader(url) ?: return false
+        target.onImageTranslationCompleted(url, rawTranslation)
+        return true
+    }
+
+    fun comicTranslationFailed(url: String, message: String) {
+        matchingComicReader(url)?.onImageTranslationFailed(url, message)
+    }
 
     fun translationStarted(url: String) {
         matchingReader(url)?.onTranslationStarted(url)
@@ -62,6 +113,11 @@ internal object ReaderViewBridge {
 
     private fun matchingReader(url: String): SourceReaderListener? {
         val target = reader?.get() ?: return null
+        return target.takeIf { comparableUrl(it.sourceUrl) == comparableUrl(url) }
+    }
+
+    private fun matchingComicReader(url: String): ComicSourceReaderListener? {
+        val target = comicReader?.get() ?: return null
         return target.takeIf { comparableUrl(it.sourceUrl) == comparableUrl(url) }
     }
 
