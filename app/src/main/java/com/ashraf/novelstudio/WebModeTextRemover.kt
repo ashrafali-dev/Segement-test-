@@ -183,6 +183,58 @@ internal object WebModeTextRemover {
                     }
                 }
 
+                // Non-AI fast path: if the pixels just outside this OCR box have one stable background
+                // colour, erase only pixels matching the detected lettering colour. This is ideal for white
+                // or coloured speech-bubble interiors and avoids rejecting the whole word because one glyph
+                // touches a burst line. The path is disabled for textured/gradient backgrounds.
+                if (soft) {
+                    val localPaper = estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)
+                    if (localPaper != null &&
+                        min(distance(localPaper, fg1), distance(localPaper, fg2)) >= 52f) {
+                        val inkMask = ByteArray(regionCount)
+                        var inkCount = 0
+                        for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                            val at = ry * rw + rx
+                            if (candidate[at].toInt() != 0 &&
+                                distance(region[at], localPaper) >= 34f) {
+                                inkMask[at] = 1
+                                inkCount++
+                            }
+                        }
+                        // A suspiciously dense mask is more likely an artwork patch than lettering.
+                        if (inkCount >= 4 && inkCount <= innerArea * 0.72f) {
+                            val mask = inkMask.copyOf()
+                            val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)
+                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                                if (inkMask[ry * rw + rx].toInt() == 0) continue
+                                for (dy in -grow..grow) for (dx in -grow..grow) {
+                                    val nx = rx + dx; val ny = ry + dy
+                                    if (nx !in ix0 until ix1 || ny !in iy0 until iy1) continue
+                                    val ni = ny * rw + nx
+                                    if (mask[ni].toInt() == 0 && distance(region[ni], localPaper) >= 22f &&
+                                        min(distance(region[ni], fg1), distance(region[ni], fg2)) <= 110f) {
+                                        mask[ni] = 1
+                                    }
+                                }
+                            }
+                            val out = region.copyOf()
+                            var removedPixels = 0
+                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                                val at = ry * rw + rx
+                                if (mask[at].toInt() == 0) continue
+                                out[at] = localPaper
+                                removedPixels++
+                            }
+                            if (removedPixels >= 4) {
+                                bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
+                                totalRemoved += removedPixels
+                                erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                                continue
+                            }
+                        }
+                    }
+                }
+
                 val queue = IntArray(regionCount)
                 var selectedCount = 0
                 for (start in 0 until regionCount) {
@@ -352,6 +404,39 @@ internal object WebModeTextRemover {
         } finally {
             bitmap.recycle()
         }
+    }
+
+    /**
+     * Estimate the background from the ring OUTSIDE an OCR text box. Return a colour only when
+     * enough ring pixels agree with the median; textured art therefore falls back to the normal mask
+     * and non-AI local interpolation instead of being flattened.
+     */
+    private fun estimateFlatBackground(
+        region: IntArray, rw: Int, rh: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int
+    ): Int? {
+        val inner = (ix1 - ix0).toLong() * (iy1 - iy0).toLong()
+        val ring = rw.toLong() * rh.toLong() - inner
+        if (ring < 24L) return null
+        val stride = max(1, kotlin.math.sqrt(ring.toDouble() / 1600.0).toInt())
+        val samples = ArrayList<Int>(min(1800, (ring / (stride * stride)).toInt() + 8))
+        var y = 0
+        while (y < rh) {
+            var x = 0
+            while (x < rw) {
+                if (x < ix0 || x >= ix1 || y < iy0 || y >= iy1) samples.add(region[y * rw + x])
+                x += stride
+            }
+            y += stride
+        }
+        if (samples.size < 12) return null
+        val rs = IntArray(samples.size) { red(samples[it]) }.also { it.sort() }
+        val gs = IntArray(samples.size) { green(samples[it]) }.also { it.sort() }
+        val bs = IntArray(samples.size) { blue(samples[it]) }.also { it.sort() }
+        val mid = samples.size / 2
+        val paper = 0xFF000000.toInt() or (rs[mid] shl 16) or (gs[mid] shl 8) or bs[mid]
+        var agreeing = 0
+        for (p in samples) if (distance(p, paper) <= 30f) agreeing++
+        return if (agreeing.toFloat() / samples.size >= 0.68f) paper else null
     }
 
     /**
