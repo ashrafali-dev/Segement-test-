@@ -620,7 +620,7 @@ internal object WebModeWriter {
     // (2) no two visible texts may overlap; the lower one is pushed down by exactly the overlap.
     // The result is published in window.__nsLayoutReport so the app (and tests) can read it.
     function verify(L){
-      var vis=[],overflow=0,overlaps=0,pushed=0,need=false;
+      var vis=[],overflow=0,overlaps=0,pushed=0,need=false,reduced=[];
       for(var i=0;i<L.length;i++){
         var R=L[i];if(R.hidden||R.b.style.display==='none')continue;
         var t=R.b.firstChild;if(!t)continue;
@@ -644,13 +644,14 @@ internal object WebModeWriter {
         var ox=Math.min(A.r,B.r)-Math.max(A.l,B.l),oy=Math.min(A.b,B.b)-Math.max(A.t,B.t);
         if(ox<=1||oy<=1)continue;
         overlaps++;
+        // Preserve the OCR anchor even when two rendered labels touch. If there is room, reduce
+        // the later label's font and re-measure; never push it down from the place being translated.
         if(B.R.rot)continue;
-        var dy=oy+2,R=B.R,bb=R.b;
-        R.y0+=dy;R.y1+=dy;B.t+=dy;B.b+=dy;pushed++;
-        var cw=R.x1-R.x0,ch=R.y1-R.y0;
-        bb.setAttribute('data-k',Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch));
-        bb.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
-        bb.__nsPushed=true;
+        var bb=B.R.b,txt=bb&&bb.firstChild;
+        if(!txt||reduced.indexOf(bb)>=0)continue;
+        reduced.push(bb);
+        var fs=parseFloat(txt.style.fontSize)||0,minFs=Math.max(4,Math.min(7,fs*0.65));
+        if(fs>minFs+0.5){txt.style.fontSize=Math.max(minFs,fs*0.88)+'px';need=true;}
       }
       // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
       for(var i=0;i<vis.length;i++){
