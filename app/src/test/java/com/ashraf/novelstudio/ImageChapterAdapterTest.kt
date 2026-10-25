@@ -67,6 +67,7 @@ class ImageChapterAdapterTest {
         assertTrue(script.contains("data-src"))
         assertTrue(script.contains("viewerPages"))
         assertTrue(script.contains("toonPages"))
+        assertTrue(script.contains("!im.complete"))
         assertFalse(script.contains("naturalWidth < 180"))
     }
 
