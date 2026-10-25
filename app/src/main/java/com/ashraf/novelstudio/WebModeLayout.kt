@@ -205,10 +205,13 @@ internal object WebModeLayoutStore {
         val k = key(url)
         // Load persisted translations before comparing so a restart cannot resurrect bubbles from
         // an old page after the reader recycles its canvas at the same URL/coordinates.
-        val previousLayout = mem[k] ?: if (isShonenJumpPlus(url)) get(ctx, url) else null
+        // Canvas identity is carried by the synthetic source, not by a hard-coded reader hostname.
+        // Only layouts that actually contain a canvas crop enter this page-reuse lifecycle.
+        val hasCanvas = hasCanvasSources(layout)
+        val previousLayout = mem[k] ?: if (hasCanvas) get(ctx, url) else null
         val transitions = LinkedHashSet<String>()
 
-        if (isShonenJumpPlus(url)) {
+        if (hasCanvas) {
             val sources = layout.bubbles.asSequence()
                 .map { WebModeLogic.normalizeUrl(it.src) }
                 .filter { it.startsWith("ns-canvas:") }
@@ -266,7 +269,6 @@ internal object WebModeLayoutStore {
      */
     @Synchronized
     fun observeCanvasFrame(ctx: Context, url: String, src: String, signature: String): Boolean {
-        if (!isShonenJumpPlus(url)) return false
         val normalizedSource = WebModeLogic.normalizeUrl(src)
         if (!normalizedSource.startsWith("ns-canvas:") || signature.isBlank()) return false
         val k = key(url)
@@ -312,9 +314,10 @@ internal object WebModeLayoutStore {
     /** Capture the current reader-page generation for each canvas source in this request's layout. */
     @Synchronized
     fun canvasVersions(url: String, layout: WebModeLayout?): Map<String, Long> {
-        if (layout == null || !isShonenJumpPlus(url)) return emptyMap()
+        if (!hasCanvasSources(layout)) return emptyMap()
+        val currentLayout = layout ?: return emptyMap()
         val k = key(url)
-        val sources = layout.bubbles.asSequence()
+        val sources = currentLayout.bubbles.asSequence()
             .map { WebModeLogic.normalizeUrl(it.src) }
             .filter { it.startsWith("ns-canvas:") }
             .distinct()
@@ -322,7 +325,7 @@ internal object WebModeLayoutStore {
         return sources.associate { src ->
             val sourceKey = "$k|$src"
             val snapshot = canvasSnapshots[sourceKey]?.bubbles.orEmpty()
-            val requestBubbles = layout.bubbles.filter {
+            val requestBubbles = currentLayout.bubbles.filter {
                 WebModeLogic.normalizeUrl(it.src) == src && it.sourceText.isNotBlank()
             }
             // A batch may be queued while another scan detects the next manga page. If we blindly
@@ -499,11 +502,11 @@ internal object WebModeLayoutStore {
         return hit * 100 >= n * 70
     }
 
-    private fun isShonenJumpPlus(url: String): Boolean {
-        val host = url.substringAfter("://", "").substringBefore('/').substringBefore('?')
-            .substringBefore(':').lowercase().removePrefix("www.")
-        return host == "shonenjumpplus.com" || host.endsWith(".shonenjumpplus.com")
-    }
+    /** True only for OCR layouts whose source identity is a measured canvas crop. */
+    internal fun hasCanvasSources(layout: WebModeLayout?): Boolean =
+        layout?.bubbles?.any {
+            WebModeLogic.normalizeUrl(it.src).startsWith("ns-canvas:")
+        } == true
 
     /**
      * Pure decision: did the (recycled) canvas switch to another page?
