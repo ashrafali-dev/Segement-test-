@@ -6344,7 +6344,8 @@ return t.length>=40?'TXT:'+t:'';
             comicReaderOcrToken++
             comicReaderOcrHandle?.cancel()
             comicReaderOcrHandle = null
-            comicReaderTranslationKeys.removeAll { it.contains(sourceUrl.substringBefore('#')) }
+            // The reader stack currently supports one active comic chapter at a time.
+            comicReaderTranslationKeys.clear()
             handler.post {
                 if (!isFinishing && !isDestroyed) {
                     scheduleDeepSeekAutoTranslation(novelWv.url.orEmpty())
@@ -11106,6 +11107,10 @@ ${rows.take(220).joinToString("\n")}
 
     override fun onDestroy() {
         ScanKeepAlive.stop(this)
+        comicReaderOcrToken++
+        comicReaderOcrHandle?.cancel()
+        comicReaderOcrHandle = null
+        comicReaderTranslationKeys.clear()
         aheadOcrHandle?.cancel()
         webModeHandle?.cancel()
         webModePrefetchHandle?.cancel()
