@@ -8831,21 +8831,32 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             val shown = lastChapter
             // A URL/chapter key is not enough for canvas readers: one URL can host many distinct pages.
             // Only the exact Chapter object that was sent may receive a live-panel chatbot response.
-            val sameTarget = if (webModeOn() && ch.contentSel.isBlank()) shown === ch
+            val sameTarget = if ((webModeOn() && ch.contentSel.isBlank()) || ch.isImageChapter) shown === ch
                 else shown != null && keyOf(shown) == keyOf(ch)
             if (shown != null && sameTarget) {
                 val readerRequested = readerViewTranslationKeys.contains(savedKey)
                 val deliveredToReader = readerRequested && ReaderViewBridge.translationCompleted(ch.url, t)
                 readerViewTranslationKeys.remove(savedKey)
-                if (!deliveredToReader) {
+
+                val comicReaderRequested = comicReaderTranslationKeys.contains(savedKey)
+                val deliveredToComicReader = comicReaderRequested &&
+                    ReaderViewBridge.comicTranslationCompleted(ch.url, rawTranslation)
+                comicReaderTranslationKeys.remove(savedKey)
+
+                // Comic reader translations are drawn over the custom image-only WebView, not the
+                // original website beneath it. Text reader translations stay in their clean native view.
+                if (!deliveredToReader && !deliveredToComicReader && !ch.isImageChapter) {
                     applyTranslation(shown, rawTranslation, true)
                 }
                 // Real-time page scans translate visible bubbles in sequence; don't prefetch a whole
                 // chapter into the same DeepSeek chat session.
-                if (!livePanelBatch) schedulePrefetch(shown)
+                if (!livePanelBatch && !ch.isImageChapter) schedulePrefetch(shown)
             } else {
                 if (readerViewTranslationKeys.remove(savedKey)) {
                     ReaderViewBridge.translationFailed(ch.url, "The active chapter changed before this translation could be shown.")
+                }
+                if (comicReaderTranslationKeys.remove(savedKey)) {
+                    ReaderViewBridge.comicTranslationFailed(ch.url, "The comic reader changed before this translation completed.")
                 }
                 if (livePanelBatch) {
                     // The reader changed before placement; leave these bubbles eligible for a later scan.
@@ -8872,6 +8883,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             } else {
                 readerViewTranslationKeys.remove(readerKey)
                 ReaderViewBridge.translationFailed(ch.url, msg)
+            }
+        }
+        if (readerKey in comicReaderTranslationKeys) {
+            if (autoRetry) {
+                ReaderViewBridge.comicTranslationStarted(ch.url)
+            } else {
+                comicReaderTranslationKeys.remove(readerKey)
+                ReaderViewBridge.comicTranslationFailed(ch.url, msg)
             }
         }
         NovelStudioAnalytics.track(
