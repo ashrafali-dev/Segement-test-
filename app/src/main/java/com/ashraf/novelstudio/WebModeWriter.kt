@@ -520,14 +520,19 @@ internal object WebModeWriter {
           if(j===i)continue;var B=L[j];if(B.hidden||B.s!==A.s)continue;
           var vo=Math.min(A.oy1,B.oy1)-Math.max(A.oy0,B.oy0);
           if(vo<=2)continue;
-          if(B.ox1<=A.ox0+1)fl=Math.max(fl,B.ox1+GAP);
-          else if(B.ox0>=A.ox1-1)fr=Math.min(fr,B.ox0-GAP);
+          // Reserve a lane around each ORIGINAL text centre. The old edge-only test ignored overlapping
+          // OCR boxes, so the collision packer later shoved valid labels left/right (e.g. Continue and Skip).
+          var ac=(A.ox0+A.ox1)/2,bc=(B.ox0+B.ox1)/2;
+          if(bc<ac)fl=Math.max(fl,(bc+ac)/2+GAP/2);
+          else if(bc>ac)fr=Math.min(fr,(bc+ac)/2-GAP/2);
         }
         A.freeL=fl;A.freeR=fr;
       }
-      // Seed connected collision groups from the original geometry.
+      // Same-image OCR boxes must keep their source anchors. If their boxes are broad/overlapping,
+      // the free-lane calculation above shrinks them in place. Only collisions between different source
+      // images may be packed, because those can represent two images occupying the same viewport area.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
-        var A=L[i],B=L[j];if(A.hidden||B.hidden)continue;
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s===B.s)continue;
         if(hits(geom(A,true),geom(B,true),GAP))join(i,j);
       }
       for(var pass=0;pass<n+1;pass++){
@@ -535,11 +540,11 @@ internal object WebModeWriter {
           var RB=L[ri];if(RB.hidden)continue;
           var ocx=(RB.ox0+RB.ox1)/2,ocy=(RB.oy0+RB.oy1)/2;
           var wantW=Math.max(RB.ow,RB.needW||0);
-          var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?RB.freeR-RB.freeL:Infinity;
-          RB.w=Math.min(wantW,Math.max(RB.ow,room),RB.ow*1.35);RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
-          if(RB.w>RB.ow+0.5&&Number.isFinite(RB.freeL)&&Number.isFinite(RB.freeR)){
-            var cx0=Math.max(RB.freeL+RB.w/2,Math.min(RB.freeR-RB.w/2,ocx));RB.x0=cx0-RB.w/2;RB.x1=cx0+RB.w/2;}
-          else{RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;}
+          var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?
+            2*Math.max(0,Math.min(ocx-RB.freeL,RB.freeR-ocx)):Infinity;
+          // Keep the OCR centre fixed. Width can grow for Bengali, but never beyond the lane around that centre.
+          RB.w=Math.max(8,Math.min(wantW,room,RB.ow*1.35));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
+          RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;
           RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
         }
         var groups=Object.create(null);
@@ -587,11 +592,10 @@ internal object WebModeWriter {
             cursor+=R._visW+gap;
           }
         }
-        // Moving one collision group can meet a formerly separate box. Merge those groups
-        // and re-pack instead of letting render order decide which text disappears.
+        // Re-pack only different-image collisions. Same-image labels are anchored to their own OCR boxes.
         var merged=false;
         for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
-          var A=L[i],B=L[j];if(A.hidden||B.hidden||root(i)===root(j))continue;
+          var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s===B.s||root(i)===root(j))continue;
           if(hits(geom(A,false),geom(B,false),GAP))if(join(i,j))merged=true;
         }
         if(!merged)break;
