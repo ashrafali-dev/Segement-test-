@@ -2053,7 +2053,10 @@ internal class WebModeExtractor(
                         // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
                         // never one sentence. Unknown shape (null) keeps the geometry decision.
                         val ix = blocks.indexOf(x); val iy = blocks.indexOf(y)
-                        ix >= 0 && iy >= 0 && BubbleFit.sameBubble(bmp, rects[ix], rects[iy], rects) == false
+                        // Both directions: the shape found around ONE of the two lines is enough to see that the other
+                        // (a hand-written note beside a speech bubble) sits outside it.
+                        ix >= 0 && iy >= 0 && (BubbleFit.sameBubble(bmp, rects[ix], rects[iy], rects) == false ||
+                            BubbleFit.sameBubble(bmp, rects[iy], rects[ix], rects) == false)
                     }
                 }.toCollection(LinkedHashSet<Int>())
                 groupMs += android.os.SystemClock.elapsedRealtime() - tg

@@ -143,7 +143,7 @@ internal object WebModeWriter {
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
       // measures both axes and shrinks the text instead of letting it spill outside.
       t.style.cssText='display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;'
-        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;text-wrap:balance;'
+        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:normal;text-wrap:balance;'
         // Bengali vowel signs (ি ী ু ৃ ে ৈ) stick out above and below the line box; room for them
         // stops them being clipped by the box edge or by the gradient's background-clip.
         +'padding:0.16em 0.1em;'
@@ -420,7 +420,7 @@ internal object WebModeWriter {
         if(fits())return boxH;
         // Still too tall at the widest allowed box. The box may grow a little taller (bounded), then the font keeps
         // shrinking: a slightly smaller text that sits in its bubble beats a giant card over the artwork.
-        t.style.overflowWrap='anywhere';   // a word wider than the box breaks instead of asking for endless height
+        // Words are never split: a word wider than the box makes the FONT smaller, it is not broken across lines.
         var shr=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
         var maxH=Math.max(boxH,Number(b.__nsMaxH)||boxH),capAvail=Math.max(availH,maxH*shr);
         function heightNow(){var q=t.getBoundingClientRect();return Math.max(q.height,t.scrollHeight);}
@@ -441,9 +441,9 @@ internal object WebModeWriter {
       t.style.overflow='visible';
       if(fits())return boxH;
       // A single long word or very long translation may need more room even at minimum size.
-      // Break an over-wide word as a last resort; if height still does not fit, expand the box and
+      // Shrink further (words stay whole); if height still does not fit, expand the box and
       // let collision resolution move it sideways on the next frame. The text itself is never cut.
-      t.style.overflowWrap='anywhere';t.style.wordBreak='normal';
+      t.style.overflowWrap='normal';t.style.wordBreak='normal';
       var wrapLo=0.5,wrapHi=Math.max(wrapLo,parseFloat(t.style.fontSize)||best),wrapBest=wrapLo;
       for(var wi=0;wi<14;wi++){
         var wm=(wrapLo+wrapHi)/2;t.style.fontSize=wm+'px';
@@ -543,7 +543,8 @@ internal object WebModeWriter {
           var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?
             2*Math.max(0,Math.min(ocx-RB.freeL,RB.freeR-ocx)):Infinity;
           // Keep the OCR centre fixed. Width can grow for Bengali, but never beyond the lane around that centre.
-          RB.w=Math.max(8,Math.min(wantW,room,RB.ow*1.35));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
+          RB.w=Math.max(8,RB.ow*0.5,Math.min(wantW,room,RB.ow*1.35));   // never squeezed below half of its own OCR width
+          if(RB.w>RB.ow*1.35)RB.w=RB.ow*1.35;RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
           RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;
           RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
         }
@@ -638,7 +639,8 @@ internal object WebModeWriter {
         R.inkL=ink.left;R.inkT=ink.top;R.inkW=ink.width;R.inkH=ink.height;
         vis.push({R:R,l:ink.left,r:ink.right,t:ink.top,b:ink.bottom});
       }
-      vis.sort(function(a,b){return a.t-b.t;});
+      for(var rp=0;rp<4;rp++){
+      vis.sort(function(a,b){return a.t-b.t;});overlaps=0;var movedNow=0;
       for(var i=0;i<vis.length;i++)for(var j=i+1;j<vis.length;j++){
         var A=vis[i],B=vis[j];
         if(A.R.s!==B.R.s)continue;
@@ -649,10 +651,18 @@ internal object WebModeWriter {
         // the later label's font and re-measure; never push it down from the place being translated.
         if(B.R.rot)continue;
         var bb=B.R.b,txt=bb&&bb.firstChild;
-        if(!txt||reduced.indexOf(bb)>=0)continue;
-        reduced.push(bb);
+        if(!txt)continue;
         var fs=parseFloat(txt.style.fontSize)||0,minFs=Math.max(4,Math.min(7,fs*0.65));
-        if(fs>minFs+0.5){txt.style.fontSize=Math.max(minFs,fs*0.88)+'px';need=true;}
+        if(reduced.indexOf(bb)<0&&fs>minFs+0.5){reduced.push(bb);txt.style.fontSize=Math.max(minFs,fs*0.88)+'px';need=true;continue;}
+        // Last resort, only when the font cannot get any smaller: two readable lines beat two lines printed on top of
+        // each other, so the later one moves down by exactly the overlap (text stays whole, nothing is cut).
+        var dy=oy+2,RR=B.R;
+        RR.y0+=dy;RR.y1+=dy;B.t+=dy;B.b+=dy;pushed++;movedNow++;
+        bb.setAttribute('data-k',Math.round(RR.x0)+','+Math.round(RR.y0)+','+Math.round(RR.x1-RR.x0)+','+Math.round(RR.y1-RR.y0));
+        bb.style.transform='translate3d('+RR.x0+'px,'+RR.y0+'px,0)'+(RR.angle?' rotate('+RR.angle+'deg)':'');
+        bb.__nsPushed=true;
+      }
+      if(!movedNow)break;
       }
       // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
       for(var i=0;i<vis.length;i++){
@@ -764,6 +774,7 @@ internal object WebModeWriter {
             var roomW=(Number.isFinite(R.freeR)&&Number.isFinite(R.freeL))?R.freeR-R.freeL-2:R.rw-4;
             bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(R.ow*1.35,roomW));
             bb.__nsMaxH=R.oh*1.8;
+            if(cw<R.ow)bb.__nsMaxW=Math.max(8,cw);   // a box that had to be narrowed must not be re-widened by the text
             var prevW=Number(bb.__nsReqWRatio)||0;
             var requiredH=fit(bb,(Number(gg[5])||0.01)*R.rw);
             if((Number(bb.__nsReqWRatio)||0)>prevW+0.005)expanded=true;   // wider box wanted: lay out again with it
@@ -1282,6 +1293,9 @@ internal object WmSfx {
         "BADUM" to "ধুকধুক", "TICK" to "টিক", "TOCK" to "টক", "BEEP" to "বিপ!", "BUZZ" to "ভনভন"
     )
 
+    /** Compiled once: fix() runs for every bubble on every overlay check, on the main thread. */
+    private val REPEAT3 = Regex("(.)\\1{2,}")
+
     private fun letters(s: String) = s.filter { it.isLetter() }
 
     fun fix(t: String): String {
@@ -1290,7 +1304,7 @@ internal object WmSfx {
         val l = letters(t)
         if (l.isEmpty() || l.any { it.code > 0x24F }) return t          // already (partly) non-Latin
         if (!bengali) return t
-        val key = l.uppercase().replace(Regex("(.)\\1{2,}"), "$1$1")
+        val key = REPEAT3.replace(l.uppercase(), "$1$1")
         return MAP[key] ?: MAP[l.uppercase()] ?: t
     }
 }

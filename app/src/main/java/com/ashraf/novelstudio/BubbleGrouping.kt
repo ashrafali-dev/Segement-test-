@@ -44,7 +44,28 @@ internal object BubbleGrouping {
     const val LEADING_TOLERANCE = 2.0f
     const val MIN_LEADING_FONTS = 0.6f
 
-    private fun font(b: OcrBlock) = if (b.fontPx > 0f) b.fontPx else b.h
+    /**
+     * Height of ONE line of text. A recogniser block that holds several lines has a height of several lines:
+     * comparing those heights as if they were font sizes made a 2-line title and a 5-line note look equal.
+     */
+    private fun font(b: OcrBlock): Float {
+        if (b.fontPx > 0f) return b.fontPx
+        val lines = (b.text.count { it == '\n' } + 1).coerceAtLeast(1)
+        return b.h / lines
+    }
+
+    /**
+     * Lines of ONE paragraph share an alignment: centred (same centre), left aligned or right aligned. Two blocks that
+     * merely overlap a little sideways (a title and a hand-written note beside it) are not one paragraph.
+     */
+    fun sharesAlignment(a: OcrBlock, b: OcrBlock): Boolean {
+        val wide = maxOf(a.w, b.w)
+        if (wide <= 0f) return true
+        val al = a.cx - a.w / 2f; val bl = b.cx - b.w / 2f
+        val ar = a.cx + a.w / 2f; val br = b.cx + b.w / 2f
+        return Math.abs(a.cx - b.cx) <= wide * 0.22f ||
+            Math.abs(al - bl) <= wide * 0.15f || Math.abs(ar - br) <= wide * 0.15f
+    }
     private fun gap(a: OcrBlock, b: OcrBlock): Float =
         maxOf(0f, maxOf(a.cy - a.h / 2f, b.cy - b.h / 2f) - minOf(a.cy + a.h / 2f, b.cy + b.h / 2f))
     private fun hOverlap(a: OcrBlock, b: OcrBlock): Float =
@@ -55,7 +76,7 @@ internal object BubbleGrouping {
         // OCR boxes often leave a larger vertical gap than the glyph height inside tall Korean webtoon balloons.
         // Production callers also pass outlineBetween() as a veto, so tolerate wider line spacing without
         // blindly chaining two visibly separate balloons together.
-        likelySameBubbleLine(a, b, 1.6f, loose = true) && aligned(a, b)
+        likelySameBubbleLine(a, b, 1.6f, loose = true) && aligned(a, b) && sharesAlignment(a, b)
 
     /**
      * Groups the lines [pool] (indices into [blocks]) into speech bubbles.
