@@ -41,7 +41,7 @@ assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR 
 const recognizeInner = extractor.slice(recognizeAt, recognizeEnd);
 assert.ok(!recognizeInner.includes("wv.url"), "OCR worker must not access WebView.url");
 assert.ok(recognizeInner.includes("hostOf(startUrl)"), "canvas-site detection must use the UI-thread-captured URL");
-const bubbleParts = [...writer.matchAll(/private const val BUBBLES_PART_[12] = """([\\s\\S]*?)"""/g)];
+const bubbleParts = [...writer.matchAll(/private const val BUBBLES_PART_[12] = """([\s\S]*?)"""/g)];
 assert.equal(bubbleParts.length, 2, "could not locate both pieces of the embedded WebView overlay script");
 function modifiedUtf8Length(value) {
   let bytes = 0;
