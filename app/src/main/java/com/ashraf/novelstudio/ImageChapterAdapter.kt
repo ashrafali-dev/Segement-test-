@@ -99,7 +99,7 @@ internal class NaverComicImageAdapter : ImageChapterAdapter {
             val path = uri.path.orEmpty().lowercase()
             val query = query(uri.rawQuery)
             host in HOSTS &&
-                (path.contains("/webtoon/detail") || path.contains("/bestChallenge/detail") || path.contains("/challenge/detail")) &&
+                (path.contains("/webtoon/detail") || path.contains("/bestchallenge/detail") || path.contains("/challenge/detail")) &&
                 query["titleId"]?.matches(Regex("\\d{1,12}")) == true &&
                 query["no"]?.matches(Regex("\\d{1,9}")) == true
         }.getOrDefault(false)
