@@ -6080,21 +6080,33 @@ return t.length>=40?'TXT:'+t:'';
      * live on supported sites and must continue to behave like normal browser pages.
      */
     private fun offerReaderViewIfSupported(pageUrl: String) {
-        if (isFinishing || isDestroyed || webModeOn()) return
+        if (isFinishing || isDestroyed) return
         val validatedUrl = ReaderSourceUrl.validate(pageUrl) ?: return
         val match = SiteRegistry.resolve(this, validatedUrl) ?: return
         val key = validatedUrl.substringBefore('#')
         if (key in readerViewOfferedUrls || readerViewOfferPendingUrl == key) return
         readerViewOfferPendingUrl = key
         val token = navToken
-        handler.postDelayed({
+        fun clearPendingOffer() {
             if (readerViewOfferPendingUrl == key) readerViewOfferPendingUrl = ""
-            if (isFinishing || isDestroyed || token != navToken) return@postDelayed
-            if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) return@postDelayed
-            val liveMatch = SiteRegistry.resolve(this, novelWv.url) ?: return@postDelayed
-            if (liveMatch.adapter.id != match.adapter.id) return@postDelayed
+        }
+
+        handler.postDelayed({
+            if (isFinishing || isDestroyed || token != navToken) {
+                clearPendingOffer()
+                return@postDelayed
+            }
+            if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) {
+                clearPendingOffer()
+                return@postDelayed
+            }
+            val liveMatch = SiteRegistry.resolve(this, novelWv.url)
+            if (liveMatch == null || liveMatch.adapter.id != match.adapter.id) {
+                clearPendingOffer()
+                return@postDelayed
+            }
             match.adapter.extract(novelWv, 0) { chapter ->
-                if (readerViewOfferPendingUrl == key) readerViewOfferPendingUrl = ""
+                clearPendingOffer()
                 if (isFinishing || isDestroyed || token != navToken) return@extract
                 if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) return@extract
                 if (chapter == null || !isLikelyReaderChapter(chapter)) return@extract
