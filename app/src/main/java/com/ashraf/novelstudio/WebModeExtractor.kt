@@ -2121,7 +2121,11 @@ internal class WebModeExtractor(
                     cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3]
                 }
                 if (i !in inside) continue
-                val members = inside.filter { !consumed[it] }
+                // A previous light grouping pass may already have folded several OCR rows into
+                // refinedText[i] and marked its member rows consumed. Keep that whole joined text as
+                // one member here; dropping consumed rows at this stage loses lines from the same
+                // balloon and makes the later marker-to-bubble mapping drift.
+                val members = inside.filter { j -> !consumed[j] || refinedText[j] != null }
                 if (i !in members) continue
                 if (members.size < 2 && bands.isNullOrEmpty()) continue   // a lone, fully read line needs nothing
 
@@ -2134,7 +2138,7 @@ internal class WebModeExtractor(
                 val fonts = ordered.map { blocks[it].fontPx }.filter { it > 0f }.sorted()
                 val medFont = if (fonts.isEmpty()) ownFont else fonts[fonts.size / 2]
                 val lines = ordered.mapTo(ArrayList<BubbleLine>()) {
-                    BubbleLine(blocks[it].cy, blocks[it].text.replace(NEWLINES, " ").trim())
+                    BubbleLine(blocks[it].cy, (refinedText[it] ?: blocks[it].text).replace(NEWLINES, " ").trim())
                 }
                 // Recover missed bubble rows only during a thorough scan; doing up to three extra
                 // OCR inferences for every visible bubble made real-time reading feel frozen.
