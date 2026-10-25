@@ -49,10 +49,6 @@
             android:name=".ReaderActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode" />
-        <activity
-            android:name=".japanesemanga.JapaneseMangaEngineActivity"
-            android:exported="false"
-            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode" />
         <!-- Ask Google Play Services to download the shared OCR models when the app is installed. -->
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
