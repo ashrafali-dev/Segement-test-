@@ -403,11 +403,15 @@ internal object OcrRescan {
     }
     @Volatile private var auditMisses = 0
     @Volatile private var auditPausedUntil = 0L
-    private const val REMOTE_AUDIT_MISS_LIMIT = 2
-    private const val REMOTE_AUDIT_COOLDOWN_MS = 60_000L
-    private const val MIN_REMOTE_AUDIT_WIDTH = 200
-    private const val MIN_REMOTE_AUDIT_HEIGHT = 80
-    private const val MIN_REMOTE_AUDIT_DARK_RATIO = 0.10f
+    // A global cooldown must not hide later short labels just because earlier panels contained artwork.
+    private const val REMOTE_AUDIT_MISS_LIMIT = 3
+    private const val REMOTE_AUDIT_COOLDOWN_MS = 10_000L
+    // The old 200x80 minimum excluded button labels such as "Skip" before they could be re-read.
+    private const val MIN_REMOTE_AUDIT_WIDTH = 32
+    private const val MIN_REMOTE_AUDIT_HEIGHT = 12
+    private const val MIN_REMOTE_AUDIT_DARK_RATIO = 0.06f
+    private const val REMOTE_AUDIT_CANDIDATE_LIMIT = 48
+    private const val REMOTE_AUDIT_MAX_REGIONS = 2
 
     /** Sample a bounded number of pixels; skip near-white blank regions before paying for a Lens request. */
     private fun hasDarkPixelRatio(bmp: Bitmap, region: Region, minRatio: Float): Boolean {
@@ -436,27 +440,35 @@ internal object OcrRescan {
     /**
      * Speed-neutral completeness check for a remote (Google Lens) read.
      *  1. A purely local pixel pass ([findUncovered], a few ms) looks for text-like ink that NO Lens block covers.
-     *  2. Nothing suspicious (the normal case) -> [base] is returned immediately: zero added latency.
-     *  3. Only the suspicious spots (max 2) are cropped and sent to Lens IN PARALLEL, with a hard deadline; the
-     *     whole page is never re-sent. The Lens engine caches by image bytes, so an unchanged crop is free.
-     *  4. Self-limiting: three audits in a row that recover nothing (artwork that merely looks like text) pause
-     *     the audit for 20 s, so a page full of drawings cannot slow the reader down.
+     *  2. Find text-like ink outside Lens boxes, including small isolated UI/button labels.
+     *  3. At most two likely regions are cropped and sent to Lens IN PARALLEL with a hard deadline;
+     *     the whole page is never re-sent. The Lens engine caches by image bytes, so repeated crops are cheap.
+     *  4. Three unsuccessful audits pause only the audit briefly, not the OCR pipeline or other recognizers.
      */
     fun augmentRemote(
         engine: OcrEngine, bmp: Bitmap, base: OcrResult, script: OcrScript, deadlineMs: Long = 1500L
     ): OcrResult {
         val now = android.os.SystemClock.elapsedRealtime()
         if (now < auditPausedUntil) return base
-        val regions: List<Region> = try {
-            // Remote audit is a conservative safety net, not a second full OCR pass.
-            // Tiny screen-edge/border components are overwhelmingly noise for Lens and cost ~1 s each.
-            findUncovered(bmp, base.blocks, 1).filter { region ->
+        val candidates: List<Region> = try {
+            // Scan enough local candidates to avoid letting one large partial line hide a missing short label.
+            findUncovered(bmp, base.blocks, REMOTE_AUDIT_CANDIDATE_LIMIT)
+        } catch (_: Exception) { emptyList() } catch (_: OutOfMemoryError) { emptyList() }
+        val regions: List<Region> = candidates.asSequence()
+            .filter { region ->
                 val rw = region.r - region.l
                 val rh = region.b - region.t
                 rw >= MIN_REMOTE_AUDIT_WIDTH && rh >= MIN_REMOTE_AUDIT_HEIGHT &&
                     hasDarkPixelRatio(bmp, region, MIN_REMOTE_AUDIT_DARK_RATIO)
             }
-        } catch (_: Exception) { emptyList() } catch (_: OutOfMemoryError) { emptyList() }
+            // Fully missed lines are more valuable than partial re-reads; prioritize compact labels (buttons,
+            // controls, short captions) before large artwork-shaped regions.
+            .sortedWith(compareBy<Region>(
+                { if (it.anchor == null) 0 else 1 },
+                { (it.r - it.l) * (it.b - it.t) }
+            ))
+            .take(REMOTE_AUDIT_MAX_REGIONS)
+            .toList()
         if (regions.isEmpty()) return base
         val tasks = regions.map { reg ->
             java.util.concurrent.Callable<List<OcrBlock>> {
