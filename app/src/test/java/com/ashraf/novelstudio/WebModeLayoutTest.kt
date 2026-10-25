@@ -38,6 +38,20 @@ class WebModeLayoutTest {
         assertTrue(WebModeLayoutStore.canvasTransitionDetected(pageA, other))
     }
 
+    @Test fun canvasGenerationIdentitySurvivesSpaUrlAndSizeChanges() {
+        val pageOne = WebModeLayoutStore.canvasIdentityKey(
+            "https://reader.example/chapter/1", "ns-canvas:0,0,800x1200"
+        )
+        val nextPage = WebModeLayoutStore.canvasIdentityKey(
+            "https://reader.example/chapter/2", "ns-canvas:0,0,900x1350"
+        )
+        val otherHost = WebModeLayoutStore.canvasIdentityKey(
+            "https://other.example/chapter/2", "ns-canvas:0,0,900x1350"
+        )
+        assertTrue(pageOne == nextPage)
+        assertFalse(pageOne == otherHost)
+    }
+
     @Test fun differentCanvasSlotsDoNotMatch() {
         assertFalse(WebModeLayoutStore.sameCanvasSource(src, "ns-canvas:0,30,800x1200"))
     }
