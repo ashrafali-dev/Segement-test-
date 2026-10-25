@@ -3062,7 +3062,7 @@ var xf=0,ifs=document.querySelectorAll('iframe');for(var xi=0;xi<ifs.length;xi++
 var ncv=0,cvl=[];var cvs0=document.querySelectorAll('canvas');for(var cj=0;cj<cvs0.length&&cj<8;cj++){var rr=cvs0[cj].getBoundingClientRect();cvl.push(cvs0[cj].width+'x'+cvs0[cj].height+'@'+Math.round(rr.top)+'/'+Math.round(rr.width)+'x'+Math.round(rr.height));}
 var cands2=c.map(function(x){return (x.cv?'CANVAS ':'')+x.w+'x'+x.h+' '+String(x.s).slice(0,60);}).slice(0,12);
 var dbg=document.images.length+' img, '+ifs.length+' iframe('+xf+' cross-origin), '+cvs0.length+' canvas, '+c.length+' found | canvasErr='+(window.__nsWmCanvasErr||'-')+' | canvases=['+cvl.join(', ')+'] | cands=['+cands2.join(' ;; ')+'] | vp='+(window.innerWidth||0)+'x'+(window.innerHeight||0)+' | ready='+document.readyState;
-return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,title:title,novel:novel,next:link('next'),prev:link('prev'),imgs:c.slice(0,600),dbg:dbg});
+return JSON.stringify({lang:document.documentElement.lang||'',url:window.__nsSourceUrl||location.href,title:window.__nsSourceTitle||title,novel:window.__nsSourceNovel||novel,next:window.__nsSourceNext||link('next'),prev:window.__nsSourcePrev||link('prev'),imgs:c.slice(0,600),dbg:dbg});
 """
 
         // Real-time read-ahead: the next images that are completely below the screen (nothing is scrolled).
@@ -3082,7 +3082,7 @@ if(sc){
 c=c.filter(function(p){var pb=p.vt+(p.h||0);return p.vt>=vpBottom-2||(p.vt<vpBottom-2&&pb>vpBottom-2)||(p.vt<0&&pb>0);});
 // Use the page's document-space top for a stable reading order across batches.
 c.sort(function(a,b){return all?(a.t-b.t):(a.vt-b.vt);});
-return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,imgs:c.slice(0,__N__)});
+return JSON.stringify({lang:document.documentElement.lang||'',url:window.__nsSourceUrl||location.href,imgs:c.slice(0,__N__)});
 """
 
         private const val JS_COLLECT = """
