@@ -2475,6 +2475,11 @@ return t.length>=40?'TXT:'+t:'';
     private val readerViewOfferedUrls = LinkedHashSet<String>()
     private var readerViewOfferPendingUrl = ""
     private val readerViewTranslationKeys = mutableSetOf<String>()
+    private val comicReaderOfferedUrls = LinkedHashSet<String>()
+    private var comicReaderOfferPendingUrl = ""
+    private val comicReaderTranslationKeys = mutableSetOf<String>()
+    private var comicReaderOcrHandle: WebModeExtractor.Handle? = null
+    private var comicReaderOcrToken = 0
 
     // Background translation queue. All chatbot sites share the same request cooldown.
     private val queue = mutableListOf<Chapter>()
@@ -6062,6 +6067,7 @@ return t.length>=40?'TXT:'+t:'';
                 // Supported text-source chapters can opt into the separate native Reader View.
                 // Unsupported sites keep the existing WebView experience without interruption.
                 offerReaderViewIfSupported(url)
+                offerComicReaderIfSupported(url)
             }
 
             if (view === novelWv && wtrLabSystem.matches(url)) startWtrWatch()
