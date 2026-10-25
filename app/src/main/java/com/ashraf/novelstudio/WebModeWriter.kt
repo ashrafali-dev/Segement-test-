@@ -616,8 +616,9 @@ internal object WebModeWriter {
       return labelCover;
     }
     // Final check after every layout (font load, resize, scroll, a new OCR result all end up in layout()):
-    // (1) every visible text must lie inside its own measured box; if not, ask for a bigger box;
-    // (2) no two visible texts may overlap; the lower one is pushed down by exactly the overlap.
+    // (1) every visible text must lie inside its own measured box; if not, request a fitting box;
+    // (2) if rendered text overlaps, shrink the later label and re-measure instead of shifting it from
+    //     the OCR anchor. Same-image text must remain exactly over its original panel lettering.
     // The result is published in window.__nsLayoutReport so the app (and tests) can read it.
     function verify(L){
       var vis=[],overflow=0,overlaps=0,pushed=0,need=false,reduced=[];
