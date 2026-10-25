@@ -47,6 +47,17 @@ They implement the existing `SiteAdapter` contract and share the `Chapter` model
 
 Keep source adapters behind explicit contracts and keep registries as the single lookup points. A future extension system can add source definitions without changing the browser fallback. A production plugin system should use a signed/validated manifest, API compatibility checks, permission boundaries, trusted installation sources, and clear removal/update controls. Do not execute arbitrary downloaded Kotlin/DEX code or give plugins unrestricted access to cookies, local files, chatbot credentials, or page contents.
 
+## Mihon source-adapter research references
+
+Use Mihon/Tachiyomi-style source implementations as **research references for site parsing only**—catalogue parsing, chapter URL matching, reader image selectors, lazy-loaded image URL handling, page order and next/previous chapter links.
+
+- Mihon extension FAQ: https://mihon.app/docs/faq/browse/extensions
+- Mihon source migration guide and source concepts: https://mihon.app/docs/guides/source-migration
+- Keiyoushi community extension source code: https://github.com/keiyoushi/extensions-source
+- Naver Webtoon selector reference used for this prototype: https://github.com/keiyoushi/extensions-source
+
+Do not install/import third-party extension APKs or execute downloaded extension code inside Novel Studio to obtain source support. Implement each source through Novel Studio's own constrained adapter interface, keep the ordinary WebView as fallback, and add live-page fixtures/tests when possible. Mihon and community repositories are references, not dependencies or an assumption that their extensions are safe/trusted.
+
 ## Future Home / Library compatibility
 
 The later Home / Library feature should store source-neutral metadata (title, source ID, canonical page URL, chapter URL, last-read position, and optional cache metadata). Opening a saved item should route through the same source registry and Reader View hand-off. The library should not depend directly on a particular source adapter.
