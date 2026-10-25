@@ -6152,6 +6152,52 @@ return t.length>=40?'TXT:'+t:'';
         }, 650L)
     }
 
+    /**
+     * Naver comic pages use image lists instead of chapter text. Only offer Comic Reader after
+     * the source-specific adapter finds actual episode pages in the loaded chapter DOM.
+     */
+    private fun offerComicReaderIfSupported(pageUrl: String) {
+        if (isFinishing || isDestroyed) return
+        val validatedUrl = ReaderSourceUrl.validate(pageUrl) ?: return
+        val adapter = ImageChapterRegistry.find(validatedUrl) ?: return
+        val key = validatedUrl.substringBefore('#')
+        if (key in comicReaderOfferedUrls || comicReaderOfferPendingUrl == key) return
+        comicReaderOfferPendingUrl = key
+        val token = navToken
+
+        fun clearPendingOffer() {
+            if (comicReaderOfferPendingUrl == key) comicReaderOfferPendingUrl = ""
+        }
+
+        handler.postDelayed({
+            if (isFinishing || isDestroyed || token != navToken ||
+                ReaderSourceUrl.validate(novelWv.url) != validatedUrl) {
+                clearPendingOffer()
+                return@postDelayed
+            }
+            adapter.extract(novelWv) { chapter ->
+                clearPendingOffer()
+                if (isFinishing || isDestroyed || token != navToken) return@extract
+                if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) return@extract
+                if (chapter == null || chapter.pageUrls.isEmpty()) return@extract
+                comicReaderOfferedUrls.add(key)
+                while (comicReaderOfferedUrls.size > 64) {
+                    comicReaderOfferedUrls.remove(comicReaderOfferedUrls.first())
+                }
+                val episodeLabel = chapter.number.takeIf { it.isNotBlank() }?.let { "Episode $it · " }.orEmpty()
+                AlertDialog.Builder(this)
+                    .setTitle("Open in Comic Reader?")
+                    .setMessage("${chapter.novel}\n${episodeLabel}${chapter.pageUrls.size} chapter images found. Open the clean Reader View and use Novel Studio OCR + chatbot translation?")
+                    .setPositiveButton("Open Reader View") { _, _ ->
+                        startActivity(android.content.Intent(this, ComicReaderActivity::class.java)
+                            .putExtra(ComicReaderActivity.EXTRA_CHAPTER, chapter.toJson()))
+                    }
+                    .setNegativeButton("Stay on website", null)
+                    .show()
+            }
+        }, 650L)
+    }
+
     private fun isLikelyReaderChapter(chapter: Chapter): Boolean {
         if (chapter.text.trim().length < 180 || chapter.title.trim().length > 220) return false
         val title = chapter.title.trim()
