@@ -72,11 +72,17 @@ internal object ReaderViewBridge {
 
     fun hasComicReader(): Boolean = comicReader?.get() != null
 
+    fun currentReadModeKey(): String =
+        mainActivity?.get()?.readerViewReadModeKey() ?: "scanning"
+
+    fun selectReadMode(key: String): Boolean =
+        mainActivity?.get()?.selectReaderViewReadMode(key) ?: false
+
     fun requestTranslation(chapter: Chapter): Boolean =
         mainActivity?.get()?.requestReaderTranslation(chapter) ?: false
 
-    fun requestComicTranslation(webView: WebView, chapter: ImageChapter): Boolean =
-        mainActivity?.get()?.requestComicReaderTranslation(webView, chapter) ?: false
+    fun requestComicTranslation(webView: WebView, chapter: ImageChapter, visibleOnly: Boolean): Boolean =
+        mainActivity?.get()?.requestComicReaderTranslation(webView, chapter, visibleOnly) ?: false
 
     fun isActiveComicReader(webView: WebView, url: String): Boolean {
         val target = comicReader?.get() ?: return false
