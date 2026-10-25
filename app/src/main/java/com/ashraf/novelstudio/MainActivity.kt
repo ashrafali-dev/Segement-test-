@@ -6175,17 +6175,32 @@ return t.length>=40?'TXT:'+t:'';
             if (comicReaderOfferPendingUrl == key) comicReaderOfferPendingUrl = ""
         }
 
-        handler.postDelayed({
-            if (isFinishing || isDestroyed || token != navToken ||
-                ReaderSourceUrl.validate(novelWv.url) != validatedUrl) {
+        fun stillOnSource(): Boolean =
+            !isFinishing && !isDestroyed && token == navToken &&
+                ReaderSourceUrl.validate(novelWv.url) == validatedUrl
+
+        fun attempt(attemptNo: Int) {
+            if (!stillOnSource()) {
                 clearPendingOffer()
-                return@postDelayed
+                return
             }
             adapter.extract(novelWv) { chapter ->
+                if (!stillOnSource()) {
+                    clearPendingOffer()
+                    return@extract
+                }
+                if (chapter == null || chapter.pageUrls.isEmpty()) {
+                    // Naver mounts/lazy-loads its page list after the first paint on some devices.
+                    // Retry briefly, then keep the normal website view without showing a false prompt.
+                    if (attemptNo < 5) {
+                        handler.postDelayed({ attempt(attemptNo + 1) }, 500L)
+                    } else {
+                        clearPendingOffer()
+                    }
+                    return@extract
+                }
+
                 clearPendingOffer()
-                if (isFinishing || isDestroyed || token != navToken) return@extract
-                if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) return@extract
-                if (chapter == null || chapter.pageUrls.isEmpty()) return@extract
                 comicReaderOfferedUrls.add(key)
                 while (comicReaderOfferedUrls.size > 64) {
                     comicReaderOfferedUrls.remove(comicReaderOfferedUrls.first())
@@ -6201,6 +6216,10 @@ return t.length>=40?'TXT:'+t:'';
                     .setNegativeButton("Stay on website", null)
                     .show()
             }
+        }
+
+        handler.postDelayed({
+            if (stillOnSource()) attempt(0) else clearPendingOffer()
         }, 650L)
     }
 
