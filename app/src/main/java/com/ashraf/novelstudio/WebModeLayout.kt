@@ -218,11 +218,11 @@ internal object WebModeLayoutStore {
             val sources = layout.bubbles.asSequence()
                 .map { WebModeLogic.normalizeUrl(it.src) }
                 .filter { it.startsWith("ns-canvas:") }
-                .distinct()
+                .distinctBy { canvasSourceSlot(it) ?: it }
                 .toList()
             for (src in sources) {
                 val fresh = layout.bubbles.filter {
-                    WebModeLogic.normalizeUrl(it.src) == src && it.sourceText.isNotBlank()
+                    sameCanvasSource(it.src, src) && it.sourceText.isNotBlank()
                 }
                 if (fresh.isEmpty()) continue
                 // Width/height may change when a reader recycles a canvas. The slot (left + document top)
