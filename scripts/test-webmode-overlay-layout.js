@@ -156,5 +156,13 @@ assert.ok(bodyMatch[1].includes("overflowWrap='anywhere'"),
   "last-resort wrapping must keep long text visible");
 assert.ok(!bodyMatch[1].includes("text-overflow:ellipsis") && !bodyMatch[1].includes("TruncateAt.END"),
   "overlay must never ellipsize translations");
+assert.ok(bodyMatch[1].includes("Same-image OCR boxes must keep their source anchors"),
+  "same-image labels must retain their OCR anchors instead of being collision-packed");
+assert.ok(bodyMatch[1].includes("Reserve a lane around each ORIGINAL text centre"),
+  "overlapping source boxes must shrink into lanes around their original centres");
+assert.ok(bodyMatch[1].includes("Preserve the OCR anchor even when two rendered labels touch"),
+  "layout verification must not move labels away from their source");
+assert.ok(!bodyMatch[1].includes("R.y0+=dy;R.y1+=dy;B.t+=dy;B.b+=dy"),
+  "overlap verification must not push translations down");
 
 console.log("WebMode overlay JavaScript syntax, collision, horizontal-only and no-truncation checks passed.");
