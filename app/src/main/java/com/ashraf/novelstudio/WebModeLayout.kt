@@ -195,6 +195,11 @@ internal object WebModeLayoutStore {
     private val canvasPixelSourceBySlot = object : LinkedHashMap<String, String>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 128
     }
+    // URL that owns the last confirmed pixel baseline. Do not delete a previously visited page's cache
+    // merely because the reader navigated to a different SPA URL and reused its canvas element.
+    private val canvasPixelUrlBySlot = object : LinkedHashMap<String, String>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 128
+    }
 
     // Reader SPAs (MangaDex) rewrite the trailing page number while the page is scrolled:
     // /chapter/<uuid>/1 -> /chapter/<uuid>/8. The layout saved during the scan and the chapter that later
@@ -289,9 +294,11 @@ internal object WebModeLayoutStore {
         val sourceKey = canvasIdentityKey(url, normalizedSource)
         val previous = canvasPixelSnapshots[sourceKey]
         val previousSource = canvasPixelSourceBySlot[sourceKey]
+        val previousUrlKey = canvasPixelUrlBySlot[sourceKey]
         if (previous == null || previous.length != signature.length) {
             canvasPixelSnapshots[sourceKey] = signature
             canvasPixelSourceBySlot[sourceKey] = normalizedSource
+            canvasPixelUrlBySlot[sourceKey] = k
             return false
         }
 
@@ -310,6 +317,7 @@ internal object WebModeLayoutStore {
 
         canvasPixelSnapshots[sourceKey] = signature
         canvasPixelSourceBySlot[sourceKey] = normalizedSource
+        canvasPixelUrlBySlot[sourceKey] = k
         canvasGenerationBySource[sourceKey] = (canvasGenerationBySource[sourceKey] ?: 0L) + 1L
         val pageLayoutKey = canvasStateKey(k, normalizedSource)
         val changedSources = LinkedHashSet<String>()
@@ -317,21 +325,24 @@ internal object WebModeLayoutStore {
         changedSources.add(normalizedSource)
         pendingCanvasTransitions.getOrPut(k) { LinkedHashSet() }.addAll(changedSources)
 
-        // This bitmap proved that the page changed. Remove all geometry variants for this canvas slot
-        // from both the latest scan and cumulative layout, preventing stale boxes returning after a failed OCR.
-        canvasSnapshots.remove(pageLayoutKey)
-        scans[k]?.let { scanned ->
-            scans[k] = WebModeLayout(scanned.titleOffset, scanned.bubbles.filterNot {
-                sameCanvasSource(it.src, normalizedSource)
-            })
-        }
-        val previousLayout = mem[k] ?: get(ctx, url)
-        if (previousLayout != null) {
-            mem[k] = WebModeLayout(previousLayout.titleOffset, previousLayout.bubbles.filterNot {
-                sameCanvasSource(it.src, normalizedSource)
-            })
-            // Persist removal immediately; do not resurrect the prior page if OCR/chat fails or the app restarts.
-            persist(ctx, url)
+        // This bitmap proved that the page changed. Clear the current page's layout only when the
+        // baseline belongs to the same URL. If the SPA URL changed, its cached layout belongs to that
+        // other page and must survive for later navigation back; the live DOM overlay is still cleared.
+        if (previousUrlKey == null || previousUrlKey == k) {
+            canvasSnapshots.remove(pageLayoutKey)
+            scans[k]?.let { scanned ->
+                scans[k] = WebModeLayout(scanned.titleOffset, scanned.bubbles.filterNot {
+                    sameCanvasSource(it.src, normalizedSource)
+                })
+            }
+            val previousLayout = mem[k] ?: get(ctx, url)
+            if (previousLayout != null) {
+                mem[k] = WebModeLayout(previousLayout.titleOffset, previousLayout.bubbles.filterNot {
+                    sameCanvasSource(it.src, normalizedSource)
+                })
+                // Persist removal immediately; do not resurrect the prior page if OCR/chat fails or the app restarts.
+                persist(ctx, url)
+            }
         }
         return true
     }
