@@ -71,17 +71,10 @@ dependencies {
     implementation 'com.google.android.gms:play-services-mlkit-text-recognition-japanese:16.0.1'
     implementation 'com.google.android.gms:play-services-mlkit-text-recognition-korean:16.0.1'
 
-    // Primary Web Mode OCR: PP-OCR style ONNX models, downloaded by the user (ML Kit is the fallback).
+    // ONNX Runtime: runs the optional speech-bubble/text detector (BubbleDetector) and the optional LaMa inpainter.
+    // OCR itself is ML Kit (above) or Google Lens; there is no downloadable OCR engine any more.
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.21.1'
-    implementation 'com.quickbirdstudios:opencv:4.5.3'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-
-    // OPTIONAL precise speech-bubble detector (YOLO26s-seg model of Manga Translator, imported from the menu:
-    // "Bubble Detector (YOLO, optional)"). The app works without it (light pixel-based bubble finder is used).
-    // To switch the detector on, remove the two slashes of ONE of the lines below and rebuild. The classes are reached by
-    // reflection, so nothing else has to change. (Manga Translator itself uses 2.2.0, which needs compileSdk 35/36.)
-    // implementation 'com.google.ai.edge.litert:litert:1.4.0'
-    // implementation 'com.google.ai.edge.litert:litert:2.2.0'
 
     testImplementation 'junit:junit:4.13.2'
 }
