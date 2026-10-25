@@ -1288,8 +1288,20 @@ internal object WmSfx {
         "BADUM" to "ধুকধুক", "TICK" to "টিক", "TOCK" to "টক", "BEEP" to "বিপ!", "BUZZ" to "ভনভন"
     )
 
-    /** Compiled once: fix() runs for every bubble on every overlay check, on the main thread. */
-    private val REPEAT3 = Regex("(.)\\1{2,}")
+    /** Keep at most two consecutive copies without initializing java.util.regex on the UI thread. */
+    private fun collapseRepeatedRuns(s: String): String {
+        if (s.length < 3) return s
+        val out = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val ch = s[i]
+            var end = i + 1
+            while (end < s.length && s[end] == ch) end++
+            repeat(minOf(2, end - i)) { out.append(ch) }
+            i = end
+        }
+        return out.toString()
+    }
 
     private fun letters(s: String) = s.filter { it.isLetter() }
 
@@ -1299,7 +1311,7 @@ internal object WmSfx {
         val l = letters(t)
         if (l.isEmpty() || l.any { it.code > 0x24F }) return t          // already (partly) non-Latin
         if (!bengali) return t
-        val key = REPEAT3.replace(l.uppercase(), "$1$1")
+        val key = collapseRepeatedRuns(l.uppercase())
         return MAP[key] ?: MAP[l.uppercase()] ?: t
     }
 }
