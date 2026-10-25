@@ -6152,10 +6152,10 @@ return t.length>=40?'TXT:'+t:'';
         if (title.isBlank()) return false
         if (chapter.number.isNotBlank()) return true
         val titleHasChapter = Regex(
-            "(?i)\\\\b(chapter|chap(?:ter)?|episode|ep)\\\\.?\\\\s*[-#:.]?\\\\s*\\\\d+|第\\\\s*[一二三四五六七八九十百千万零〇两\\\\d]+\\\\s*[章话話节節回]|제\\\\s*\\\\d+\\\\s*화"
+            """(?i)\\b(chapter|chap(?:ter)?|episode|ep)\\.?\\s*[-#:.]?\\s*\\d+|第\\s*[一二三四五六七八九十百千万零〇两\\d]+\\s*[章话話节節回]|제\\s*\\d+\\s*화"""
         ).containsMatchIn(title)
         val path = runCatching { Uri.parse(chapter.url).path.orEmpty() }.getOrDefault("")
-        val pathHasChapter = Regex("(?i)/(?:chapter|chap|episode|ep)[-_/]?\\\\d+").containsMatchIn(path)
+        val pathHasChapter = Regex("""(?i)/(?:chapter|chap|episode|ep)[-_/]?\\d+""").containsMatchIn(path)
         return titleHasChapter || pathHasChapter
     }
 
