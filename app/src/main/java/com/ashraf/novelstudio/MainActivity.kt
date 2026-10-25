@@ -6150,13 +6150,17 @@ return t.length>=40?'TXT:'+t:'';
         if (chapter.text.trim().length < 180 || chapter.title.trim().length > 220) return false
         val title = chapter.title.trim()
         if (title.isBlank()) return false
-        if (chapter.number.isNotBlank()) return true
+        // Do not trust the parsed numeric label alone: some source extractors can see unrelated
+        // numbers in a book page title. Require chapter-like title or URL evidence.
         val titleHasChapter = Regex(
-            """(?i)\\b(chapter|chap(?:ter)?|episode|ep)\\.?\\s*[-#:.]?\\s*\\d+|第\\s*[一二三四五六七八九十百千万零〇两\\d]+\\s*[章话話节節回]|제\\s*\\d+\\s*화"""
+            """(?i)^\\s*(?:chapter|chap|episode|ep)\\.?\\s*[-#:.]?\\s*\\d+|^\\s*\\d{1,5}\\s*[-.:：、)]\\s*\\S|第\\s*[一二三四五六七八九十百千万零〇两\\d]+\\s*[章话話节節回]|제\\s*\\d+\\s*화"""
         ).containsMatchIn(title)
         val path = runCatching { Uri.parse(chapter.url).path.orEmpty() }.getOrDefault("")
-        val pathHasChapter = Regex("""(?i)/(?:chapter|chap|episode|ep)[-_/]?\\d+""").containsMatchIn(path)
-        return titleHasChapter || pathHasChapter
+        val pathHasChapter = Regex("""(?i)/(?:chapter|chap|episode|ep)(?:[-_/]?[a-z0-9-]+)?(?:/|$)""")
+            .containsMatchIn(path)
+        val numericChapterPath = Regex("""/\\d+/\\d+\\.html?$""", RegexOption.IGNORE_CASE)
+            .containsMatchIn(path)
+        return titleHasChapter || pathHasChapter || numericChapterPath
     }
 
     internal fun requestReaderTranslation(chapter: Chapter): Boolean {
