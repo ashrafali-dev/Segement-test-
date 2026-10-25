@@ -2471,6 +2471,10 @@ return t.length>=40?'TXT:'+t:'';
     private val wtrLabSystem by lazy { WtrLabSystem(this) }
     private val qidianSystem by lazy { QidianSystem(this) }
     private val novel543System by lazy { Novel543System(this) }
+    // Reader View hand-off state. The normal browser remains the fallback for unknown sources.
+    private val readerViewOfferedUrls = LinkedHashSet<String>()
+    private var readerViewOfferPendingUrl = ""
+    private val readerViewTranslationKeys = mutableSetOf<String>()
 
     // Background translation queue. All chatbot sites share the same request cooldown.
     private val queue = mutableListOf<Chapter>()
@@ -3012,6 +3016,7 @@ return t.length>=40?'TXT:'+t:'';
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ReaderViewBridge.attachMain(this)
         OcrRescan.resetDebug(this)   // OCR debug is a per-session tool: never leave it on by accident
         // Android 13+: lets the "scanning in background" notification show (the service works without it).
         if (Build.VERSION.SDK_INT >= 33 && !Prefs.bool(this, "askedNotifPerm") &&
@@ -6054,6 +6059,9 @@ return t.length>=40?'TXT:'+t:'';
             if (view === novelWv && !url.isNullOrBlank() && !webNovelCatalogPending) {
                 scheduleSavedTranslationCheck(url)
                 scheduleDeepSeekAutoTranslation(url)
+                // Supported text-source chapters can opt into the separate native Reader View.
+                // Unsupported sites keep the existing WebView experience without interruption.
+                offerReaderViewIfSupported(url)
             }
 
             if (view === novelWv && wtrLabSystem.matches(url)) startWtrWatch()
@@ -6064,6 +6072,101 @@ return t.length>=40?'TXT:'+t:'';
                 handler.postDelayed({ pollExtract(0, tk) }, 150)
             }
         }
+    }
+
+    /**
+     * Offer a clean reader only after a built-in adapter successfully extracts a real chapter.
+     * Merely matching a domain is insufficient: home, search, catalogue and login pages also
+     * live on supported sites and must continue to behave like normal browser pages.
+     */
+    private fun offerReaderViewIfSupported(pageUrl: String) {
+        if (isFinishing || isDestroyed || webModeOn()) return
+        val validatedUrl = ReaderSourceUrl.validate(pageUrl) ?: return
+        val match = SiteRegistry.resolve(this, validatedUrl) ?: return
+        val key = validatedUrl.substringBefore('#')
+        if (key in readerViewOfferedUrls || readerViewOfferPendingUrl == key) return
+        readerViewOfferPendingUrl = key
+        val token = navToken
+        handler.postDelayed({
+            if (readerViewOfferPendingUrl == key) readerViewOfferPendingUrl = ""
+            if (isFinishing || isDestroyed || token != navToken) return@postDelayed
+            if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) return@postDelayed
+            val liveMatch = SiteRegistry.resolve(this, novelWv.url) ?: return@postDelayed
+            if (liveMatch.adapter.id != match.adapter.id) return@postDelayed
+            match.adapter.extract(novelWv, 0) { chapter ->
+                if (readerViewOfferPendingUrl == key) readerViewOfferPendingUrl = ""
+                if (isFinishing || isDestroyed || token != navToken) return@extract
+                if (ReaderSourceUrl.validate(novelWv.url) != validatedUrl) return@extract
+                if (chapter == null || !isLikelyReaderChapter(chapter)) return@extract
+                readerViewOfferedUrls.add(key)
+                while (readerViewOfferedUrls.size > 64) {
+                    val oldest = readerViewOfferedUrls.firstOrNull() ?: break
+                    readerViewOfferedUrls.remove(oldest)
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("Open in Reader View?")
+                    .setMessage("\${chapter.title.ifBlank { chapter.novel }} is available in Novel Studio's clean reader with chatbot translation.")
+                    .setPositiveButton("Open in Reader View") { _, _ ->
+                        onChapter(chapter)
+                        val saved = Store.find(this, chapter)
+                        val cachedTranslation = saved?.let { Store.readRaw(this, it.id) }
+                            .orEmpty()
+                            .let { cleanReply(it) }
+                            .let { stripInternalMarkers(it) }
+                        startActivity(android.content.Intent(this, SourceReaderActivity::class.java).apply {
+                            putExtra(SourceReaderActivity.EXTRA_TITLE, chapter.title)
+                            putExtra(SourceReaderActivity.EXTRA_TEXT, chapter.text)
+                            putExtra(SourceReaderActivity.EXTRA_URL, chapter.url)
+                            putExtra(SourceReaderActivity.EXTRA_NOVEL, chapter.novel)
+                            putExtra(SourceReaderActivity.EXTRA_NUMBER, chapter.number)
+                            putExtra(SourceReaderActivity.EXTRA_NEXT, chapter.next)
+                            putExtra(SourceReaderActivity.EXTRA_PREV, chapter.prev)
+                            putExtra(SourceReaderActivity.EXTRA_CONTENT_SELECTOR, chapter.contentSel)
+                            putExtra(SourceReaderActivity.EXTRA_TITLE_SELECTOR, chapter.titleSel)
+                            putExtra(SourceReaderActivity.EXTRA_NEXT_SELECTOR, chapter.nextSel)
+                            putExtra(SourceReaderActivity.EXTRA_PREV_SELECTOR, chapter.prevSel)
+                            putExtra("source_reader_translation", cachedTranslation.takeIf { it.length >= 30 }.orEmpty())
+                        })
+                    }
+                    .setNegativeButton("Stay on website", null)
+                    .show()
+            }
+        }, 650L)
+    }
+
+    private fun isLikelyReaderChapter(chapter: Chapter): Boolean {
+        if (chapter.text.trim().length < 180 || chapter.title.trim().length > 220) return false
+        val title = chapter.title.trim()
+        if (title.isBlank()) return false
+        if (chapter.number.isNotBlank()) return true
+        val titleHasChapter = Regex(
+            "(?i)\\\\b(chapter|chap(?:ter)?|episode|ep)\\\\.?\\\\s*[-#:.]?\\\\s*\\\\d+|第\\\\s*[一二三四五六七八九十百千万零〇两\\\\d]+\\\\s*[章话話节節回]|제\\\\s*\\\\d+\\\\s*화"
+        ).containsMatchIn(title)
+        val path = runCatching { Uri.parse(chapter.url).path.orEmpty() }.getOrDefault("")
+        val pathHasChapter = Regex("(?i)/(?:chapter|chap|episode|ep)[-_/]?\\\\d+").containsMatchIn(path)
+        return titleHasChapter || pathHasChapter
+    }
+
+    internal fun requestReaderTranslation(chapter: Chapter): Boolean {
+        if (isFinishing || isDestroyed || ReaderSourceUrl.validate(chapter.url) == null) return false
+        val key = keyOf(chapter)
+        if (key.isBlank()) return false
+        onChapter(chapter)
+        val saved = Store.find(this, chapter)
+        val cached = saved?.let { Store.readRaw(this, it.id) }
+            .orEmpty()
+            .let { cleanReply(it) }
+            .let { stripInternalMarkers(it) }
+        if (cached.length >= 30 && ReaderViewBridge.translationCompleted(chapter.url, cached)) {
+            readerViewTranslationKeys.remove(key)
+            return true
+        }
+        readerViewTranslationKeys.add(key)
+        ReaderViewBridge.translationStarted(chapter.url)
+        val alreadyRunning = running?.let { keyOf(it) == key } == true
+        val alreadyQueued = queue.any { keyOf(it) == key }
+        if (!alreadyRunning && !alreadyQueued) autoFlow(chapter)
+        return true
     }
 
     private inner class NovelChrome : WebChromeClient() {
@@ -8546,13 +8649,23 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             val sameTarget = if (webModeOn() && ch.contentSel.isBlank()) shown === ch
                 else shown != null && keyOf(shown) == keyOf(ch)
             if (shown != null && sameTarget) {
-                applyTranslation(shown, rawTranslation, true)
+                val readerRequested = readerViewTranslationKeys.contains(savedKey)
+                val deliveredToReader = readerRequested && ReaderViewBridge.translationCompleted(ch.url, t)
+                readerViewTranslationKeys.remove(savedKey)
+                if (!deliveredToReader) {
+                    applyTranslation(shown, rawTranslation, true)
+                }
                 // Real-time page scans translate visible bubbles in sequence; don't prefetch a whole
                 // chapter into the same DeepSeek chat session.
                 if (!livePanelBatch) schedulePrefetch(shown)
-            } else if (livePanelBatch) {
-                // The reader changed before placement; leave these bubbles eligible for a later scan.
-                releaseDeepSeekHashBatch(ch)
+            } else {
+                if (readerViewTranslationKeys.remove(savedKey)) {
+                    ReaderViewBridge.translationFailed(ch.url, "The active chapter changed before this translation could be shown.")
+                }
+                if (livePanelBatch) {
+                    // The reader changed before placement; leave these bubbles eligible for a later scan.
+                    releaseDeepSeekHashBatch(ch)
+                }
             }
             if (!livePanelBatch) {
                 toast("✅ Translation saved" + (if (ch.number.isNotEmpty()) " (Ch ${ch.number})" else ""))
@@ -8567,6 +8680,15 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     // on failure: stop the queue, keep the chapter on the clipboard so you can do it by hand
     private fun failJob(tok: Int, ch: Chapter, msg: String, fallback: Boolean = false, autoRetry: Boolean = false) {
         if (tok != runToken) return
+        val readerKey = keyOf(ch)
+        if (readerKey in readerViewTranslationKeys) {
+            if (autoRetry) {
+                ReaderViewBridge.translationStarted(ch.url)
+            } else {
+                readerViewTranslationKeys.remove(readerKey)
+                ReaderViewBridge.translationFailed(ch.url, msg)
+            }
+        }
         NovelStudioAnalytics.track(
             this, "translation_failed",
             mode = analyticsReadMode(),
@@ -10813,6 +10935,7 @@ ${rows.take(220).joinToString("\n")}
         try { prefetchWv.destroy() } catch (_: Exception) {}
         botWebViews.values.toSet().forEach { wv -> try { wv.destroy() } catch (_: Exception) {} }
         botWebViews.clear()
+        ReaderViewBridge.detachMain(this)
         super.onDestroy()
     }
 }
