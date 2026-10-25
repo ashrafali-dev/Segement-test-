@@ -6237,6 +6237,116 @@ return t.length>=40?'TXT:'+t:'';
         return true
     }
 
+    /**
+     * Run image-chapter OCR on the clean Reader WebView, then feed the result into the same
+     * chatbot queue used by the current app. This does not scrape or reload a second website.
+     */
+    internal fun requestComicReaderTranslation(
+        readerWebView: WebView,
+        imageChapter: ImageChapter
+    ): Boolean {
+        val sourceUrl = ReaderSourceUrl.validate(imageChapter.url) ?: return false
+        if (isFinishing || isDestroyed ||
+            !ReaderViewBridge.isActiveComicReader(readerWebView, sourceUrl)) return false
+
+        comicReaderOcrToken++
+        val token = comicReaderOcrToken
+        comicReaderOcrHandle?.cancel()
+        comicReaderOcrHandle = null
+
+        // The Web Mode extractor uses a single OCR worker. Give the dedicated reader's explicit
+        // request priority over an old foreground/read-ahead job from the web page underneath it.
+        webModeHandle?.cancel()
+        webModeHandle = null
+        webModePrefetchHandle?.cancel()
+        webModePrefetchHandle = null
+        aheadOcrHandle?.cancel()
+        aheadOcrHandle = null
+        aheadOcrSeq++
+        aheadOcrStage = ""
+        aheadOcrPct = -1
+        if (DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn()) {
+            deepSeekPollEvalSeq++
+            deepSeekProbeInFlight = false
+            deepSeekPollBusy = false
+            handler.removeCallbacks(deepSeekVisiblePoll)
+        }
+
+        ReaderViewBridge.comicOcrProgress(sourceUrl, "Preparing comic pages for OCR…", 1)
+        comicReaderOcrHandle = webMode.start(WebModeRequest(
+            webView = readerWebView,
+            isValid = {
+                token == comicReaderOcrToken &&
+                    !isFinishing && !isDestroyed &&
+                    ReaderViewBridge.isActiveComicReader(readerWebView, sourceUrl)
+            },
+            force = false,
+            onProgress = { stage, pct ->
+                if (token == comicReaderOcrToken) {
+                    ReaderViewBridge.comicOcrProgress(sourceUrl, stage, pct)
+                }
+            },
+            onDone = done@{ outcome ->
+                if (token != comicReaderOcrToken) return@done
+                comicReaderOcrHandle = null
+                if (!ReaderViewBridge.isActiveComicReader(readerWebView, sourceUrl)) return@done
+                when (outcome) {
+                    is WebModeOutcome.Failure -> {
+                        ReaderViewBridge.comicTranslationFailed(sourceUrl, outcome.message)
+                    }
+                    is WebModeOutcome.Success -> {
+                        val extracted = outcome.chapter
+                        val chapter = extracted.copy(
+                            title = imageChapter.title.ifBlank { extracted.title },
+                            next = imageChapter.next ?: extracted.next,
+                            prev = imageChapter.prev ?: extracted.prev,
+                            url = sourceUrl,
+                            novel = imageChapter.novel.ifBlank { extracted.novel },
+                            number = imageChapter.number.ifBlank { extracted.number },
+                            contentSel = "",
+                            isImageChapter = true
+                        )
+                        if (chapter.text.trim().length < 2) {
+                            ReaderViewBridge.comicTranslationFailed(sourceUrl, "OCR did not return chapter text.")
+                            return@done
+                        }
+                        onChapter(chapter)
+                        ReaderViewBridge.comicOcrProgress(sourceUrl, "OCR complete; preparing translation…", 100)
+
+                        // Reuse a full saved chapter translation when it matches this exact source.
+                        val saved = Store.find(this, chapter)
+                        val savedRaw = saved?.let { Store.readRaw(this, it.id) }.orEmpty()
+                        if (savedRaw.length >= 30 &&
+                            ReaderViewBridge.comicTranslationCompleted(sourceUrl, savedRaw)) {
+                            return@done
+                        }
+
+                        val key = keyOf(chapter)
+                        comicReaderTranslationKeys.add(key)
+                        ReaderViewBridge.comicTranslationStarted(sourceUrl)
+                        autoFlow(chapter)
+                    }
+                }
+            }
+        ))
+        return true
+    }
+
+    /** Called when the native comic reader closes; invalidate OCR callbacks and resume browser realtime. */
+    internal fun onComicReaderClosed(sourceUrl: String) {
+        if (ReaderSourceUrl.validate(sourceUrl) != null) {
+            comicReaderOcrToken++
+            comicReaderOcrHandle?.cancel()
+            comicReaderOcrHandle = null
+            comicReaderTranslationKeys.removeAll { it.contains(sourceUrl.substringBefore('#')) }
+            handler.post {
+                if (!isFinishing && !isDestroyed) {
+                    scheduleDeepSeekAutoTranslation(novelWv.url.orEmpty())
+                }
+            }
+        }
+    }
+
     private inner class NovelChrome : WebChromeClient() {
         override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
             // Novel reader should stay in the same WebView. Popup/new-window
