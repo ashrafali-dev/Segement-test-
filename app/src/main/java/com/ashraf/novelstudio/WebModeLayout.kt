@@ -288,10 +288,12 @@ internal object WebModeLayoutStore {
         // keeping the same visible canvas and the same DOM overlay alive.
         val sourceKey = canvasIdentityKey(url, normalizedSource)
         val previous = canvasPixelSnapshots[sourceKey]
-        val previousSource = canvasPixelSourceBySlot.put(sourceKey, normalizedSource)
-        canvasPixelSnapshots[sourceKey] = signature
-        if (previous == null) return false
-        if (previous.length != signature.length) return false
+        val previousSource = canvasPixelSourceBySlot[sourceKey]
+        if (previous == null || previous.length != signature.length) {
+            canvasPixelSnapshots[sourceKey] = signature
+            canvasPixelSourceBySlot[sourceKey] = normalizedSource
+            return false
+        }
 
         var comparable = 0
         var changed = 0
@@ -302,9 +304,12 @@ internal object WebModeLayoutStore {
             comparable++
             if (a != b) changed++
         }
-        // Require a broad change across the canvas, not a few antialiasing pixels or a UI artifact.
+        // Keep the last stable page as the baseline until a real transition is confirmed. This allows
+        // several small canvas repaints to accumulate instead of losing the change on every screenshot.
         if (comparable < 16 || changed.toFloat() / comparable.toFloat() < 0.45f) return false
 
+        canvasPixelSnapshots[sourceKey] = signature
+        canvasPixelSourceBySlot[sourceKey] = normalizedSource
         canvasGenerationBySource[sourceKey] = (canvasGenerationBySource[sourceKey] ?: 0L) + 1L
         val pageLayoutKey = canvasStateKey(k, normalizedSource)
         val changedSources = LinkedHashSet<String>()
