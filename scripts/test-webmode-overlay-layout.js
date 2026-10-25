@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const writer = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt", "utf8");
 const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeExtractor.kt", "utf8");
 const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
+const remover = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
 const libMatch = extractor.match(/private const val LIB = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(libMatch, "could not locate WebModeExtractor page-discovery JavaScript");
@@ -27,6 +28,13 @@ assert.ok(rescan.includes("MIN_REMOTE_AUDIT_HEIGHT = 12"), "Lens audit must allo
 assert.ok(rescan.includes("findUncovered(bmp, base.blocks, REMOTE_AUDIT_CANDIDATE_LIMIT)"), "Lens audit must inspect multiple candidates");
 assert.ok(rescan.includes("REMOTE_AUDIT_MAX_REGIONS = 2"), "Lens audit must retry up to two likely missed regions");
 assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed labels must be prioritized over partial re-reads");
+// No-AI text removal: stable local background should allow colour-mask erasure before conservative component checks.
+assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
+  "text remover must estimate local background outside the OCR box");
+assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI flat-background path");
+assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
+  "flat-background erasure must expand the mask to clear anti-aliased text edges");
+assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
