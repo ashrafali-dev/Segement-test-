@@ -922,7 +922,7 @@ internal class WebModeExtractor(
                     return
                 }
                 diag.chars == 0 -> { fail(WebModeError.OCR_EMPTY, "Scanned ${diag.decoded} images; OCR found no text"); return }
-                WebModeLogic.tooManyFailures(total, diag.failed) -> {
+                WebModeLogic.tooManyFailures(total, diag.failed) && !(req.visibleOnly && diag.chars > 0) -> {
                     fail(WebModeError.IMAGES_NOT_LOADED, "${diag.failed} of $total panels failed; the chapter would be incomplete")
                     return
                 }
@@ -1873,7 +1873,9 @@ internal class WebModeExtractor(
                     (src.startsWith("https://", true) || src.startsWith("http://", true))) {
                     try {
                         // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
-                        WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode)
+                        val tClean = SystemClock.elapsedRealtime()
+                        val cleaned = WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead")
+                        OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
@@ -2038,6 +2040,9 @@ internal class WebModeExtractor(
             val dets: List<BubbleDetectorCore.Det>? =
                 if (earlyDet != null) { try { earlyDet.get() } catch (_: java.util.concurrent.ExecutionException) { null } }
                 else if (Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+            OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
+                "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
+                "lines=${blocks.size} last=${BubbleDetector.lastInfo.ifBlank { "-" }} parallel=${earlyDet != null}")
             fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
                 dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
@@ -2113,7 +2118,10 @@ internal class WebModeExtractor(
                 // Realtime screens optimise for latency: flood-filling up to 1.2M pixels around
                 // every OCR block repeatedly was the dominant freeze on long/mobile Webtoon panels.
                 // Keep this expensive interior/leftover audit only for thorough chapter extraction.
-                val inter: IntArray? = if (fastMode) null else try {
+                var fromDet = false
+                val inter: IntArray? = if (fastMode) {
+                    BubbleDetectorCore.interiorFor(dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]).also { fromDet = it != null }
+                } else try {
                     WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
                         bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
                 } catch (_: Exception) { null }
@@ -2135,7 +2143,7 @@ internal class WebModeExtractor(
                 if (i !in inside) continue
                 val members = inside.filter { !consumed[it] }
                 if (i !in members) continue
-                if (members.size < 2 && bands.isNullOrEmpty()) continue   // a lone, fully read line needs nothing
+                if (members.size < 2 && bands.isNullOrEmpty() && !fromDet) continue   // a lone, fully read line needs nothing
 
                 // The closed speech-bubble outline is stronger evidence than line spacing/alignment:
                 // every OCR row whose centre lies inside this same interior belongs to ONE bubble.
@@ -2418,7 +2426,7 @@ internal class WebModeExtractor(
                 // This OCR runs on ns-webmode. Job.startUrl was captured on the UI thread, so never read WebView.url here.
                 val currentHost = hostOf(startUrl).lowercase().removePrefix("www.")
                 val canvasReader = currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")
-                if (canvasReader || !Prefs.bool(wv.context, "lensAudit", true) || core.blocks.isEmpty() && fastMode) return core
+                if (canvasReader || !Prefs.bool(wv.context, "lensAudit", false) || core.blocks.isEmpty() && fastMode) return core
                 return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
                 catch (_: Exception) { core } catch (_: OutOfMemoryError) { core }
             }

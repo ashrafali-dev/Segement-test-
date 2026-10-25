@@ -10,9 +10,22 @@ internal object WebModeLogic {
     fun normalizeUrl(u: String): String = u.substringBefore('#').trim()
 
     /** Remove duplicate image URLs and order panels by their position in the page. */
-    fun dedupeAndOrder(refs: List<PanelRef>): List<PanelRef> =
-        refs.distinctBy { normalizeUrl(it.src) }
+    fun dedupeAndOrder(refs: List<PanelRef>): List<PanelRef> {
+        val ordered = refs.distinctBy { normalizeUrl(it.src) }
             .sortedWith(compareBy<PanelRef>({ it.top }, { it.left }))
+        // Lazy-loading pages keep a clone of the same picture at exactly the same position (the URL differs only in its
+        // query string). The clone was downloaded and OCR-ed again, and its failed download sent the whole job to the
+        // 17-20 s screen-capture fallback.
+        val out = ArrayList<PanelRef>(ordered.size)
+        for (r in ordered) {
+            val twin = out.any { o ->
+                Math.abs(o.top - r.top) <= 2 && Math.abs(o.left - r.left) <= 2 &&
+                    Math.abs(o.w - r.w) <= 2 && Math.abs(o.h - r.h) <= 2
+            }
+            if (!twin) out.add(r)
+        }
+        return out
+    }
 
     private val KO = Regex("naver\\.com|kakao|webtoons\\.com/ko|comic\\.naver", RegexOption.IGNORE_CASE)
     private val JA = Regex("webtoons\\.com/ja|comic-walker|piccoma|pixiv|shonenjump", RegexOption.IGNORE_CASE)

@@ -10,5 +10,5 @@ import java.util.concurrent.locks.ReentrantLock
  * Lock order is always: OnnxHeavyGate.lock -> the engine's own monitor.
  */
 internal object OnnxHeavyGate {
-    val lock = ReentrantLock()
+    val lock = ReentrantLock(true)
 }

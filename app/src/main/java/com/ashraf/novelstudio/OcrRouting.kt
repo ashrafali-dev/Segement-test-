@@ -318,6 +318,14 @@ internal class RoutingOcrEngine : OcrEngine {
             // Empty Lens OCR is still a Lens result; keep engines independent.
             OcrEngineStatus.lastError = "Google Lens returned no usable text for ${script.name}; trying ML Kit fallback"
             Log.w("NovelStudioOCR", OcrEngineStatus.lastError)
+            // Lens answered normally (HTTP 200) and found no text: ML Kit on the same picture only repeats the work
+            // (1-2 s per art-only panel; in the report it found nothing every time). Set lensEmptyFallback=1 to bring it back.
+            if (lens != null && engineDetail.contains("http=200") &&
+                appContext?.let { Prefs.get(it, "lensEmptyFallback", "0") } != "1") {
+                report("lens(empty)", false)
+                lensThread.set(true)
+                return lens ?: OcrResult(emptyList())
+            }
             report("mlkit(lens-empty-fallback)", true)
             lensThread.set(false)
             return try { run(mlKit) } catch (fallback: InterruptedException) {

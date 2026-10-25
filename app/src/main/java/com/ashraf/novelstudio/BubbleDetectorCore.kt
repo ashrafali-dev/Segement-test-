@@ -150,6 +150,35 @@ internal object BubbleDetectorCore {
 
     // ---- how the extractor uses detections ---------------------------------------------------------------------
 
+    /**
+     * Inner area of the speech bubble the detector found around a text line [l,t,r,b], or null when it is not sure.
+     * Real-time reads skip the slow pixel flood-fill, so until now the translation was drawn in the box of the OCR lines
+     * only - the detector knew the real bubble but its box was never used for placement.
+     */
+    fun interiorFor(dets: List<Det>?, l: Int, t: Int, r: Int, b: Int): IntArray? {
+        if (dets == null) return null
+        val cx = (l + r) / 2f
+        val cy = (t + b) / 2f
+        var best: Det? = null
+        for (d in dets) {
+            if (d.label != CLS_BUBBLE || !d.contains(cx, cy)) continue
+            if (best == null || d.area < best.area) best = d
+        }
+        val d = best ?: return null
+        // The lettering must sit (almost) completely inside: otherwise this is a neighbouring or cut-off box.
+        if (l < d.l - 4 || r > d.r + 4 || t < d.t - 4 || b > d.b + 4) return null
+        // A "bubble" many times larger than its text is a panel-sized false alarm.
+        val textArea = Math.max(1L, (r - l).toLong() * (b - t).toLong())
+        if ((d.r - d.l).toLong() * (d.b - d.t).toLong() > textArea * 40L) return null
+        // Pull the box in a little: the outline and the tail are part of the detector box, round bubbles are not boxes.
+        val mw = Math.max(2, ((d.r - d.l) * 0.06f).toInt())
+        val mh = Math.max(2, ((d.b - d.t) * 0.06f).toInt())
+        return intArrayOf(
+            Math.min(d.l + mw, l), Math.min(d.t + mh, t),
+            Math.max(d.r - mw, r), Math.max(d.b - mh, b)
+        )
+    }
+
     /** Smallest bubble-like box (bubble / text_bubble) around the point, or null. */
     fun bubbleAt(dets: List<Det>?, x: Float, y: Float): Det? {
         if (dets == null) return null
