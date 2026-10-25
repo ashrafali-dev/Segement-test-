@@ -6319,6 +6319,9 @@ return t.length>=40?'TXT:'+t:'';
         comicReaderOcrHandle = webMode.start(WebModeRequest(
             webView = readerWebView,
             visibleOnly = visibleOnly,
+            // Reader View is user-facing translation, so group all lines within a speech balloon
+            // before sending text to the chatbot, even when the requested batch is viewport-only.
+            thoroughVisibleOcr = true,
             isValid = {
                 token == comicReaderOcrToken &&
                     !isFinishing && !isDestroyed &&
