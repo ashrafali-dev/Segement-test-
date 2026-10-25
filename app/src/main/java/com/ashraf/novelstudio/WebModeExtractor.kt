@@ -3106,7 +3106,7 @@ function link(kind){
 var og=document.querySelector('meta[property="og:title"]');
 var title=q('.subj_episode')||q('h1')||(og&&og.content)||document.title||'';
 var novel=q('.detail_header .subj')||q('a.subj')||q('.series-title')||q('.comic-title')||'';
-return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,title:title,novel:novel,next:link('next'),prev:link('prev'),imgs:c.slice(0,600)});
+return JSON.stringify({lang:document.documentElement.lang||'',url:window.__nsSourceUrl||location.href,title:window.__nsSourceTitle||title,novel:window.__nsSourceNovel||novel,next:window.__nsSourceNext||link('next'),prev:window.__nsSourcePrev||link('prev'),imgs:c.slice(0,600)});
 """
     }
 }
