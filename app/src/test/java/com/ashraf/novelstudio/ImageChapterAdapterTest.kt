@@ -58,6 +58,18 @@ class ImageChapterAdapterTest {
         assertEquals(listOf(smallPanel), NaverComicPageSources.prefer(listOf(smallPanel), emptyList()))
     }
 
+
+    @Test
+    fun extractionScriptUsesMihonSelectorsAndLazyImageFallbacks() {
+        val script = NaverComicImageAdapter.EXTRACT_SCRIPT
+        assertTrue(script.contains(".wt_viewer img"))
+        assertTrue(script.contains(".toon_view_lst img.toon_image"))
+        assertTrue(script.contains("data-src"))
+        assertTrue(script.contains("viewerPages"))
+        assertTrue(script.contains("toonPages"))
+        assertFalse(script.contains("naturalWidth < 180"))
+    }
+
     @Test
     fun imageUrlsAreValidatedDeduplicatedAndKeepSourceOrder() {
         val urls = ImageChapterPageUrls.orderedDistinct(
