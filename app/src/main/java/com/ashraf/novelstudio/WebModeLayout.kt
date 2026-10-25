@@ -336,7 +336,7 @@ internal object WebModeLayoutStore {
         val sources = currentLayout.bubbles.asSequence()
             .map { WebModeLogic.normalizeUrl(it.src) }
             .filter { it.startsWith("ns-canvas:") }
-            .distinct()
+            .distinctBy { canvasSourceSlot(it) ?: it }
             .toList()
         return sources.associate { src ->
             val sourceKey = canvasStateKey(k, src)
