@@ -335,17 +335,29 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
     }
 
     private fun applyOverlay() {
-        val layout = lastLayout ?: WebModeLayoutStore.getScan(chapter.url)
-        val aligned = lastAligned ?: layout?.let { WebModeLayout.align(lastRawTranslation, it) }
-        if (layout == null || aligned == null || aligned.none { !it.isNullOrBlank() }) {
+        val scanLayout = lastLayout ?: WebModeLayoutStore.getScan(chapter.url)
+            ?: WebModeLayoutStore.get(this, chapter.url)
+        val aligned = lastAligned ?: scanLayout?.let { WebModeLayout.align(lastRawTranslation, it) }
+        if (scanLayout == null || aligned == null || aligned.none { !it.isNullOrBlank() }) {
             Toast.makeText(this, "Could not match translation to the comic bubbles.", Toast.LENGTH_LONG).show()
             return
         }
-        lastLayout = layout
-        lastAligned = aligned
+
+        // Real-time mode returns a viewport-sized layout, not a full-chapter layout.
+        // Merge each newly translated viewport into the saved layout so scrolling does not
+        // erase translations already drawn over earlier pages/bubbles.
+        val mergedLayout = WebModeLayoutStore.mergeTranslated(this, chapter.url, scanLayout, aligned)
+        val mergedAligned = mergedLayout.bubbles.map { it.translatedText.takeIf(String::isNotBlank) }
+        if (mergedAligned.none { !it.isNullOrBlank() }) {
+            Toast.makeText(this, "Translation could not be matched to the comic bubbles.", Toast.LENGTH_LONG).show()
+            return
+        }
+        lastLayout = mergedLayout
+        lastAligned = mergedAligned
+
         val script = WebModeWriter.bubbleScript(
-            layout,
-            aligned,
+            mergedLayout,
+            mergedAligned,
             Prefs.fontFile(this),
             chapter.url.substringBefore('#')
         )
