@@ -160,8 +160,9 @@ function assertCollisionFree(items, message) {
 
 assert.ok(bodyMatch[1].includes("coverLayer") && bodyMatch[1].includes("textLayer"),
   "background fills and translated text must occupy separate z-layers");
-assert.ok(bodyMatch[1].includes("overflowWrap='anywhere'"),
-  "last-resort wrapping must keep long text visible");
+assert.ok(!bodyMatch[1].includes("overflowWrap='anywhere'") && !bodyMatch[1].includes("overflow-wrap:anywhere"),
+  "words must never be split across lines: long words shrink the font instead");
+assert.ok(bodyMatch[1].includes("Words are never split"), "fit() must document the no-split rule");
 assert.ok(!bodyMatch[1].includes("text-overflow:ellipsis") && !bodyMatch[1].includes("TruncateAt.END"),
   "overlay must never ellipsize translations");
 assert.ok(bodyMatch[1].includes("Same-image OCR boxes must keep their source anchors"),
