@@ -61,38 +61,6 @@ internal object BubbleFit {
      * (they count as bubble content, not as an outline). Returns null when no closed flat bubble is found
      * (lettering on artwork, a tail that leaks into the picture, a plain page) so the caller keeps its old box.
      */
-    /**
-     * Same result from a balloon the YOLO detector found: the mask comes from the model instead of the paper-colour
-     * flood. Chooses the smallest balloon that contains the centre of [seed].
-     */
-    fun fromBalloons(balloons: List<YoloBubbleDetector.Balloon>, seed: IntArray, others: List<IntArray>): Fit? {
-        val cx = (seed[0] + seed[2]) / 2
-        val cy = (seed[1] + seed[3]) / 2
-        val b = balloons.filter { it.contains(cx, cy) }.minByOrNull { it.area() } ?: return null
-        val filled = b.filled.copyOf()
-        // recognised lettering always counts as inside the balloon it sits in
-        for (o in others) {
-            val ocx = (o[0] + o[2]) / 2
-            val ocy = (o[1] + o[3]) / 2
-            if (!b.contains(ocx, ocy)) continue
-            val x0 = ((o[0] - b.ox) / b.ds).coerceIn(0, b.sw)
-            val x1 = ((o[2] - b.ox + b.ds - 1) / b.ds).coerceIn(x0, b.sw)
-            val y0 = ((o[1] - b.oy) / b.ds).coerceIn(0, b.sh)
-            val y1 = ((o[3] - b.oy + b.ds - 1) / b.ds).coerceIn(y0, b.sh)
-            for (y in y0 until y1) for (x in x0 until x1) filled[y * b.sw + x] = true
-        }
-        val localSeed = intArrayOf(
-            (seed[0] - b.ox).coerceIn(0, b.w), (seed[1] - b.oy).coerceIn(0, b.h),
-            (seed[2] - b.ox).coerceIn(0, b.w), (seed[3] - b.oy).coerceIn(0, b.h)
-        )
-        val res = try { BubbleFitCore.completeMask(filled, b.sw, b.sh, b.ds, localSeed, b.w, b.h) } catch (_: Exception) { null } ?: return null
-        return Fit(
-            interior = intArrayOf(res.interior[0] + b.ox, res.interior[1] + b.oy, res.interior[2] + b.ox, res.interior[3] + b.oy),
-            safe = intArrayOf(res.safe[0] + b.ox, res.safe[1] + b.oy, res.safe[2] + b.ox, res.safe[3] + b.oy),
-            mask = res.mask, ox = b.ox, oy = b.oy
-        )
-    }
-
     fun analyse(bmp: Bitmap, seed: IntArray, others: List<IntArray>): Fit? {
         // A bubble much larger than its lettering does not fit the small first window (its paper reaches the window
         // edge and it looks like an open page): look again with a wider window before giving up.

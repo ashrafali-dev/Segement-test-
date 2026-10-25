@@ -53,9 +53,10 @@ internal object WebModeTextRemover {
 
         try {
             var totalRemoved = 0
-            // AI inpainting (optional, downloaded on request) is slow on a phone: only a few artwork bubbles per image.
-            var aiBudget = 3
-            var aiWanted = Prefs.bool(context, "wmAiInpaint", false) && WebModeInpainter.isReady(context) &&
+            // AI inpainting (optional, downloaded on request; used automatically once installed) is slow on a phone:
+            // only a few artwork bubbles / free-text boxes per image.
+            var aiBudget = 6
+            var aiWanted = Prefs.bool(context, "wmAiInpaint", true) && WebModeInpainter.isReady(context) &&
                 !WebModeInpainter.tooSlow
             if (aiWanted && !WebModeInpainter.isLoaded()) {
                 // Loading the model takes several seconds: do it in the background; THIS image uses the fast cleaner
@@ -337,6 +338,9 @@ internal object WebModeTextRemover {
                     aiLastMs = android.os.SystemClock.elapsedRealtime() - t0
                     if (aiFill != null) aiBudget--
                 }
+                // Free lettering (sound effects on artwork) is only erased when the AI inpainter really did it: the
+                // onion-peel fill smears artwork, and an untouched original under the overlay is the safer result.
+                if (bubble.free && aiFill == null) continue
                 // Artwork without AI: onion-peel (Telea-style) fill, outside in, layer by layer.
                 val tele = if (soft && aiFill == null)
                     onionFill(region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg) else null

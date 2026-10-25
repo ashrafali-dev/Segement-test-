@@ -31,8 +31,10 @@ internal object WebModeInpainter {
 
     private val downloading = AtomicBoolean(false)
     private val warming = AtomicBoolean(false)
-    /** Set when one inpaint took longer than 9 s on this phone: AI is skipped from then on (until the app restarts). */
-    @Volatile var tooSlow = false
+    /** Set when one inpaint took longer than 9 s on this phone: AI is skipped for [SLOW_PAUSE_MS], then tried again. */
+    @Volatile private var slowUntil = 0L
+    private const val SLOW_PAUSE_MS = 180_000L
+    val tooSlow: Boolean get() = android.os.SystemClock.elapsedRealtime() < slowUntil
     @Volatile private var session: OrtSession? = null
     @Volatile private var sessionFailed = false
     @Volatile private var imageName = "image"
@@ -237,7 +239,7 @@ internal object WebModeInpainter {
                 if (sx !in 0 until side || sy !in 0 until side) continue
                 res[at] = big[sy * side + sx]
             }
-            if (SystemClock.elapsedRealtime() - t0 > 9000L) tooSlow = true
+            if (SystemClock.elapsedRealtime() - t0 > 9000L) slowUntil = SystemClock.elapsedRealtime() + SLOW_PAUSE_MS
             return res
         } catch (_: Throwable) {
             return null

@@ -1852,10 +1852,6 @@ internal class WebModeExtractor(
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
             cropFallback: Boolean = false, forceFresh: Boolean = false
         ): PanelOcr? {
-            // The hidden manga WebView is unrelated to Google Lens/ML Kit. Do not initialise it for every Chinese/English panel.
-            if (Prefs.get(wv.context, "ocrEngine", "mlkit") == "manga") {
-                com.ashraf.novelstudio.japanesemanga.JapaneseMangaRuntime.init(wv.context)
-            }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             val w = bounds.outWidth
@@ -2026,9 +2022,12 @@ internal class WebModeExtractor(
             if (blocks.isEmpty()) return
             val rects = blocks.map { WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
             val k = sample.toFloat()
-            // Optional precise balloon masks (one model run per slice), null when not installed/enabled.
-            val yoloBalloons: List<YoloBubbleDetector.Balloon>? =
-                if (Prefs.bool(wv.context, "wmBubbleFit", true)) YoloBubbleDetector.detect(wv.context, bmp) else null
+            // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
+            // It only adds information: which lines belong to different bubbles and which lettering is free text.
+            val dets: List<BubbleDetectorCore.Det>? =
+                if (Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+            fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
+                dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
             // A flat speech bubble can contain lettering that the first pass missed.
             // Do this check for LONG blocks too: a long partial read is still partial.
@@ -2049,6 +2048,8 @@ internal class WebModeExtractor(
                 // Non-transitive grouping + image evidence (outline between two lines) -- see BubbleGrouping.groups.
                 val tg = android.os.SystemClock.elapsedRealtime()
                 val grp = BubbleGrouping.groupContaining(blocks, i, pool.filter { !consumed[it] }) { x, y ->
+                    // The detector saw two different bubble outlines around the two lines: never one sentence.
+                    BubbleDetectorCore.inDifferentBubbles(dets, x.cx, x.cy, y.cx, y.cy) ||
                     OcrPost.outlineBetween(bmp, x, y) || run {
                         // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
                         // never one sentence. Unknown shape (null) keeps the geometry decision.
@@ -2116,7 +2117,8 @@ internal class WebModeExtractor(
                 val inside = blocks.indices.filter { j ->
                     val cxj = blocks[j].cx
                     val cyj = blocks[j].cy
-                    cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3]
+                    cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3] &&
+                        (j == i || !BubbleDetectorCore.inDifferentBubbles(dets, b.cx, b.cy, cxj, cyj))
                 }
                 if (i !in inside) continue
                 val members = inside.filter { !consumed[it] }
@@ -2190,16 +2192,11 @@ internal class WebModeExtractor(
                 // tiny) or into an oval's bounding box (its corners lie outside the outline: text left the bubble).
                 var tL = 0; var tT = 0; var tR = 0; var tB = 0
                 var coverBands: List<IntArray> = emptyList()
-                if (!rotated && Prefs.bool(wv.context, "wmBubbleFit", true)) {
+                // Free lettering (sound effects, narration on artwork) has no bubble to fit into.
+                if (!rotated && !freeAt(i) && Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     val seedBox = refinedSeed[i] ?: rects[i]
                     val tFit = android.os.SystemClock.elapsedRealtime()
-                    // Precise balloons from the optional YOLO model when it is installed and enabled; otherwise (or when it
-                    // found no balloon around this lettering) the light pixel-based finder.
-                    val yolo = yoloBalloons
-                    val fit = try {
-                        (if (yolo != null) BubbleFit.fromBalloons(yolo, seedBox, rects) else null)
-                            ?: BubbleFit.analyse(bmp, seedBox, rects)
-                    } catch (_: Throwable) { null }
+                    val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
                     fitMs += android.os.SystemClock.elapsedRealtime() - tFit
                     if (fit != null) {
                         val sf = fit.safe
@@ -2239,7 +2236,7 @@ internal class WebModeExtractor(
                     w = bw * k / fullW, h = bh * k / fullH,
                     angle = if (rotated) tilt else 0f,
                     font = (refinedFont[i] ?: b.fontPx) * k / fullW,
-                    bg = s.bg, fg = s.fg, fg2 = s.fg2, soft = s.soft, stroke = s.stroke,
+                    bg = s.bg, fg = s.fg, fg2 = s.fg2, soft = s.soft || freeAt(i), free = freeAt(i), stroke = s.stroke,
                     sourceText = text,
                     tcx = if (tR > tL) (x0 + (tL + tR) / 2f * k) / fullW else 0f,
                     tcy = if (tR > tL) (y0 + (tT + tB) / 2f * k) / fullH else 0f,
@@ -2411,9 +2408,6 @@ internal class WebModeExtractor(
             if (fastMode || !Prefs.bool(wv.context, "ocrRescan", true)) return core
             // Lens already read the whole panel; skip the extra network-backed rescan when it returned text.
             if (routing?.lastRouteUsedLens() == true) return core
-            // The Japanese manga engine has its own detector; do not run it once per crop.
-            if (st.current == OcrScript.JAPANESE &&
-                com.ashraf.novelstudio.japanesemanga.JapaneseMangaRuntime.isAvailable()) return core
             return try {
                 OcrRescan.augment(wv.context, engine, bmp, core, st.current, fastMode)
             } catch (_: Exception) {

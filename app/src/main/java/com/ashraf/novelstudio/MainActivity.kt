@@ -2077,13 +2077,16 @@ return t.length>=40?'TXT:'+t:'';
                 // New image URLs trigger immediately; a long safety recheck only catches readers that mutate
                 // pixels without changing their image URL. Avoid re-OCRing the same panel every 3 s.
                 val runningAhead = running?.let { rtAheadTranslationTasksByJobKey.containsKey(keyOf(it)) } == true
-                val periodicRecheck = hasImages && !runningAhead &&
+                // A fast flick through the page is not read: the panel is gone before OCR could finish. Slow
+                // reading and standing still are never held back (see ScrollGate).
+                val scrollHold = ScrollGate.holdOcr(android.os.SystemClock.elapsedRealtime(), novelWv.height)
+                val periodicRecheck = hasImages && !runningAhead && !scrollHold &&
                     signature != deepSeekStallBlockedSignature &&
-                    now - deepSeekLastOcrAtMs >= 10000L
+                    now - deepSeekLastOcrAtMs >= 45000L
                 // Wait for scrolling to settle before starting network OCR. This ~300 ms debounce
                 // avoids competing with fast flick-scrolls and prevents repeated OCR on transient panels.
                 if (signature != deepSeekPendingSig) { deepSeekPendingSig = signature; deepSeekPendingSince = now }
-                val settled = now - deepSeekPendingSince >= 300L
+                val settled = now - deepSeekPendingSince >= 300L && !scrollHold
                 // Foreground OCR may pre-empt only an ahead-translation job; it must never interrupt
                 // a visible-panel translation or a user-initiated extraction.
                 val idle = webModeHandle == null &&
@@ -2104,7 +2107,7 @@ return t.length>=40?'TXT:'+t:'';
                 // Keep the DOM probe light enough that it does not compete with touch scrolling.
                 // Rule: the panel in front of the reader comes first. Look ahead only when the visible screen is
                 // already read (nothing new waiting) - never while a changed screen is still waiting for its turn.
-                if (hasImages && webModeHandle == null && aheadOcrHandle == null && !changed &&
+                if (hasImages && !scrollHold && webModeHandle == null && aheadOcrHandle == null && !changed &&
                     // Keep a bounded OCR/translation pipeline: allow the next ten-panel batch
                     // to be prepared while the previous batch is still being translated.
                     rtAheadTranslationQueue.size < 4 &&
@@ -3219,7 +3222,11 @@ return t.length>=40?'TXT:'+t:'';
         var pullDownStartX = 0f
         var barMoveLastY = 0f
         var barMoveAccum = 0f
-        novelWv.setOnScrollChangeListener { _, _, _, _, _ -> novelActivityAtMs = android.os.SystemClock.elapsedRealtime() }
+        novelWv.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+            val tNow = android.os.SystemClock.elapsedRealtime()
+            novelActivityAtMs = tNow
+            ScrollGate.onScroll(tNow, scrollY, novelWv.height)
+        }
         novelWv.setOnTouchListener { view, event ->
             activeWv = novelWv
             novelActivityAtMs = android.os.SystemClock.elapsedRealtime()
@@ -5383,31 +5390,20 @@ return t.length>=40?'TXT:'+t:'';
         "🧠 OCR Engine: " + currentOcrEngineLabel() + "\nLast actually used: " + lastActuallyUsedOcrEngine()
 
     private fun shortOcrEngineName(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
-        "paddle_small", "paddle_heavy" -> "Paddle"
-        "rapid_onnx" -> "RapidOCR"
-        "manga" -> "Manga OCR"
         "lens" -> "Lens"
         else -> "ML Kit"
     }
 
     private fun currentOcrEngineLabel(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
-        "paddle_small" -> "PaddleOCR Small"
-        "paddle_heavy" -> "PaddleOCR Heavy"
-        "rapid_onnx" -> "RapidOCR / legacy ONNX"
-        "manga" -> "Japanese Manga OCR"
         "lens" -> "Google Lens (online)"
         else -> "ML Kit · Default"
     }
 
     private fun chooseOcrEngine() {
-        val keys = arrayOf("mlkit", "paddle_small", "paddle_heavy", "rapid_onnx", "manga", "lens")
+        val keys = arrayOf("mlkit", "lens")
         val labels = arrayOf(
-            "ML Kit — Default (fast, built-in)",
-            "PaddleOCR PP-OCRv6 Small — fast (English/Chinese/Japanese; Korean uses ML Kit)",
-            "PaddleOCR PP-OCRv6 Medium / Heavy — accuracy option (English/Chinese/Japanese; Korean uses ML Kit)",
-            "RapidOCR ONNX — legacy optional engine",
-            "Japanese Manga OCR — if its model is installed",
-            "Google Lens — online, independent OCR engine; reads text and layout from the image"
+            "ML Kit — Default (on-device, works offline)",
+            "Google Lens — online; reads text and layout from the image (falls back to ML Kit if it fails)"
         )
         val selected = keys.indexOf(Prefs.get(this, "ocrEngine", "mlkit")).coerceAtLeast(0)
         AlertDialog.Builder(this)
@@ -5415,53 +5411,22 @@ return t.length>=40?'TXT:'+t:'';
             .setSingleChoiceItems(labels, selected) { dialog, which ->
                 Prefs.put(this, "ocrEngine", keys[which])
                 dialog.dismiss()
-                val engineNote = if (keys[which] == "lens") {
-                    " Google Lens runs independently; it does not merge with ML Kit."
-                } else {
-                    " Unavailable local models automatically fall back to ML Kit."
-                }
-                toast("OCR engine: " + labels[which] + "." + engineNote +
-                    (if (keys[which] == "lens") " Needs internet; the pictures being read are uploaded to Google." else ""))
+                toast("OCR engine: " + labels[which].substringBefore(" — ") +
+                    (if (keys[which] == "lens") ". Needs internet; the pictures being read are uploaded to Google." else "."))
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
     private fun ocrModelsDialog() {
-        OcrModels.init(this)
-        PaddleOcrModels.init(this)
-        val legacyPacks = OcrModels.PACKS
-        val paddlePacks = PaddleOcrModels.PACKS
         val labels = ArrayList<String>()
         labels.add("⚙️ Selected engine: " + currentOcrEngineLabel() +
             "\n✅ Last foreground OCR: " + lastActuallyUsedOcrEngine() +
             "\nGoogle Lens and ML Kit run independently; read-ahead results do not replace the visible scan status.")
-
-        for (p in legacyPacks) {
-            val state = when {
-                !p.available -> "link not configured yet"
-                OcrModels.isBusy(p) -> "downloading…"
-                OcrModels.isInstalled(p) -> "installed · " + OcrModels.sizeMb(p) + " MB — tap to delete"
-                else -> "not installed · tap to download (~" + OcrModels.approxMb(p) + " MB)"
-            }
-            labels.add(p.label + "\n" + state + " · " + ocrPackHint(OcrModels.approxMb(p)))
-        }
-
-        for (p in paddlePacks) {
-            val state = when {
-                PaddleOcrModels.isBusy(p) -> "downloading…"
-                PaddleOcrModels.isInstalled(p) -> "installed · " + PaddleOcrModels.sizeMb(p) + " MB — tap to delete"
-                else -> "not installed · tap to download (~" + p.approximateMb + " MB)"
-            }
-            labels.add("🧠 " + p.label + "\n" + state + " · " + ocrPackHint(p.approximateMb))
-        }
-
-        val deleteIndex = 1 + legacyPacks.size + paddlePacks.size
-        val err = OcrModels.lastError
-        val paddleErr = PaddleOcrModels.lastError
-        val lastError = if (paddleErr.isNotBlank()) paddleErr else err
-        labels.add("🗑 Delete all optional OCR models\n" +
-            (if (lastError.isNotBlank()) "Last model error: " + lastError.take(70) else "ML Kit stays available as the default engine"))
+        val detectorIndex = labels.size
+        labels.add(detectorRowLabel())
+        val inpaintIndex = labels.size
+        labels.add(inpaintRowLabel())
         val lensDiagnosticIndex = labels.size
         labels.add("🧪 Google Lens diagnostic — tap to copy\n" +
             OcrEngineStatus.lastLensDiagnostic.take(220))
@@ -5470,91 +5435,22 @@ return t.length>=40?'TXT:'+t:'';
             OcrEngineStatus.lastError.take(220).ifBlank { "No OCR runtime issue captured yet" })
 
         listDialog("🧠 OCR engine & models", labels, { i ->
-            when {
-                i == lensDiagnosticIndex -> {
+            when (i) {
+                lensDiagnosticIndex -> {
                     copy(OcrEngineStatus.lastLensDiagnostic)
                     toast("✅ Lens diagnostic copied. Paste it here.")
                 }
-                i == runtimeErrorIndex -> {
+                runtimeErrorIndex -> {
                     if (OcrEngineStatus.lastError.isNotBlank()) {
                         copy(OcrEngineStatus.lastError)
                         toast("✅ OCR runtime issue copied. Paste it into the bug report.")
                     } else toast("No OCR runtime issue captured yet")
                 }
-                i == 0 -> chooseOcrEngine()
-                i in 1..legacyPacks.size -> {
-                    val p = legacyPacks[i - 1]
-                    when {
-                        !p.available -> toast("⚠ ${p.label}: download link not configured yet")
-                        OcrModels.isBusy(p) -> toast("⬇️ ${p.label} is still downloading")
-                        OcrModels.isInstalled(p) -> AlertDialog.Builder(this)
-                            .setMessage("Delete the ${p.label} legacy OCR model?")
-                            .setPositiveButton("Delete") { _, _ ->
-                                OcrModels.delete(p)
-                                toast("🗑 ${p.label} deleted")
-                            }
-                            .setNegativeButton("Cancel", null)
-                            .show()
-                        else -> {
-                            toast("⬇️ Downloading ${p.label}…")
-                            Thread {
-                                try {
-                                    OcrModels.download(p) { name, pct ->
-                                        if (pct % 25 == 0) runOnUiThread { toast("⬇️ $name $pct%") }
-                                    }
-                                    runOnUiThread { toast("✅ ${p.label} installed. Select it in OCR Engine if needed.") }
-                                } catch (e: Exception) {
-                                    runOnUiThread { toast("❌ ${p.label}: " + (e.message ?: "download failed")) }
-                                }
-                            }.start()
-                        }
-                    }
-                }
-                i < deleteIndex -> {
-                    val p = paddlePacks[i - (1 + legacyPacks.size)]
-                    when {
-                        PaddleOcrModels.isBusy(p) -> toast("⬇️ ${p.label} is still downloading")
-                        PaddleOcrModels.isInstalled(p) -> AlertDialog.Builder(this)
-                            .setMessage("Delete ${p.label}? ML Kit remains available as fallback.")
-                            .setPositiveButton("Delete") { _, _ ->
-                                PaddleOcrModels.delete(p)
-                                toast("🗑 ${p.label} deleted")
-                            }
-                            .setNegativeButton("Cancel", null)
-                            .show()
-                        else -> {
-                            toast("⬇️ Downloading ${p.label}…")
-                            Thread {
-                                try {
-                                    PaddleOcrModels.download(p) { name, pct ->
-                                        if (pct % 25 == 0) runOnUiThread { toast("⬇️ PaddleOCR $name $pct%") }
-                                    }
-                                    runOnUiThread { toast("✅ ${p.label} installed. Select it in OCR Engine to use it.") }
-                                } catch (e: Exception) {
-                                    runOnUiThread { toast("❌ ${p.label}: " + (e.message ?: "download failed")) }
-                                }
-                            }.start()
-                        }
-                    }
-                }
-                else -> AlertDialog.Builder(this)
-                    .setMessage("Delete all downloaded optional OCR models? ML Kit will remain as the default engine.")
-                    .setPositiveButton("Delete") { _, _ ->
-                        OcrModels.deleteAll()
-                        PaddleOcrModels.deleteAll()
-                        toast("🗑 Optional OCR models deleted")
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+                detectorIndex -> detectorDialog { }
+                inpaintIndex -> inpaintDialog()
+                else -> chooseOcrEngine()
             }
         }, null)
-    }
-
-    /** One-line advice shown next to every downloadable OCR model. */
-    private fun ocrPackHint(mb: Int): String = when {
-        mb >= 60 -> "★★★★★ most accurate · needs a powerful phone (4 GB+ RAM)"
-        mb >= 25 -> "★★★★☆ accurate · good on mid-range phones"
-        else -> "★★★☆☆ light · fast on any phone"
     }
 
     private fun menuOcrDebugLabel(): String =
@@ -7480,7 +7376,7 @@ return t.length>=40?'TXT:'+t:'';
         if (Prefs.auto(this)) autoFlow(ch) else copyChapter(ch)
         // A live OCR batch represents only newly visible bubbles, not a complete chapter.
         // Do not let chapter prefetch compete with its real-time chat submission.
-        if (!livePanelBatch && !JapaneseMangaSession.isManaged(ch)) schedulePrefetch(ch)
+        if (!livePanelBatch) schedulePrefetch(ch)
     }
 
     // ---- WTR-LAB SPA watcher ---------------------------------------------------
@@ -8166,8 +8062,7 @@ Keep every marker exactly once, in the same order. Do not translate, remove,
 merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
-        val mangaSession = JapaneseMangaSession.isManaged(ch)
-        val imageMode = (webModeOn() && ch.contentSel.isBlank()) || mangaSession
+        val imageMode = webModeOn() && ch.contentSel.isBlank()
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
@@ -8503,7 +8398,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             }
             // Scanning: a reply that cannot be matched to the bubbles used to be saved as a good translation
             // (the AI always answers something). Treat it as a failure instead.
-            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank() && !JapaneseMangaSession.isManaged(ch)) {
+            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
                 val lay = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (lay != null) {
                     val placed = WebModeLayout.align(rawTranslation, lay)
@@ -8740,7 +8635,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     }
 
     private fun isDeepSeekLivePanel(ch: Chapter): Boolean =
-        !JapaneseMangaSession.isManaged(ch) && webModeOn() && ch.contentSel.isBlank() &&
+        webModeOn() && ch.contentSel.isBlank() &&
             (DeepSeekRealtimeTranslation.isEnabled(this) || isScanRegionBatch(ch))
 
     /**
@@ -8891,35 +8786,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     }
 
     private fun applyTranslation(ch: Chapter, text: String, retry: Boolean) {
-        // Dedicated Japanese manga result: reuse the existing bubble writer, without switching
-        // the standard Web Mode toggle or changing the normal Webtoon extraction pipeline.
-        if (JapaneseMangaSession.isManaged(ch) && ch.contentSel.isBlank()) {
-            shownTrRaw = text
-            if (lastChapter !== ch) return
-            injectBengaliFont()
-            val mangaLayout = WebModeLayoutStore.getScan(ch.url)
-            val aligned = mangaLayout?.let { WebModeLayout.align(text, it) }
-            val script = if (mangaLayout != null && aligned != null) {
-                WebModeLayoutStore.replace(this, ch.url, WebModeLayout.translated(mangaLayout, aligned))
-                WebModeWriter.bubbleScript(mangaLayout, aligned, Prefs.fontFile(this), pageKey(ch.url))
-            } else {
-                toast("Something went wrong. Please use Realtime mode.")
-                return
-            }
-            val placementId = beginTranslationPlacement()
-            novelWv.evaluateJavascript(script) { result ->
-                finishTranslationPlacement(placementId)
-                if (lastChapter !== ch) return@evaluateJavascript
-                if (result != null && result.contains("ok")) {
-                    hasTr = true
-                    shownTranslated = true
-                    updatePill()
-                } else {
-                    toast("⚠️ Could not place manga translation; it remains saved in the library")
-                }
-            }
-            return
-        }
         // Web Mode (image chapters): there is no text node to replace, so show a reader panel instead.
         if (webModeOn() && ch.contentSel.isBlank()) {
             shownTrRaw = text
@@ -9521,7 +9387,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "✏️ AdBlock Rules (paste)", menuPrefetchDepthLabel(), menuWebModeLabel(), DeepSeekRealtimeTranslation.menuLabel(this),
             "📝 Edit Prompt For Live Translation", menuForceLabel(),
             "🤖 AI Scan Page Links & Update AdBlock", menuRtPromptLabel(),
-            "🎌 Japanese Manga Engine (optional)", menuTextRemovalLabel(),
+            "(removed)", menuTextRemovalLabel(),
             menuAutoFreshChatLabel(), menuExtraChatDelayLabel(), menuScanIntervalLabel(),
             "🖼 Scan Report: images (Copy)", menuForceLoadLabel(), menuSendHoldLabel(),
             "🐞 Copy crash / freeze log", menuBatchLabel(),
@@ -9533,7 +9399,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
             "🧹 Clear OCR Log (then reproduce the problem)",
-            menuYoloLabel(), menuRealtimeAutoOcrLabel()
+            menuDetectorLabel(), menuRealtimeAutoOcrLabel()
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -9555,7 +9421,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         )
         val advanced = listOf(
             "TRANSLATION" to listOf(47, 12, 19, 14, 26, 30, 39, 40, 44, 46),
-            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 37, 38, 41, 43, 48, 49, 51, 61),
+            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 38, 41, 43, 48, 49, 51, 61),
             "BROWSER" to listOf(15, 16, 21, 24, 29, 35),
             "DIAGNOSTICS" to listOf(22, 27, 28, 42, 45, 52)
         )
@@ -9755,7 +9621,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     copy(full)
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
-                60 -> { yoloDialog { refresh(i, menuYoloLabel()) } }
+                60 -> { detectorDialog { refresh(i, menuDetectorLabel()) } }
                 61 -> { setRealtimeAutoOcrEnabled(!Prefs.bool(this, "rtAutoOcrEnabled", true)); refresh(i, menuRealtimeAutoOcrLabel()) }
                 59 -> {
                     OcrDiag.clear()
@@ -9792,17 +9658,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     Prefs.put(this, "chatExtraDelayMs", next.toString())
                     refresh(i, menuExtraChatDelayLabel())
                     toast("⏱ Extra request delay: " + menuExtraChatDelayLabel().substringAfter(": "))
-                }
-                37 -> {
-                    val sourceUrl = novelWv.url.orEmpty()
-                    dlg.dismiss()
-                    startActivityForResult(Intent(
-                        this,
-                        com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity::class.java
-                    ).putExtra(
-                        com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.EXTRA_PAGE_URL,
-                        sourceUrl
-                    ), com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.REQUEST_CODE)
                 }
                 19 -> { dlg.dismiss(); glossaryDialog() }
                 20 -> {
@@ -10362,36 +10217,86 @@ ${rows.take(220).joinToString("\n")}
     private fun menuAdBlockLabel(): String =
         (if (Prefs.adblock(this)) "✅" else "⬜") + " Ad Block"
 
-    private fun menuYoloLabel(): String =
-        "🫧 Bubble Detector (YOLO, optional): " + (if (YoloBubbleDetector.enabled(this)) "ACTIVE" else if (YoloBubbleDetector.isInstalled(this)) "installed" else "light mode")
+    private fun detectorRowLabel(): String {
+        val state = when {
+            BubbleDetector.isDownloading() -> "downloading… " + BubbleDetector.downloadPercent() + "%"
+            BubbleDetector.enabled(this) -> "ACTIVE"
+            BubbleDetector.isInstalled(this) -> "installed (mode: " + BubbleDetector.mode(this) + ")"
+            else -> "not installed · tap to download (≈ 11 MB)"
+        }
+        return "🫧 Bubble & text detector\n" + state +
+            (if (BubbleDetector.lastError.isNotBlank()) " · " + BubbleDetector.lastError.take(60) else "")
+    }
+
+    private fun inpaintRowLabel(): String {
+        val state = when {
+            WebModeInpainter.isDownloading() -> "downloading…"
+            WebModeInpainter.tooSlow -> "installed · paused for a few minutes (this phone was too slow)"
+            WebModeInpainter.isReady(this) -> "installed · used automatically for lettering on artwork"
+            else -> "not installed · tap to download (≈ 37 MB)"
+        }
+        return "🎨 AI text eraser (LaMa)\n" + state
+    }
+
+    private fun inpaintDialog() {
+        if (WebModeInpainter.isDownloading()) { toast("⬇️ Still downloading…"); return }
+        if (WebModeInpainter.isReady(this)) {
+            AlertDialog.Builder(this)
+                .setMessage("Delete the AI text eraser model? Flat bubbles are still cleaned without it.")
+                .setPositiveButton("Delete") { _, _ -> WebModeInpainter.delete(this); toast("🗑 AI text eraser deleted") }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        toast("⬇️ Downloading the AI text eraser…")
+        var lastPct = -25
+        WebModeInpainter.download(this, { done, total ->
+            val pct = if (total > 0) (done * 100 / total).toInt() else 0
+            if (pct >= lastPct + 25) { lastPct = pct; runOnUiThread { toast("⬇️ AI text eraser $pct%") } }
+        }, { err ->
+            runOnUiThread { toast(if (err == null) "✅ AI text eraser installed and tested" else "❌ AI text eraser: $err") }
+        })
+    }
+
+    private fun menuDetectorLabel(): String =
+        "🫧 Bubble & text detector: " + (if (BubbleDetector.enabled(this)) "ACTIVE" else if (BubbleDetector.isInstalled(this)) "installed" else "not installed")
 
     /**
-     * Optional precise bubble detector for phones with plenty of RAM. The model file is downloaded by the user (from the
-     * Manga Translator project) and imported here with a file picker: the app copies it to its own folder, so no path has
-     * to be typed or fixed afterwards.
+     * Optional detector of speech bubbles and free lettering (ONNX, 11 MB). It is downloaded from inside the app; the
+     * file is only accepted after its size and SHA-256 match and a test run succeeded on this phone.
      */
-    private fun yoloDialog(onChanged: () -> Unit) {
-        AlertDialog.Builder(this)
-            .setTitle("Bubble Detector (YOLO)")
-            .setMessage(YoloBubbleDetector.status(this) +
-                "\n\nThe app already finds bubble shapes without any download (light mode). This model is only for phones " +
-                "with 6 GB RAM or more and gives exact balloon outlines. File needed: mixed-dual-s-e5_float16.tflite")
-            .setPositiveButton("Import model file") { _, _ ->
-                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                }
-                startActivityForResult(i, REQ_YOLO_MODEL)
+    private fun detectorDialog(onChanged: () -> Unit) {
+        val installed = BubbleDetector.isInstalled(this)
+        val b = AlertDialog.Builder(this)
+            .setTitle("Bubble & text detector")
+            .setMessage(BubbleDetector.status(this) +
+                "\n\nThe app already finds bubble shapes without any download. The detector additionally tells bubble lettering " +
+                "from free lettering (sound effects) and keeps lines of different bubbles apart.")
+        if (!installed && !BubbleDetector.isDownloading()) {
+            b.setPositiveButton("Download (≈ 11 MB)") { _, _ ->
+                toast("⬇️ Downloading the detector…")
+                BubbleDetector.download(this, { pct ->
+                    if (pct % 25 == 0) runOnUiThread { toast("⬇️ Detector $pct%") }
+                }, { err ->
+                    runOnUiThread {
+                        toast(if (err == null) "✅ Detector installed and tested on this phone" else "❌ Detector: $err")
+                        onChanged()
+                    }
+                })
             }
-            .setNeutralButton("Mode: " + YoloBubbleDetector.mode(this)) { _, _ ->
-                val next = when (YoloBubbleDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
-                Prefs.put(this, "wmYoloMode", next)
-                if (next == "off") YoloBubbleDetector.release()
+        }
+        if (installed) {
+            b.setPositiveButton("Mode: " + BubbleDetector.mode(this)) { _, _ ->
+                val next = when (BubbleDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
+                BubbleDetector.setMode(this, next)
                 toast("Bubble detector mode: $next")
                 onChanged()
             }
-            .setNegativeButton("Remove model") { _, _ -> YoloBubbleDetector.delete(this); toast("Model removed"); onChanged() }
-            .show()
+            b.setNegativeButton("Remove model") { _, _ -> BubbleDetector.delete(this); toast("Model removed"); onChanged() }
+        } else {
+            b.setNegativeButton("Close", null)
+        }
+        b.show()
     }
 
     private fun menuTextRemovalLabel(): String =
@@ -10565,7 +10470,6 @@ ${rows.take(220).joinToString("\n")}
         startActivityForResult(i, 42)
     }
 
-    private val REQ_YOLO_MODEL = 4731
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -10577,58 +10481,7 @@ ${rows.take(220).joinToString("\n")}
             } catch (e: Exception) {
                 toast("❌ " + (e.message ?: "Failed"))
             }
-        } else if (requestCode == REQ_YOLO_MODEL) {
-            val u = data?.data
-            if (resultCode == RESULT_OK && u != null) {
-                toast("Importing model...")
-                Thread {
-                    val err = YoloBubbleDetector.importFrom(this, u)
-                    runOnUiThread {
-                        toast(if (err == null) "✅ Model imported. " + (if (YoloBubbleDetector.libraryPresent()) "" else "Add the LiteRT line to app/build.gradle to use it.") else "❌ $err")
-                    }
-                }.start()
-            }
-        } else if (requestCode == com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.REQUEST_CODE &&
-            resultCode == RESULT_OK) {
-            handleJapaneseMangaResult(data)
         }
-    }
-
-    private fun handleJapaneseMangaResult(data: Intent?) {
-        val raw = data?.getStringExtra(
-            com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.EXTRA_RESULT_JSON
-        ).orEmpty()
-        if (raw.isBlank()) return toast("⚠️ Japanese Manga OCR result is empty")
-        val parsed = JapaneseMangaResultParser.parse(raw)
-            ?: return toast("⚠️ Japanese Manga OCR result is invalid; nothing was sent")
-        val pageUrl = parsed.pageUrl
-        if (cleanUrl(pageUrl) != cleanUrl(novelWv.url.orEmpty())) {
-            toast("⚠️ Page changed while OCR was running; no translation was started")
-            return
-        }
-        val layout = parsed.layout
-        if (layout.bubbles.isEmpty()) return toast("⚠️ No manga text regions to translate")
-        val sourceText = layout.bubbles.joinToString("\n\n") { it.sourceText.trim() }
-        if (sourceText.isBlank()) return toast("⚠️ OCR text is empty")
-        WebModeLayoutStore.setScan(pageUrl, layout)
-        val host = Uri.parse(pageUrl).host.orEmpty().lowercase().removePrefix("www.")
-        val title = novelWv.title.orEmpty().trim().ifBlank { "Japanese Manga" }
-        val chapter = Chapter(
-            title = title,
-            text = sourceText,
-            next = null,
-            prev = null,
-            url = pageUrl,
-            novel = host.ifBlank { "Japanese Manga" },
-            number = "",
-            contentSel = "",
-            titleSel = "",
-            nextSel = "",
-            prevSel = ""
-        )
-        JapaneseMangaSession.register(chapter)
-        toast("🎌 Manga OCR: ${layout.bubbles.size} text regions · sending for translation")
-        handleChapter(chapter, useSavedTranslation = false)
     }
 
     // ---------- bookmarks ----------

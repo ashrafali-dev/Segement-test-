@@ -7,7 +7,7 @@ import java.util.concurrent.locks.ReentrantLock
  * Single priority gate for every OCR inference.
  *
  * Before this, the visible-panel job (thread "ns-webmode") and the read-ahead job ("ns-webmode-ahead")
- * both called the same engine; PaddleV6OcrEngine.run() is synchronized, so a visible scan queued behind
+ * both called the same engine; the local engine's run() was synchronized, so a visible scan queued behind
  * whatever read-ahead inference happened to be running AND behind any further read-ahead slices that
  * grabbed the monitor first. An in-flight ONNX/ML Kit call cannot be interrupted, so the best we can
  * guarantee is: the foreground waits for at most ONE in-flight inference, and no new background
