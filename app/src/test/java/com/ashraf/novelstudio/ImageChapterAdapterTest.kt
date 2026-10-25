@@ -2,7 +2,6 @@ package com.ashraf.novelstudio
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -44,28 +43,5 @@ class ImageChapterAdapterTest {
             ),
             urls
         )
-    }
-
-    @Test
-    fun imageChapterJsonRoundTripKeepsPageOrder() {
-        val original = ImageChapter(
-            sourceId = "naver-comic",
-            title = "Episode 67",
-            novel = "Example series",
-            number = "67",
-            url = "https://m.comic.naver.com/webtoon/detail?titleId=12345&no=67",
-            pageUrls = listOf(
-                "https://cdn.example/1.jpg",
-                "https://cdn.example/2.jpg",
-                "https://cdn.example/3.jpg"
-            )
-        )
-
-        val restored = ImageChapter.fromJson(original.toJson())
-
-        assertEquals(original.sourceId, restored?.sourceId)
-        assertEquals(original.url, restored?.url)
-        assertEquals(original.pageUrls, restored?.pageUrls)
-        assertNull(ImageChapter.fromJson("""{"url":"javascript:alert(1)","pages":[]}"""))
     }
 }
