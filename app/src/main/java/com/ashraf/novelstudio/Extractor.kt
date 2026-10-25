@@ -15,7 +15,9 @@ data class Chapter(
     val contentSel: String,
     val titleSel: String = "",
     val nextSel: String = "",
-    val prevSel: String = ""
+    val prevSel: String = "",
+    /** True for OCR text extracted from an image-based comic Reader View. */
+    val isImageChapter: Boolean = false
 )
 
 object Extractor {
