@@ -63,10 +63,14 @@ internal object ReaderViewBridge {
     @Synchronized
     fun detachComicReader(listener: ComicSourceReaderListener) {
         if (comicReader?.get() === listener) {
+            val closedUrl = listener.sourceUrl
             comicReader?.clear()
             comicReader = null
+            mainActivity?.get()?.onComicReaderClosed(closedUrl)
         }
     }
+
+    fun hasComicReader(): Boolean = comicReader?.get() != null
 
     fun requestTranslation(chapter: Chapter): Boolean =
         mainActivity?.get()?.requestReaderTranslation(chapter) ?: false
