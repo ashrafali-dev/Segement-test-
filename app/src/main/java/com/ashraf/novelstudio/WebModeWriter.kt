@@ -495,9 +495,13 @@ internal object WebModeWriter {
         var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s||A.rot||B.rot)continue;
         var ox=Math.min(A.ox1,B.ox1)-Math.max(A.ox0,B.ox0),oy=Math.min(A.oy1,B.oy1)-Math.max(A.oy0,B.oy0);
         if(ox<=2||oy<=0||oy>Math.max(2,0.22*Math.min(A.oh,B.oh)))continue;
-        var U=(A.oy0+A.oy1<=B.oy0+B.oy1)?A:B,V=(U===A)?B:A,cut=oy/2+1;
-        U.oy1-=cut;U.oh=Math.max(4,U.oy1-U.oy0);U.y1=U.oy1;
-        V.oy0+=cut;V.oh=Math.max(4,V.oy1-V.oy0);V.y0=V.oy0;
+        var U=(A.oy0+A.oy1<=B.oy0+B.oy1)?A:B,V=(U===A)?B:A,cut=oy/2+1,
+            trimU=Math.min(cut,Math.max(0,(U.oh-4)/2)),
+            trimV=Math.min(cut,Math.max(0,(V.oh-4)/2));
+        // Trim symmetrically around each anchor. Cutting only the touching edge shifts the text centre
+        // (e.g. 105 -> 103.5), which moves translations away from their original button/bubble.
+        U.oy0+=trimU;U.oy1-=trimU;U.oh=Math.max(4,U.oy1-U.oy0);U.y0=U.oy0;U.y1=U.oy1;
+        V.oy0+=trimV;V.oy1-=trimV;V.oh=Math.max(4,V.oy1-V.oy0);V.y0=V.oy0;V.y1=V.oy1;
       }
       // Exact duplicate OCR/translation at the same place is one label, not two.
       for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
