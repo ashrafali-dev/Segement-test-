@@ -54,7 +54,7 @@ Use Mihon/Tachiyomi-style source implementations as **research references for si
 - Mihon extension FAQ: https://mihon.app/docs/faq/browse/extensions
 - Mihon source migration guide and source concepts: https://mihon.app/docs/guides/source-migration
 - Keiyoushi community extension source code: https://github.com/keiyoushi/extensions-source
-- Naver Webtoon selector reference used for this prototype: https://github.com/keiyoushi/extensions-source
+- Naver Webtoon source implementation (`NaverComic.kt`): https://github.com/keiyoushi/extensions-source/blob/main/src/ko/navercomic/src/eu/kanade/tachiyomi/extension/ko/navercomic/NaverComic.kt
 
 Do not install/import third-party extension APKs or execute downloaded extension code inside Novel Studio to obtain source support. Implement each source through Novel Studio's own constrained adapter interface, keep the ordinary WebView as fallback, and add live-page fixtures/tests when possible. Mihon and community repositories are references, not dependencies or an assumption that their extensions are safe/trusted.
 
