@@ -3,13 +3,11 @@ package com.ashraf.novelstudio
 import android.app.Activity
 import android.app.AlertDialog
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -21,7 +19,7 @@ import android.widget.Toast
  * The original browser page stays alive in MainActivity. Translation requests are sent through
  * ReaderViewBridge to MainActivity's existing chatbot pipeline and returned here.
  */
-class SourceReaderActivity : Activity(), SourceReaderListener {
+internal class SourceReaderActivity : Activity(), SourceReaderListener {
     companion object {
         const val EXTRA_TITLE = "source_reader_title"
         const val EXTRA_TEXT = "source_reader_text"
@@ -246,6 +244,8 @@ class SourceReaderActivity : Activity(), SourceReaderListener {
     override fun onTranslationStarted(sourceUrl: String) {
         if (sameSource(sourceUrl)) {
             translating = true
+            progress.visibility = View.VISIBLE
+            progress.isIndeterminate = true
             renderText()
         }
     }
