@@ -40,6 +40,41 @@ internal object WebModeInpainter {
     @Volatile private var imageName = "image"
     @Volatile private var maskName = "mask"
 
+    /** Why the AI painter was skipped / how long the last run took (shown in the status pill). */
+    @Volatile var lastNote: String = ""
+
+    private fun crashMarker(ctx: Context): File =
+        File(File(ctx.applicationContext.filesDir, "wm_inpaint"), ".running")
+
+    /**
+     * True when the AI painter may run right now. A marker file is written before every model load / run and removed
+     * after it. A native out-of-memory kills the process without any exception, so a marker still present at the next
+     * start proves the previous run crashed the app: the painter then stays off until the model is deleted/re-downloaded.
+     * Must be called while holding [OnnxHeavyGate.lock].
+     */
+    private fun aiSafe(ctx: Context): Boolean {
+        val app = ctx.applicationContext
+        val marker = crashMarker(app)
+        if (marker.exists()) {
+            try { marker.delete() } catch (_: Throwable) {}
+            Prefs.put(app, "wmAiInpaintCrashed", "1")
+            OcrDiag.log("AI_PAINT", "previous AI painter run crashed the app; painter switched off until the model is re-downloaded")
+        }
+        if (Prefs.get(app, "wmAiInpaintCrashed", "") == "1") { lastNote = "off (crashed before)"; return false }
+        val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return true
+        val mi = android.app.ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        val is64 = android.os.Process.is64Bit()
+        val needMb = if (is64) 700L else 1100L
+        val availMb = mi.availMem / 1048576L
+        if (mi.lowMemory || availMb < needMb) {
+            lastNote = "skipped: low RAM (${availMb}MB free)"
+            OcrDiag.log("AI_PAINT", "skipped: free RAM ${availMb}MB < ${needMb}MB (64bit=$is64)")
+            return false
+        }
+        return true
+    }
+
     private fun modelFile(ctx: Context): File =
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), MODEL_NAME)
 
@@ -52,7 +87,16 @@ internal object WebModeInpainter {
         if (session != null || sessionFailed || !isReady(ctx) || !warming.compareAndSet(false, true)) return
         val app = ctx.applicationContext
         Thread {
-            try { session(app) } catch (_: Throwable) {} finally { warming.set(false) }
+            try {
+                OnnxHeavyGate.lock.lock()
+                try {
+                    if (aiSafe(app)) {
+                        val marker = crashMarker(app)
+                        try { marker.parentFile?.mkdirs(); marker.writeText("1") } catch (_: Throwable) {}
+                        try { session(app) } finally { try { marker.delete() } catch (_: Throwable) {} }
+                    }
+                } finally { OnnxHeavyGate.lock.unlock() }
+            } catch (_: Throwable) {} finally { warming.set(false) }
         }.apply { isDaemon = true; name = "wm-inpaint-warmup" }.start()
     }
 
@@ -61,6 +105,8 @@ internal object WebModeInpainter {
         try { session?.close() } catch (_: Throwable) {}
         session = null
         sessionFailed = false
+        Prefs.put(ctx.applicationContext, "wmAiInpaintCrashed", "")
+        try { crashMarker(ctx).delete() } catch (_: Throwable) {}
         return !modelFile(ctx).exists() || modelFile(ctx).delete()
     }
 
@@ -108,6 +154,7 @@ internal object WebModeInpainter {
                 if (!part.renameTo(target)) throw IllegalStateException("ফাইল সংরক্ষণ ব্যর্থ")
                 // Prove right now that this phone's ONNX Runtime can run the model; otherwise say so instead of failing silently.
                 sessionFailed = false
+                Prefs.put(app, "wmAiInpaintCrashed", "")
                 if (session(app) == null) {
                     target.delete()
                     sessionFailed = false
@@ -134,6 +181,9 @@ internal object WebModeInpainter {
             opts.setIntraOpNumThreads(maxOf(2, minOf(4, Runtime.getRuntime().availableProcessors())))
             // Required by this int4/int8 model: dequantize the weights once at load so it runs like fp32.
             opts.addConfigEntry("session.disable_quant_qdq", "1")
+            // Lower the native memory peak (LaMa at 512x512 is heavy): no pre-planned memory pattern, no arena that keeps blocks.
+            try { opts.setMemoryPatternOptimization(false) } catch (_: Throwable) {}
+            try { opts.setCPUArenaAllocator(false) } catch (_: Throwable) {}
             val s = env.createSession(modelFile(ctx).absolutePath, opts)
             val names = s.inputNames.toList()
             imageName = if (names.contains("image")) "image" else names[0]
@@ -151,8 +201,23 @@ internal object WebModeInpainter {
      * [mask] is region-local (rw*rh, non-zero = erase). Returns an rw*rh array whose masked entries hold the
      * new ARGB colour, or null when the model is unavailable or anything fails (caller falls back).
      */
-    @Synchronized
     fun fill(ctx: Context, bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray): IntArray? {
+        OnnxHeavyGate.lock.lock()
+        try {
+            if (!aiSafe(ctx)) return null
+            val marker = crashMarker(ctx)
+            try { marker.parentFile?.mkdirs(); marker.writeText("1") } catch (_: Throwable) {}
+            val t0 = SystemClock.elapsedRealtime()
+            try {
+                val r = fillLocked(ctx, bitmap, x0, y0, rw, rh, mask)
+                if (r != null) lastNote = "last ${(SystemClock.elapsedRealtime() - t0) / 100 / 10.0}s"
+                return r
+            } finally { try { marker.delete() } catch (_: Throwable) {} }
+        } finally { OnnxHeavyGate.lock.unlock() }
+    }
+
+    @Synchronized
+    private fun fillLocked(ctx: Context, bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray): IntArray? {
         val s = session(ctx) ?: return null
         val t0 = SystemClock.elapsedRealtime()
         var scaledIn: Bitmap? = null

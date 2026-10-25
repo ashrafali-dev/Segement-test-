@@ -1788,6 +1788,10 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
 
     private fun finishRealtimeAheadTranslation(jobKey: String, task: RtAheadTranslationTask, raw: String) {
         val aligned = WebModeLayout.align(cleanReply(raw), task.layout)
+        if (aligned == null) {
+            val nums = Regex("\\[(\\d{3,})\\]").findAll(raw).map { it.groupValues[1] }.take(30).joinToString(",")
+            OcrDiag.log("ALIGN_FAIL", "ahead reply not matched to its bubbles: bubbles=${task.layout.bubbles.size} replyChars=${raw.length} markers=[$nums]")
+        }
         if (aligned != null) {
             for (i in task.layout.bubbles.indices) {
                 val value = aligned.getOrNull(i)?.trim().orEmpty()
@@ -2089,9 +2093,13 @@ return t.length>=40?'TXT:'+t:'';
                 val settled = now - deepSeekPendingSince >= 300L && !scrollHold
                 // Foreground OCR may pre-empt only an ahead-translation job; it must never interrupt
                 // a visible-panel translation or a user-initiated extraction.
+                // Reading the screen (OCR) does not use the chatbot, so it must not wait for the chatbot to finish
+                // translating an earlier batch of bubbles (OCR / sending / answer-checking are separate jobs).
+                // The new batch is queued behind the running one by the existing queue; only whole-chapter jobs still block.
+                val runNow = running
                 val idle = webModeHandle == null &&
-                    (running == null || runningAhead) &&
-                    (queue.isEmpty() || runningAhead)
+                    (runNow == null || runningAhead || isRealtimeBubbleBatch(runNow)) &&
+                    (runningAhead || queue.all { isRealtimeBubbleBatch(it) })
                 if (idle && signature.isNotEmpty() &&
                     ((hasImages && ((changed && settled) || periodicRecheck)) || textFallbackDue)) {
                     if (runningAhead && changed && settled) interruptRealtimeAheadForVisiblePanel()
@@ -2322,7 +2330,7 @@ return t.length>=40?'TXT:'+t:'';
             val nowMs = android.os.SystemClock.elapsedRealtime()
             if (text != chipStageText) { chipStageText = text; chipStageSinceMs = nowMs }
             val secs = ((nowMs - chipStageSinceMs) / 1000L).toInt()
-            chip.update(if (secs >= 3) "$text · ${secs}s" else text, color)
+            chip.update((if (secs >= 3) "$text · ${secs}s" else text) + "\n" + chipDetailLine(), color)
         } else if (++chipIdleTicks >= 2) {
             chipStageText = ""
             chip.update(null, 0)
@@ -2331,6 +2339,25 @@ return t.length>=40?'TXT:'+t:'';
 
     private var chipStageText = ""
     private var chipStageSinceMs = 0L
+
+    /** Second line of the status pill: which OCR engine, and whether the bubble detector and the AI painter really work. */
+    private fun chipDetailLine(): String {
+        val det = when {
+            BubbleDetector.isDownloading() -> "downloading"
+            BubbleDetector.enabled(this) -> "ON" + (BubbleDetector.lastInfo.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
+            BubbleDetector.isInstalled(this) -> "off"
+            else -> "not installed"
+        }
+        val paint = when {
+            !WebModeInpainter.isReady(this) -> "not installed"
+            !Prefs.bool(this, "wmAiInpaint", true) -> "off"
+            Prefs.get(this, "wmAiInpaintCrashed", "") == "1" -> "OFF (crashed before)"
+            WebModeInpainter.tooSlow -> "paused (slow)"
+            WebModeInpainter.isLoaded() -> "ON" + (WebModeInpainter.lastNote.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
+            else -> "loading"
+        }
+        return "OCR " + shortOcrEngineName() + " · Detector " + det + " · AI painter " + paint
+    }
 
     private val scanIndicatorRunnable = object : Runnable {
         override fun run() {

@@ -31,7 +31,8 @@ internal object WebModeTextRemover {
         context: Context,
         sourceUrl: String,
         encoded: ByteArray,
-        bubbles: List<WmBubble>
+        bubbles: List<WmBubble>,
+        allowAi: Boolean = true
     ): Boolean {
         if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
@@ -56,7 +57,7 @@ internal object WebModeTextRemover {
             // AI inpainting (optional, downloaded on request; used automatically once installed) is slow on a phone:
             // only a few artwork bubbles / free-text boxes per image.
             var aiBudget = 6
-            var aiWanted = Prefs.bool(context, "wmAiInpaint", true) && WebModeInpainter.isReady(context) &&
+            var aiWanted = allowAi && Prefs.bool(context, "wmAiInpaint", true) && WebModeInpainter.isReady(context) &&
                 !WebModeInpainter.tooSlow
             if (aiWanted && !WebModeInpainter.isLoaded()) {
                 // Loading the model takes several seconds: do it in the background; THIS image uses the fast cleaner

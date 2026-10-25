@@ -1872,7 +1872,8 @@ internal class WebModeExtractor(
                 if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) &&
                     (src.startsWith("https://", true) || src.startsWith("http://", true))) {
                     try {
-                        WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles)
+                        // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
+                        WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode)
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
@@ -2006,11 +2007,20 @@ internal class WebModeExtractor(
             var ocrMs = 0L
             var fitMs = 0L
             var lineCount = 0
+            // Google Lens is a network wait; the bubble detector only needs the bitmap. Run them side by side
+            // instead of one after the other (the detector used to start only after Lens had answered).
+            var detFuture: java.util.concurrent.Future<List<BubbleDetectorCore.Det>?>? = null
             try {
             // Audit raw lines BEFORE joining paragraphs. A merged paragraph rectangle hides skipped
             // middle rows from the ink detector. Never discard an edge reading on the assumption that
             // another slice will find it; the fuller overlapping reading can upgrade it below.
             val tOcr = android.os.SystemClock.elapsedRealtime()
+            if (preRecognized == null && (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
+                Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)) {
+                detFuture = try {
+                    DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
+                } catch (_: Throwable) { null }
+            }
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
             val blocks = OcrPost.mergeNeighbours(
@@ -2024,8 +2034,10 @@ internal class WebModeExtractor(
             val k = sample.toFloat()
             // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
             // It only adds information: which lines belong to different bubbles and which lettering is free text.
+            val earlyDet = detFuture
             val dets: List<BubbleDetectorCore.Det>? =
-                if (Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+                if (earlyDet != null) { try { earlyDet.get() } catch (_: java.util.concurrent.ExecutionException) { null } }
+                else if (Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
                 dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
@@ -2286,6 +2298,13 @@ internal class WebModeExtractor(
                 out.add(nb)
             }
             } finally {
+                // The detector reads [bmp]; the caller recycles it right after this function, so never leave it running.
+                val pendingDet = detFuture
+                if (pendingDet != null) {
+                    try { pendingDet.get(20, java.util.concurrent.TimeUnit.SECONDS) }
+                    catch (_: InterruptedException) { Thread.currentThread().interrupt(); try { pendingDet.cancel(true) } catch (_: Throwable) {} }
+                    catch (_: Throwable) { try { pendingDet.cancel(true) } catch (_: Throwable) {} }
+                }
                 // Structured diagnostics: counts and timings only, never recognised text.
                 Log.i(TAG, "slice job=$id mode=${if (fastMode) "fast" else "full"} ocrMs=$ocrMs groupingMs=$groupMs bubbleFitMs=$fitMs " +
                     "sliceTotalMs=${android.os.SystemClock.elapsedRealtime() - tSlice} lines=$lineCount " +
@@ -2563,6 +2582,8 @@ internal class WebModeExtractor(
         private const val SCREEN_LENS_DEADLINE_MS = 12_000L
         // At most this many Lens requests of tall-panel slices in flight at once (all panels together).
         private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(4)
+        private val DETECT_POOL: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-detect").apply { isDaemon = true } }
         private const val JOB_MAX_MS = 12 * 60_000L
         private const val VALIDITY_CHECK_INTERVAL_MS = 250L
         private const val MIN_W = 120

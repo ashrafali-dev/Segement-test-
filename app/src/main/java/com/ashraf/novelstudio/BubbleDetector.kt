@@ -45,6 +45,10 @@ internal object BubbleDetector {
     @Volatile var lastError: String = ""
         private set
 
+    /** Result of the latest run, shown in the status pill ("6 found · 840ms"). */
+    @Volatile var lastInfo: String = ""
+        private set
+
     private val downloading = AtomicBoolean(false)
     @Volatile private var downloadPct = 0
     private var session: Loaded? = null
@@ -193,8 +197,14 @@ internal object BubbleDetector {
     // ---- detection ---------------------------------------------------------------------------------------------
 
     /** Detections for [bmp] in page pixels, or null when the detector is off/unavailable. Never throws. */
-    @Synchronized
     fun detect(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
+        if (!enabled(c)) return null
+        OnnxHeavyGate.lock.lock()
+        try { return detectLocked(c, bmp) } finally { OnnxHeavyGate.lock.unlock() }
+    }
+
+    @Synchronized
+    private fun detectLocked(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
         return try {
             val file = modelFile(c)
@@ -223,6 +233,7 @@ internal object BubbleDetector {
             val out = BubbleDetectorCore.merge(all)
             Log.i(TAG, "tiles=${tiles.size} detections=${out.size} image=${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0}")
             lastError = ""
+            lastInfo = "${out.size} found · ${SystemClock.elapsedRealtime() - t0}ms"
             out
         } catch (e: Throwable) {
             lastError = (e.message ?: e.javaClass.simpleName).take(160)

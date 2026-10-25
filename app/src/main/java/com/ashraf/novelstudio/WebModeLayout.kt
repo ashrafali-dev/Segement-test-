@@ -136,10 +136,13 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             var previousNo = 0
             for ((k, m) in ms.withIndex()) {
                 val no = m.groupValues[1].toIntOrNull() ?: return null
-                // Repeated, reversed, or out-of-range markers cannot be trusted for overlay placement.
-                if (no <= previousNo || no > expectedLast) return null
+                // An out-of-range number means the model renumbered, merged or split bubbles: placement cannot be trusted.
+                if (no < 1 || no > expectedLast) return null
+                // Markers are positional IDs that are looked up by number below, so a marker that arrives out of order
+                // moves no text. A number that appears twice is ambiguous: keep the first answer and ignore the repeat.
+                // (Before, ONE such marker threw away the whole reply, although the chatbot had answered.)
+                if (!seenNumbers.add(no)) continue
                 previousNo = no
-                seenNumbers.add(no)
                 val end = if (k + 1 < ms.size) ms[k + 1].range.first else text.length
                 val body = text.substring(m.range.last + 1, end).trim()
                 // Older prompts/models used a tilde as a fake translation for skipped OCR.
