@@ -76,6 +76,25 @@ internal object ImageChapterPageUrls {
     }
 }
 
+/**
+ * Matches Mihon/Keiyoushi Naver reader precedence: use the desktop viewer image list first,
+ * then the mobile toon-view list (whose data-src is the authoritative image URL), then known
+ * Naver viewer containers as a compatibility fallback. The returned order is source DOM order.
+ */
+internal object NaverComicPageSources {
+    fun prefer(
+        viewerPages: Iterable<String>,
+        toonPages: Iterable<String>,
+        fallbackPages: Iterable<String> = emptyList()
+    ): List<String> {
+        val viewer = ImageChapterPageUrls.orderedDistinct(viewerPages)
+        if (viewer.isNotEmpty()) return viewer
+        val toon = ImageChapterPageUrls.orderedDistinct(toonPages)
+        if (toon.isNotEmpty()) return toon
+        return ImageChapterPageUrls.orderedDistinct(fallbackPages)
+    }
+}
+
 internal interface ImageChapterAdapter {
     val id: String
     fun matches(url: String?): Boolean
@@ -125,9 +144,14 @@ internal class NaverComicImageAdapter : ImageChapterAdapter {
                 return@evaluateJavascript
             }
             val sourceUrl = ReaderSourceUrl.validate(o.optString("url")) ?: currentUrl
-            val pagesArray = o.optJSONArray("pages") ?: JSONArray()
-            val pages = ImageChapterPageUrls.orderedDistinct(
-                (0 until pagesArray.length()).mapNotNull { pagesArray.optString(it).takeIf(String::isNotBlank) }
+            fun readPages(key: String): List<String> {
+                val array = o.optJSONArray(key) ?: return emptyList()
+                return (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+            }
+            val pages = NaverComicPageSources.prefer(
+                readPages("viewerPages"),
+                readPages("toonPages"),
+                readPages("fallbackPages")
             )
             if (pages.isEmpty()) {
                 callback(null)
@@ -179,60 +203,99 @@ internal class NaverComicImageAdapter : ImageChapterAdapter {
 (function(){
   try {
     var current = location.href;
-    function textOf(selectors) {
-      for (var i=0;i<selectors.length;i++) {
-        var e=document.querySelector(selectors[i]);
-        var t=e?(e.innerText||e.textContent||'').trim():'';
-        if(t && t.length<220) return t;
+    function absolute(raw) {
+      if (!raw || !String(raw).trim()) return '';
+      try {
+        var u = new URL(String(raw).trim(), document.baseURI);
+        return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : '';
+      } catch (e) { return ''; }
+    }
+    var LAZY = ['data-src','data-original','data-lazy-src','data-url','data-image',
+      'data-original-src','data-lazy','data-echo','data-actualsrc','data-orig-src'];
+    function lazyUrl(im) {
+      for (var i=0;i<LAZY.length;i++) {
+        var v = absolute(im.getAttribute(LAZY[i]) || '');
+        if (v) return v;
       }
       return '';
     }
-    function urlOf(im) {
-      var keys=['data-src','data-original','data-lazy-src','data-url','data-image','data-original-src'];
-      var src=im.currentSrc||im.getAttribute('src')||'';
-      if(!src || /^(?:about:blank|data:image\/(?:gif|svg))/i.test(src)) {
-        for(var i=0;i<keys.length;i++) {
-          var v=im.getAttribute(keys[i]);
-          if(v && !/^(?:about:blank|data:image\/(?:gif|svg))/i.test(v)){src=v;break;}
-        }
-      }
-      try { return new URL(src, document.baseURI).href; } catch(e) { return ''; }
+    function sourceUrl(im, preferLazy) {
+      var lazy = lazyUrl(im);
+      var declared = im.getAttribute('src') || '';
+      var live = im.currentSrc || declared || '';
+      var src = absolute(live);
+      var isPlaceholder = !src ||
+        /^(?:data:|about:)/i.test(live) ||
+        /(?:transparent|placeholder|spacer|blank-image|loading[-_.])/i.test(live);
+      // Mihon's mobile reader uses data-src before src. Desktop viewer prefers src/currentSrc,
+      // except when that source is only a tiny lazy-loading placeholder.
+      if (preferLazy && lazy) return lazy;
+      if (lazy && (isPlaceholder || ((im.naturalWidth || 0) > 0 && (im.naturalWidth || 0) <= 2))) return lazy;
+      return src || lazy;
     }
-    var selectors=['.wt_viewer img','.toon_view_lst img.toon_image','#_imageList img','#comic_view_area img'];
-    var imgs=[], seen=Object.create(null);
-    // A single combined selector preserves original DOM order if a page exposes more than one wrapper.
-    var nodes=document.querySelectorAll(selectors.join(','));
-    for(var ni=0;ni<nodes.length;ni++){
-      var im=nodes[ni], src=urlOf(im);
-      if(!src || seen[src]) continue;
-      var meta=((im.className||'')+' '+(im.id||'')+' '+(im.alt||'')+' '+src).toLowerCase();
-      if(/logo|avatar|profile|banner|badge|spinner|advert|\/ads?\/|link_slo/.test(meta)) continue;
-      var w=im.naturalWidth||im.width||0, h=im.naturalHeight||im.height||0;
-      if((w>0 && w<180) || (h>0 && h<180)) continue;
-      seen[src]=1;
-      imgs.push(src);
+    function collect(selector, preferLazy) {
+      var nodes = document.querySelectorAll(selector);
+      var out = [], seen = Object.create(null);
+      for (var i=0;i<nodes.length;i++) {
+        var src = sourceUrl(nodes[i], preferLazy);
+        if (!src || seen[src]) continue;
+        seen[src] = true;
+        out.push(src);
+      }
+      return out;
+    }
+    // Keep Mihon's actual precedence. Do not filter by naturalWidth/height: Naver lazy images
+    // commonly report a 1x1 placeholder until requested, and small panels are still valid pages.
+    var viewerPages = collect('.wt_viewer img', false);
+    var toonPages = collect('.toon_view_lst img.toon_image', true);
+    // Fallback only for Naver page variants that moved away from those known Mihon containers.
+    var fallbackPages = collect('#_imageList img, #comic_view_area img, .webtoon_viewer img, img[data-page-no]', false);
+
+    function textOf(selectors) {
+      for (var i=0;i<selectors.length;i++) {
+        var e = document.querySelector(selectors[i]);
+        var t = e ? (e.innerText || e.textContent || '').trim() : '';
+        if (t && t.length < 220) return t;
+      }
+      return '';
     }
     function chapterLink(kind) {
-      var re=kind==='next'?/(다음화|다음 회|next chapter|next episode)/i:/(이전화|이전 회|previous chapter|previous episode)/i;
-      var a=Array.from(document.querySelectorAll('a[href]')).find(function(x){
-        var t=((x.innerText||x.textContent||'')+' '+(x.getAttribute('aria-label')||'')+' '+(x.title||'')).trim();
-        return re.test(t) && !/disabled/i.test(x.className||'');
-      });
-      if(!a) return '';
-      try { return new URL(a.href,location.href).href; } catch(e) { return ''; }
+      var direct = kind === 'next'
+        ? ['a.btn_next','a.pg_next','a[rel="next"]','link[rel="next"]','a[data-direction="next"]']
+        : ['a.btn_prev','a.pg_prev','a[rel="prev"]','link[rel="prev"]','a[data-direction="prev"]'];
+      for (var i=0;i<direct.length;i++) {
+        var el = document.querySelector(direct[i]);
+        if (el && el.href) {
+          var resolved = absolute(el.href);
+          if (resolved && resolved.split('#')[0] !== current.split('#')[0]) return resolved;
+        }
+      }
+      var re = kind === 'next'
+        ? /(다음화|다음 회|next chapter|next episode)/i
+        : /(이전화|이전 회|previous chapter|previous episode)/i;
+      var anchors = document.querySelectorAll('a[href]');
+      for (var j=0;j<anchors.length;j++) {
+        var a=anchors[j];
+        var label=((a.innerText || a.textContent || '')+' '+(a.getAttribute('aria-label') || '')+' '+(a.title || '')).trim();
+        if (!re.test(label) || /disabled/i.test(a.className || '') || a.getAttribute('aria-disabled') === 'true') continue;
+        var href=absolute(a.href);
+        if (href && href.split('#')[0] !== current.split('#')[0]) return href;
+      }
+      return '';
     }
-    var title=textOf(['.subj_episode','.episode_title','.tit_area h2','.wt_viewer h2','h2']);
-    var novel=textOf(['.detail_header .subj','.title_area .title','#titleName','.toon_name','.series-title','h1']);
-    if(!title) title=document.title||'';
-    var q=new URL(location.href).searchParams;
+    var title = textOf(['.subj_episode','.episode_title','.tit_area h2','.wt_viewer h2','h2']) || document.title || '';
+    var novel = textOf(['.detail_header .subj','.title_area .title','#titleName','.toon_name','.series-title','h1']);
+    var q = new URL(location.href).searchParams;
     return JSON.stringify({
-      url:current,
-      title:title,
-      novel:novel,
-      number:q.get('no')||'',
-      pages:imgs,
-      next:chapterLink('next'),
-      prev:chapterLink('prev')
+      url: current,
+      title: title,
+      novel: novel,
+      number: q.get('no') || '',
+      viewerPages: viewerPages,
+      toonPages: toonPages,
+      fallbackPages: fallbackPages,
+      next: chapterLink('next'),
+      prev: chapterLink('prev')
     });
   } catch(e) { return ''; }
 })()
