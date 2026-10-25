@@ -79,6 +79,8 @@ internal class WebModeRequest(
     val webView: WebView,
     /** When true, OCR only images intersecting the current viewport and never scrolls the reader. */
     val visibleOnly: Boolean = false,
+    /** Run the thorough bubble-interior grouping pass even for a viewport-only scan. */
+    val thoroughVisibleOcr: Boolean = false,
     /** False once the user navigated away / started another action: the job stops and reports nothing useful. */
     val isValid: () -> Boolean,
     /** Force extract: do not download images; OCR what the WebView actually shows while it is scrolled. */
@@ -275,7 +277,7 @@ internal class WebModeExtractor(
         fun begin() {
             ensureBridge(wv)
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
-                "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
+                "ahead=${req.ahead} thoroughVisible=${req.thoroughVisibleOcr} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
             progress("Discovering chapter panels", 1)
             if ((req.force && !req.visibleOnly) || req.forceScreenOcr) {
                 worker.execute { runCatching { processForce() }.onFailure {
@@ -809,7 +811,7 @@ internal class WebModeExtractor(
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
-                            LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
+                            LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = !req.thoroughVisibleOcr, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
                         } catch (e: OcrUnavailableException) {
                             LensPanelOcrAttempt(null, e)
                         } catch (e: DecodeException) {
@@ -827,7 +829,7 @@ internal class WebModeExtractor(
                     val targeted = !req.forceOcrSrc.isNullOrBlank()
                     // Scope separation is intentional: full-chapter scans use thorough OCR;
                     // only explicitly visible real-time requests use the low-latency fast pass.
-                    val fastPass = !targeted && req.visibleOnly
+                    val fastPass = !targeted && req.visibleOnly && !req.thoroughVisibleOcr
                     val po = if (targeted && req.forceOcrRegion != null) {
                         // Some Android codecs throw while decoding a selected region. Retry with a
                         // bounded downsampled bitmap rather than aborting manual OCR.
