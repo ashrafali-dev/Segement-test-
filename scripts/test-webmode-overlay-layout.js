@@ -98,12 +98,15 @@ function assertCollisionFree(items, message) {
 {
   const a = box(100, 100, 110, 48, "First translation");
   const b = box(150, 118, 104, 48, "Second translation");
-  const ay = (a.oy0 + a.oy1) / 2, by = (b.oy0 + b.oy1) / 2;
+  const ax = (a.ox0 + a.ox1) / 2, ay = (a.oy0 + a.oy1) / 2;
+  const bx = (b.ox0 + b.ox1) / 2, by = (b.oy0 + b.oy1) / 2;
   resolve([a, b]);
   assertCollisionFree([a, b], "pair placement");
-  assert.equal((a.y0 + a.y1) / 2, ay, "first label must not be stacked vertically");
-  assert.equal((b.y0 + b.y1) / 2, by, "second label must retain its vertical anchor");
-  assert.ok(a.x1 <= b.x0 || b.x1 <= a.x0, "collision must be resolved horizontally");
+  assert.equal((a.x0 + a.x1) / 2, ax, "first label must retain its source X anchor");
+  assert.equal((b.x0 + b.x1) / 2, bx, "second label must retain its source X anchor");
+  assert.equal((a.y0 + a.y1) / 2, ay, "first label must retain its source Y anchor");
+  assert.equal((b.y0 + b.y1) / 2, by, "second label must retain its source Y anchor");
+  assert.ok(a.x1 <= b.x0 || b.x1 <= a.x0, "same-image boxes must shrink instead of being moved sideways");
 }
 
 // A transitive three-box conflict is packed as a group without render-order overlap.
@@ -113,11 +116,13 @@ function assertCollisionFree(items, message) {
     box(145, 103, 120, 50, "B"),
     box(190, 126, 120, 50, "C"),
   ];
-  const ys = items.map(x => (x.oy0 + x.oy1) / 2);
+  const anchors = items.map(x => ({x:(x.ox0+x.ox1)/2, y:(x.oy0+x.oy1)/2}));
   resolve(items);
   assertCollisionFree(items, "three-box group");
-  items.forEach((x, i) =>
-    assert.equal((x.y0 + x.y1) / 2, ys[i], "box " + i + " must not move down"));
+  items.forEach((x, i) => {
+    assert.equal((x.x0 + x.x1) / 2, anchors[i].x, "box " + i + " must not move sideways");
+    assert.equal((x.y0 + x.y1) / 2, anchors[i].y, "box " + i + " must not move down");
+  });
 }
 
 // If the row is too wide, boxes shrink into available horizontal space rather than overlap.
