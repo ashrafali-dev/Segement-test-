@@ -531,7 +531,7 @@ internal object WebModeLayoutStore {
     /** Stable identity for a recycled canvas independent of the current bitmap dimensions. */
     internal fun canvasSourceSlot(src: String): String? {
         val match = CANVAS_SLOT.matchEntire(WebModeLogic.normalizeUrl(src)) ?: return null
-        return "ns-canvas:\${match.groupValues[1]},\${match.groupValues[2]}"
+        return "ns-canvas:${match.groupValues[1]},${match.groupValues[2]}"
     }
 
     /** Ordinary images require exact identity; recycled canvas crops match by stable slot. */
@@ -544,7 +544,7 @@ internal object WebModeLayoutStore {
     }
 
     private fun canvasStateKey(urlKey: String, src: String): String =
-        "\$urlKey|\${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
+        "$urlKey|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
 
     /**
      * Pure decision: did the (recycled) canvas switch to another page?
