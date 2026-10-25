@@ -243,7 +243,8 @@ internal object WebModeLayoutStore {
                         .filter { sameCanvasSource(it, src) }
                         .forEach { transitions.add(it) }
                     transitions.add(src)
-                    canvasGenerationBySource[snapshotKey] = (canvasGenerationBySource[snapshotKey] ?: 0L) + 1L
+                    val generationKey = canvasIdentityKey(url, src)
+                    canvasGenerationBySource[generationKey] = (canvasGenerationBySource[generationKey] ?: 0L) + 1L
                 }
                 canvasSnapshots[snapshotKey] = WebModeLayout(layout.titleOffset, fresh)
             }
@@ -283,7 +284,9 @@ internal object WebModeLayoutStore {
         if (!normalizedSource.startsWith("ns-canvas:") || signature.isBlank()) return false
         val k = key(url)
         // Key the fingerprint by stable canvas slot, because dimensions can change between pages.
-        val sourceKey = canvasStateKey(k, normalizedSource)
+        // Use host + canvas slot (not the page URL): a canvas reader may update its SPA URL while
+        // keeping the same visible canvas and the same DOM overlay alive.
+        val sourceKey = canvasIdentityKey(url, normalizedSource)
         val previous = canvasPixelSnapshots[sourceKey]
         val previousSource = canvasPixelSourceBySlot.put(sourceKey, normalizedSource)
         canvasPixelSnapshots[sourceKey] = signature
@@ -303,6 +306,7 @@ internal object WebModeLayoutStore {
         if (comparable < 16 || changed.toFloat() / comparable.toFloat() < 0.45f) return false
 
         canvasGenerationBySource[sourceKey] = (canvasGenerationBySource[sourceKey] ?: 0L) + 1L
+        val pageLayoutKey = canvasStateKey(k, normalizedSource)
         val changedSources = LinkedHashSet<String>()
         if (!previousSource.isNullOrBlank()) changedSources.add(WebModeLogic.normalizeUrl(previousSource))
         changedSources.add(normalizedSource)
@@ -310,7 +314,7 @@ internal object WebModeLayoutStore {
 
         // This bitmap proved that the page changed. Remove all geometry variants for this canvas slot
         // from both the latest scan and cumulative layout, preventing stale boxes returning after a failed OCR.
-        canvasSnapshots.remove(sourceKey)
+        canvasSnapshots.remove(pageLayoutKey)
         scans[k]?.let { scanned ->
             scans[k] = WebModeLayout(scanned.titleOffset, scanned.bubbles.filterNot {
                 sameCanvasSource(it.src, normalizedSource)
@@ -339,8 +343,9 @@ internal object WebModeLayoutStore {
             .distinctBy { canvasSourceSlot(it) ?: it }
             .toList()
         return sources.associate { src ->
-            val sourceKey = canvasStateKey(k, src)
-            val snapshot = canvasSnapshots[sourceKey]?.bubbles.orEmpty()
+            val snapshotKey = canvasStateKey(k, src)
+            val generationKey = canvasIdentityKey(url, src)
+            val snapshot = canvasSnapshots[snapshotKey]?.bubbles.orEmpty()
             val requestBubbles = currentLayout.bubbles.filter {
                 sameCanvasSource(it.src, src) && it.sourceText.isNotBlank()
             }
@@ -352,8 +357,8 @@ internal object WebModeLayoutStore {
                 requestBubbles.all { request ->
                     snapshot.any { scanned -> sameBubbleReading(scanned, request) }
                 }
-            sourceKey to if (belongsToCurrentPage) {
-                canvasGenerationBySource[sourceKey] ?: 0L
+            generationKey to if (belongsToCurrentPage) {
+                canvasGenerationBySource[generationKey] ?: 0L
             } else {
                 Long.MIN_VALUE
             }
@@ -545,6 +550,13 @@ internal object WebModeLayoutStore {
 
     private fun canvasStateKey(urlKey: String, src: String): String =
         "$urlKey|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
+
+    /** The live canvas can survive a reader's SPA URL change; tie generation checks to host/slot. */
+    private fun canvasIdentityKey(url: String, src: String): String {
+        val host = url.substringAfter("://", "").substringBefore('/').substringBefore('?')
+            .substringBefore(':').lowercase().removePrefix("www.")
+        return "$host|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
+    }
 
     /**
      * Pure decision: did the (recycled) canvas switch to another page?
