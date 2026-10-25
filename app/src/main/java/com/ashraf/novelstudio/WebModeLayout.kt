@@ -552,7 +552,7 @@ internal object WebModeLayoutStore {
         "$urlKey|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
 
     /** The live canvas can survive a reader's SPA URL change; tie generation checks to host/slot. */
-    private fun canvasIdentityKey(url: String, src: String): String {
+    internal fun canvasIdentityKey(url: String, src: String): String {
         val host = url.substringAfter("://", "").substringBefore('/').substringBefore('?')
             .substringBefore(':').lowercase().removePrefix("www.")
         return "$host|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
