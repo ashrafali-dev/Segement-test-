@@ -158,7 +158,7 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
             setBackgroundColor(0xFF1A1C24.toInt())
         }
         originalButton = button("Original") { toggleTranslation() }
-        translateButton = button("OCR + Translate") { startTranslation() }
+        translateButton = button(scanButtonLabel()) { startTranslation() }
         bottom.addView(originalButton, LinearLayout.LayoutParams(0, dp(46), 0.8f))
         bottom.addView(translateButton, LinearLayout.LayoutParams(0, dp(46), 1.4f))
         root.addView(bottom, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -182,10 +182,13 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
     }
 
     private fun modeDescription(): String = when (selectedMode) {
-        "novel" -> "Novel mode"
+        "novel" -> "Novel · full chapter OCR"
         "realtime" -> "Real-time · visible page"
-        else -> "Scanning · full chapter"
+        else -> "WebToon Scanning · full chapter"
     }
+
+    private fun scanButtonLabel(): String =
+        if (selectedMode == "realtime") "Scan visible page" else "Scan full chapter"
 
     private fun refreshModeButton() {
         if (!::modeButton.isInitialized) return
@@ -195,6 +198,9 @@ internal class ComicReaderActivity : Activity(), ComicSourceReaderListener {
             else -> "Mode: Scan"
         }
         modeButton.contentDescription = "Translation mode: ${modeDescription()}"
+        if (::translateButton.isInitialized && !busy) {
+            translateButton.text = scanButtonLabel()
+        }
     }
 
     private fun showTranslationModeDialog() {
@@ -300,7 +306,7 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         busy = true
         translateButton.isEnabled = false
         modeButton.isEnabled = false
-        translateButton.text = if (visibleOnly) "Scanning visible page…" else "Preparing OCR…"
+        translateButton.text = if (visibleOnly) "Scanning visible page…" else "Scanning full chapter…"
         progressBar.visibility = View.VISIBLE
         progressBar.isIndeterminate = true
         statusView.text = if (visibleOnly) "Detecting text on the visible page…" else "Scanning chapter pages…"
@@ -308,7 +314,7 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
             busy = false
             translateButton.isEnabled = true
             modeButton.isEnabled = true
-            translateButton.text = "Retry OCR + Translate"
+            translateButton.text = if (visibleOnly) "Retry visible-page OCR" else "Retry full-chapter OCR"
             progressBar.visibility = View.GONE
             progressBar.isIndeterminate = false
             statusView.text = "${chapter.pageUrls.size} pages · ${modeDescription()}"
@@ -346,7 +352,15 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         // Real-time mode returns a viewport-sized layout, not a full-chapter layout.
         // Merge each newly translated viewport into the saved layout so scrolling does not
         // erase translations already drawn over earlier pages/bubbles.
-        val mergedLayout = WebModeLayoutStore.mergeTranslated(this, chapter.url, scanLayout, aligned)
+        // A full scan is authoritative: replace partial layouts left by prior viewport scans.
+        // Only real-time viewports should accumulate into the chapter layout across scrolling.
+        val mergedLayout = if (selectedMode == "realtime") {
+            WebModeLayoutStore.mergeTranslated(this, chapter.url, scanLayout, aligned)
+        } else {
+            WebModeLayout.translated(scanLayout, aligned).also {
+                WebModeLayoutStore.replace(this, chapter.url, it)
+            }
+        }
         val mergedAligned = mergedLayout.bubbles.map { it.translatedText.takeIf(String::isNotBlank) }
         if (mergedAligned.none { !it.isNullOrBlank() }) {
             Toast.makeText(this, "Translation could not be matched to the comic bubbles.", Toast.LENGTH_LONG).show()
@@ -403,7 +417,7 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         progressBar.isIndeterminate = false
         translateButton.isEnabled = true
         modeButton.isEnabled = true
-        translateButton.text = if (selectedMode == "realtime") "Scan visible page" else "Translate again"
+        translateButton.text = if (selectedMode == "realtime") "Scan visible page" else "Scan full chapter again"
         lastRawTranslation = rawTranslation
         lastLayout = WebModeLayoutStore.getScan(chapter.url) ?: WebModeLayoutStore.get(this, chapter.url)
         lastAligned = lastLayout?.let { WebModeLayout.align(rawTranslation, it) }
@@ -430,7 +444,7 @@ window.__nsSourcePrev=${JSONObject.quote(item.prev.orEmpty())};
         progressBar.isIndeterminate = false
         translateButton.isEnabled = true
         modeButton.isEnabled = true
-        translateButton.text = "Retry OCR + Translate"
+        translateButton.text = if (selectedMode == "realtime") "Retry visible-page OCR" else "Retry full-chapter OCR"
         statusView.text = message.take(90)
         Toast.makeText(this, message.take(180), Toast.LENGTH_LONG).show()
         resumeRealtimeIfPending()
