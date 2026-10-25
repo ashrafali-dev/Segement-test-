@@ -1,6 +1,8 @@
 package com.ashraf.novelstudio
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -58,5 +60,36 @@ class WebModeSamePositionTest {
 
     @Test fun differentSizeIsNotTheSameBubble() {
         assertFalse(WebModeLayoutStore.samePosition(b(0.5f, 0.5f, 0.6f, 0.008f), b(0.5f, 0.5f, 0.6f, 0.02f)))
+    }
+}
+
+
+/** Regression coverage for the marker-to-bubble mapping used by the comic overlay. */
+class WebModeLayoutAlignmentTest {
+    private fun bubble(src: String, cx: Float) = WmBubble(
+        src = src, cx = cx, cy = 0.5f, w = 0.2f, h = 0.1f, angle = 0f, font = 0.02f,
+        bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(), sourceText = "source"
+    )
+
+    @Test
+    fun markerIdsStayAlignedToTheCurrentBubbleOrder() {
+        val layout = WebModeLayout(0, listOf(
+            bubble("https://cdn.example/p1.jpg", 0.2f),
+            bubble("https://cdn.example/p1.jpg", 0.5f),
+            bubble("https://cdn.example/p2.jpg", 0.7f)
+        ))
+        assertEquals(
+            listOf("첫 번째 번역", "두 번째 번역", "세 번째 번역"),
+            WebModeLayout.align("[001]첫 번째 번역\n[002]두 번째 번역\n[003]세 번째 번역", layout)
+        )
+    }
+
+    @Test
+    fun alignmentRejectsOutOfOrderMarkersInsteadOfStackingTranslationsOnWrongBubbles() {
+        val layout = WebModeLayout(0, listOf(
+            bubble("https://cdn.example/p1.jpg", 0.2f),
+            bubble("https://cdn.example/p1.jpg", 0.5f)
+        ))
+        assertNull(WebModeLayout.align("[002]두 번째 번역\n[001]첫 번째 번역", layout))
     }
 }
