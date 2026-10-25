@@ -403,25 +403,16 @@ internal object OcrRescan {
     }
     @Volatile private var auditMisses = 0
     @Volatile private var auditPausedUntil = 0L
-    // A global cooldown must not hide later short labels just because earlier panels contained artwork.
+    // Three empty audit passes usually mean the uncovered-pixel detector is seeing artwork/UI edges.
+    // Pause only this optional second pass; the primary OCR result is returned normally.
     private const val REMOTE_AUDIT_MISS_LIMIT = 3
     private const val REMOTE_AUDIT_COOLDOWN_MS = 60_000L
-    // The remote audit is only for substantial missed text, not tiny artwork edges or reader chrome.
-    private const val MIN_REMOTE_AUDIT_WIDTH = 120
-    private const val MIN_REMOTE_AUDIT_HEIGHT = 36
-    private const val MIN_REMOTE_AUDIT_AREA = 12_000L
+    // Short real labels (e.g. "Skip") are still valid audit targets; reject only tiny/non-line-shaped noise.
+    private const val MIN_REMOTE_AUDIT_WIDTH = 32
+    private const val MIN_REMOTE_AUDIT_HEIGHT = 12
     private const val MIN_REMOTE_AUDIT_DARK_RATIO = 0.06f
     private const val REMOTE_AUDIT_CANDIDATE_LIMIT = 48
     private const val REMOTE_AUDIT_MAX_REGIONS = 2
-
-    /** Cheap geometry gate, checked before creating a crop or issuing another remote Lens request. */
-    internal fun isUsefulRemoteAuditRegion(region: Region): Boolean {
-        val width = region.r - region.l
-        val height = region.b - region.t
-        return width >= MIN_REMOTE_AUDIT_WIDTH &&
-            height >= MIN_REMOTE_AUDIT_HEIGHT &&
-            width.toLong() * height >= MIN_REMOTE_AUDIT_AREA
-    }
 
     /** Sample a bounded number of pixels; skip near-white blank regions before paying for a Lens request. */
     private fun hasDarkPixelRatio(bmp: Bitmap, region: Region, minRatio: Float): Boolean {
@@ -466,7 +457,9 @@ internal object OcrRescan {
         } catch (_: Exception) { emptyList() } catch (_: OutOfMemoryError) { emptyList() }
         val regions: List<Region> = candidates.asSequence()
             .filter { region ->
-                isUsefulRemoteAuditRegion(region) &&
+                val rw = region.r - region.l
+                val rh = region.b - region.t
+                rw >= MIN_REMOTE_AUDIT_WIDTH && rh >= MIN_REMOTE_AUDIT_HEIGHT &&
                     hasDarkPixelRatio(bmp, region, MIN_REMOTE_AUDIT_DARK_RATIO)
             }
             // Fully missed lines are more valuable than partial re-reads; prioritize compact labels (buttons,
