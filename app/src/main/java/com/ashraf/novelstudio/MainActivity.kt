@@ -1856,6 +1856,12 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     private var deepSeekStallBlockedSignature = ""
     private val deepSeekVisiblePoll = object : Runnable {
         override fun run() {
+            if (ReaderViewBridge.hasComicReader()) {
+                deepSeekPollBusy = false
+                deepSeekProbeInFlight = false
+                deepSeekPollEvalSeq++
+                return
+            }
             if (!DeepSeekRealtimeTranslation.isEnabled(this@MainActivity) || !webModeOn() || !Prefs.bool(this@MainActivity, "rtAutoOcrEnabled", true)) {
                 deepSeekPollBusy = false
                 return
@@ -7137,6 +7143,7 @@ return t.length>=40?'TXT:'+t:'';
      * remains responsible for sending the OCR result to the chatbot and applying the reply.
      */
     private fun scheduleDeepSeekAutoTranslation(pageUrl: String) {
+        if (ReaderViewBridge.hasComicReader()) return
         if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val url = pageUrl.trim()
         if (!url.startsWith("http", ignoreCase = true)) return
@@ -8448,7 +8455,7 @@ merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
         val mangaSession = JapaneseMangaSession.isManaged(ch)
-        val imageMode = (webModeOn() && ch.contentSel.isBlank()) || mangaSession
+        val imageMode = ch.isImageChapter || (webModeOn() && ch.contentSel.isBlank()) || mangaSession
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
