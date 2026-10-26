@@ -433,6 +433,31 @@ class MainActivity : Activity() {
      * is already streaming is allowed to finish, then the screen's panels are re-read and translated one by
      * one, and finally everything resumes.
      */
+    /**
+     * Manual lite, started from the Extract button: read the largest image visible on screen once, translate
+     * it, stop. Nothing is queued and the realtime pipeline is not touched — that path is what used to run
+     * for minutes under a "Reading this page" chip without producing a result.
+     */
+    private fun startManualExtractForVisibleImage() {
+        val js = "(function(){var vh=window.innerHeight||0,vw=window.innerWidth||0,best='',area=0,ims=document.images;" +
+            "for(var i=0;i<ims.length;i++){var im=ims[i],r=im.getBoundingClientRect();" +
+            "if(r.width<120||r.height<120)continue;" +
+            "var t=Math.max(0,r.top),b=Math.min(vh,r.bottom),vis=b-t;if(vis<=0)continue;" +
+            "var w=Math.max(0,Math.min(vw,r.right)-Math.max(0,r.left));if(vis*w>area){area=vis*w;best=im.currentSrc||im.src||'';}}" +
+            "return JSON.stringify(best);})()"
+        novelWv.evaluateJavascript(js) { raw ->
+            val src = decode(raw)
+            if (src.isBlank()) {
+                OcrDiag.log("MANUAL", "extract: no visible image on this screen")
+                toast("🔎 No visible page image — scroll to the panel and try again")
+                return@evaluateJavascript
+            }
+            OcrDiag.setMode("manual")
+            com.ashraf.novelstudio.manualextract.ManualExtractHost.start(
+                this, src, 0f, 0f, 1f, 1f, manualExtractScript())
+        }
+    }
+
     private fun reOcrVisiblePanels() {
         if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) {
             toast("⟳ This button works in Real-time mode")
@@ -6883,10 +6908,12 @@ return t.length>=40?'TXT:'+t:'';
             !Prefs.bool(this, "rtAutoOcrEnabled", true)
 
     private fun extractCopy() {
-        // Auto Real-time OFF turns Extract into an explicit fresh OCR + translation action.
+        // Auto Real-time OFF = manual lite: read the visible image once, translate it, stop. This used to
+        // call reOcrVisiblePanels(), which drives the realtime pipeline (and pauses it for up to 240 s), so
+        // pressing Extract showed "Reading this page" for minutes without producing anything.
         if (DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
             !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
-            reOcrVisiblePanels()
+            startManualExtractForVisibleImage()
             return
         }
         // ● is always a real extraction. Never wait for WebView.progress and
