@@ -1991,7 +1991,11 @@ internal class WebModeExtractor(
                     try {
                         // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
                         val tClean = SystemClock.elapsedRealtime()
-                        val cleaned = WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead")
+                        val cleaned = WebModeTextRemover.cleanAndCache(
+                            wv.context, src, bytes, bubbles,
+                            allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead",
+                            dets = synchronized(detectBySrc) { detectBySrc[src] }
+                        )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
@@ -2166,10 +2170,20 @@ internal class WebModeExtractor(
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
                     if (fastMode && !earlyDet.isDone) { earlyDet.cancel(true); null }
                     else try { earlyDet.get() } catch (_: Exception) { null }
-                } else if (!fastMode && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+                } else if (Prefs.bool(wv.context, "wmBubbleFit", true)) {
+                    // Realtime used to skip the detector entirely, so mask colour, bubble geometry and placement
+                    // all came from the pixel guess. It is now run, but with a short budget: if the model has not
+                    // answered yet the pixel path is used for THIS pass and the result is cached for the next
+                    // one, so a visible panel is never stalled by it.
+                    val det = if (fastMode) detectWithBudget(wv.context, bmp) else BubbleDetector.detect(wv.context, bmp)
+                    det
+                } else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
-            val detectRan = detectWanted || (earlyDet == null && !fastMode && Prefs.bool(wv.context, "wmBubbleFit", true))
+            val detectRan = detectWanted || earlyDet != null ||
+                (Prefs.bool(wv.context, "wmBubbleFit", true) && dets != null)
+            // Remember what the detector saw for this image so the eraser can use the real bubble boxes.
+            if (dets != null) synchronized(detectBySrc) { detectBySrc[src] = dets }
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
                 "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
@@ -2745,6 +2759,63 @@ internal class WebModeExtractor(
         private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(5)
         private val DETECT_POOL: java.util.concurrent.ExecutorService =
             java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-detect").apply { isDaemon = true } }
+
+        /** Short realtime budget for the detector: it is geometry, not the answer, so it may arrive late. */
+        private const val DETECT_FAST_WAIT_MS = 450L
+
+        /** Detector results by image hash, so a panel is analysed once and the next pass is free. */
+        private val detectCache = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>?>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>?>?): Boolean = size > 12
+        }
+
+        /** Latest detector boxes per image source, so the eraser works from real bubbles rather than a guess. */
+        private val detectBySrc = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>>(8, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>>?): Boolean = size > 8
+        }
+
+        /**
+         * Realtime detector call that never stalls the visible panel.
+         *
+         * Returns a cached result immediately when this image was already analysed. Otherwise it starts the run
+         * and waits only [DETECT_FAST_WAIT_MS]; on timeout the caller falls back to pixel geometry for this pass
+         * and the cached result serves the next one (a visible panel is re-read on every scroll tick).
+         */
+        private fun detectWithBudget(ctx: android.content.Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
+            val key = md5Of(bmp)
+            synchronized(detectCache) { detectCache[key]?.let { return it } }
+            val f = try {
+                DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> {
+                    try { BubbleDetector.detect(ctx, bmp) } catch (_: Throwable) { null }
+                })
+            } catch (_: Throwable) { return null }
+            return try {
+                val dets = f.get(DETECT_FAST_WAIT_MS, TimeUnit.MILLISECONDS)
+                synchronized(detectCache) { detectCache[key] = dets }
+                dets
+            } catch (_: java.util.concurrent.TimeoutException) {
+                // Keep the future running; the next pass benefits from it.
+                null
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        /** Cheap content fingerprint for the detector cache (pixels, not file bytes). */
+        private fun md5Of(bmp: Bitmap): String {
+            val stepX = (bmp.width / 16).coerceAtLeast(1)
+            val stepY = (bmp.height / 16).coerceAtLeast(1)
+            val sb = StringBuilder(64)
+            var y = 0
+            while (y < bmp.height) {
+                var x = 0
+                while (x < bmp.width) {
+                    sb.append(Integer.toHexString(bmp.getPixel(x, y)))
+                    x += stepX
+                }
+                y += stepY
+            }
+            return sb.toString()
+        }
         private const val JOB_MAX_MS = 12 * 60_000L
         private const val VALIDITY_CHECK_INTERVAL_MS = 250L
         private const val MIN_W = 120

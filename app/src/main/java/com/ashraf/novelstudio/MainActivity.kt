@@ -513,6 +513,27 @@ class MainActivity : Activity() {
                     onDone("")
                 }
             },
+            translateAndPlaceAll = { bubbles, prompt, _script, onDone ->
+                handler.post {
+                    val url = cleanUrl(novelWv.url.orEmpty())
+                    if (url.isBlank()) { onDone(emptyList()); return@post }
+                    if (bubbles.isEmpty()) { onDone(emptyList()); return@post }
+                    // The whole selection goes to the chatbot as ONE marked request (markers number the bubbles
+                    // directly), so three bubbles on screen become three separately placed translations instead
+                    // of one block. Same rule as above: no realtime batch registration, the mode stays idle.
+                    val layout = WebModeLayout(0, bubbles)
+                    WebModeLayoutStore.setScan(url, layout)
+                    val chapter = Chapter(
+                        title = "", text = prompt, next = null, prev = null, url = url,
+                        novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
+                        number = "", contentSel = ""
+                    )
+                    handleChapter(chapter, useSavedTranslation = false)
+                    // Placement is driven by applyTranslation once the chatbot answers; the caller only needs
+                    // to know the request started.
+                    onDone(emptyList())
+                }
+            },
             onFailure = { reason -> handler.post { toast(reason) } }
         )
     }
@@ -1766,8 +1787,10 @@ class MainActivity : Activity() {
     }
 
     private fun buildRealtimeAheadPrompt(task: RtAheadTranslationTask): Pair<String, Int> {
-        val source = task.layout.bubbles.joinToString("\n\n") { it.sourceText.trim() }
-        val marked = addInternalMarkers(source)
+        // One marker per bubble, numbered by bubble index. Joining with blank lines and re-splitting (the old
+        // addInternalMarkers path) shifted every marker when a bubble contained a blank line, was empty, was
+        // long, or the batch was small — which is why most translations landed on the wrong bubble.
+        val marked = MarkerCodec.build(task.layout.bubbles, titleOffset = 0)
         val markerCount = Regex("(?m)^\\[\\d{3,}] ").findAll(marked).count()
         val markerInstruction = """
 [Internal paragraph markers]
@@ -2701,9 +2724,11 @@ return t.length>=40?'TXT:'+t:'';
     private fun chipDetailLine(): String {
         val det = when {
             BubbleDetector.isDownloading() -> "downloading"
-            BubbleDetector.enabled(this) -> "ON" + (BubbleDetector.lastInfo.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
-            BubbleDetector.isInstalled(this) -> "off"
-            else -> "not installed"
+            // Always name the reason when off: a silent "off" was indistinguishable from "not installed" and
+            // hid the fact that the default auto mode never enabled it on this phone.
+            BubbleDetector.disabledReason(this) == null ->
+                "ON" + (BubbleDetector.lastInfo.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
+            else -> "OFF (" + BubbleDetector.disabledReason(this) + ")"
         }
         val paint = when {
             !WebModeInpainter.isReady(this) -> "not installed"
@@ -8450,7 +8475,15 @@ return t.length>=40?'TXT:'+t:'';
         // the novel page and are removed from the final saved/clipboard translation.
         val host = Uri.parse(ch.url).host?.lowercase().orEmpty()
         val isWtrLab = host == "wtr-lab.com" || host.endsWith(".wtr-lab.com")
-        val marked = addInternalMarkers(ch.text, splitSingleLines = isWtrLab)
+        // Comic/manga chapters carry a bubble layout; number those by bubble index so marker N is bubble N.
+        // Novel chapters keep paragraph markers, which have nothing to do with bubbles.
+        val comicLayout = if (webModeOn() && ch.contentSel.isBlank())
+            (WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)) else null
+        val marked = if (comicLayout != null && comicLayout.bubbles.isNotEmpty()) {
+            MarkerCodec.build(comicLayout.bubbles, comicLayout.titleOffset)
+        } else {
+            addInternalMarkers(ch.text, splitSingleLines = isWtrLab)
+        }
         jobMarkers = Regex("(?m)^\\[\\d{3,}\\] ").findAll(marked).count()
         val markerInstruction = """
 [Internal paragraph markers]

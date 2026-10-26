@@ -20,7 +20,7 @@ import com.ashraf.novelstudio.Prefs
  */
 internal class ManualExtractOcr(context: Context) {
 
-    private val app = context.applicationContext
+    val app = context.applicationContext
     private var lens: LensOcrEngine? = null
     private var mlkit: MlKitOcrEngine? = null
 

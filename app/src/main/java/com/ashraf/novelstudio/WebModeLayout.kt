@@ -127,41 +127,19 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         fun align(text: String, layout: WebModeLayout): List<String?>? {
             val n = layout.bubbles.size
             if (n == 0) return null
-            val ms = MARK.findAll(text).toList()
-            if (ms.isEmpty()) return null
-
-            val expectedLast = n + layout.titleOffset
-            val byNo = HashMap<Int, String>()
-            val seenNumbers = HashSet<Int>()
-            var previousNo = 0
-            for ((k, m) in ms.withIndex()) {
-                val no = m.groupValues[1].toIntOrNull() ?: return null
-                // An out-of-range number means the model renumbered, merged or split bubbles: placement cannot be trusted.
-                if (no < 1 || no > expectedLast) return null
-                // Markers are positional IDs that are looked up by number below, so a marker that arrives out of order
-                // moves no text. A number that appears twice is ambiguous: keep the first answer and ignore the repeat.
-                // (Before, ONE such marker threw away the whole reply, although the chatbot had answered.)
-                if (!seenNumbers.add(no)) continue
-                previousNo = no
-                val end = if (k + 1 < ms.size) ms[k + 1].range.first else text.length
-                val body = text.substring(m.range.last + 1, end).trim()
-                // Older prompts/models used a tilde as a fake translation for skipped OCR.
-                // Treat it as an empty answer so it is never painted over a comic bubble.
-                if (body.isNotEmpty() && !body.matches(Regex("[~～]+"))) byNo[no] = body
+            // Per-marker placement: every marker that maps to a bubble is used, and a bad one is skipped
+            // alone instead of discarding the reply. The old version returned null for the whole answer on
+            // the first out-of-range number, on the title-offset ambiguity, and whenever fewer than 70 % of
+            // bubbles matched, so one bad number from the model threw away every good translation.
+            val placed = MarkerCodec.align(text, n, layout.titleOffset) { no, reason ->
+                OcrDiag.log("ALIGN_SKIP", "no=$no reason=$reason bubbles=$n titleOffset=${layout.titleOffset}")
             }
-
-            // Full-chapter replies include the title as [001], so a response that starts at [001]
-            // but lacks the final expected marker is ambiguous: it may have renumbered bubbles after
-            // dropping the title, or it may have omitted the final bubble. Do not shift all bubbles.
-            if (layout.titleOffset > 0 && seenNumbers.contains(1) && !seenNumbers.contains(expectedLast)) {
-                return null
+            if (MarkerCodec.hasPlacement(placed)) return placed
+            // No usable markers at all: fall back to paragraphs only when the counts agree exactly.
+            val byParas = MarkerCodec.alignByParagraphs(text, n) { _, reason ->
+                OcrDiag.log("ALIGN_SKIP", "positional fallback refused: $reason")
             }
-
-            // Marker numbers are positional IDs. Never select a different offset just because it
-            // happens to produce more matches; missing IDs leave their own bubble blank.
-            val out = List(n) { i -> byNo[i + 1 + layout.titleOffset]?.replace(NL, " ") }
-            val found = out.count { !it.isNullOrBlank() }
-            return if (found > 0 && (found * 100 >= n * 70 || layout.titleOffset == 0)) out else null
+            return if (MarkerCodec.hasPlacement(byParas)) byParas else null
         }
 
         /**

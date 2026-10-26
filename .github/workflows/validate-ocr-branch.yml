@@ -5,6 +5,8 @@ on:
     branches:
       - fix/lens-ocr-model-routing-manual-extract-20261024
       - fix/canvas-page-overlay-lifecycle-20261025
+      - fix/all-modes-markers-masking-20261026
+      - fix/all-modes-markers-masking-20261026
   workflow_dispatch:
 
 permissions:

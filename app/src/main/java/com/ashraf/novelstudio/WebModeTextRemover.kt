@@ -27,12 +27,153 @@ internal object WebModeTextRemover {
     private const val MAX_PIXELS = 14_000_000L
     private const val MAX_BYTES = 18 * 1024 * 1024
 
+    /**
+     * Erase lettering using the DETECTOR's boxes instead of the pixel guess.
+     *
+     * For every `text_bubble` detection the bubble's real fill colour is sampled from the ring between the text
+     * box and the bubble outline (median per channel, not mean — one dark glyph pixel must not tint it), and that
+     * area is filled. `text_free` lettering keeps its own box and is filled from its local background. This is
+     * the pass that removes the original Japanese/Korean text on artwork and inside bubbles the pixel finder
+     * could not resolve.
+     *
+     * @return number of pixels changed.
+     */
+    fun eraseDetected(
+        bitmap: Bitmap,
+        dets: List<BubbleDetectorCore.Det>?
+    ): Int {
+        if (dets.isNullOrEmpty()) return 0
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 8 || height < 8) return 0
+        var changed = 0
+
+        // 1) Lettering inside a bubble: fill with the bubble's own colour.
+        for (text in dets.filter { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
+            val outline = dets.filter { it.label == BubbleDetectorCore.CLS_BUBBLE }
+                .filter { o -> o.contains(text.l.toFloat(), text.t.toFloat()) && o.contains(text.r - 1f, text.b - 1f) }
+                .minByOrNull { it.area } ?: continue
+            val fill = medianRingColour(bitmap, outline, text, width, height) ?: continue
+            changed += fillRect(bitmap, text.l, text.t, text.r, text.b, fill, width, height)
+        }
+
+        // 2) Free lettering (SFX, narration on artwork): remove it from its own box using neighbouring pixels.
+        for (free in dets.filter { it.label == BubbleDetectorCore.CLS_TEXT_FREE }) {
+            // A text_free box on artwork is repainted from the surrounding pixels; on a flat area the median
+            // ring colour is enough and much cheaper.
+            val asBubble = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 1f, free.l, free.t, free.r, free.b)
+            val ring = medianRingColour(bitmap, asBubble, free, width, height)
+            if (ring != null) {
+                changed += fillRect(bitmap, free.l, free.t, free.r, free.b, ring, width, height)
+            } else {
+                changed += gradientFillRect(bitmap, free.l, free.t, free.r, free.b, width, height)
+            }
+        }
+        return changed
+    }
+
+    /** Median colour of the ring between [inner] and [outer]; null when the ring is too textured to trust. */
+    private fun medianRingColour(
+        bitmap: Bitmap, outer: BubbleDetectorCore.Det, inner: BubbleDetectorCore.Det, width: Int, height: Int
+    ): Int? {
+        val pad = 2
+        val stepX = ((outer.w / 24).coerceAtLeast(1))
+        val stepY = ((outer.h / 24).coerceAtLeast(1))
+        val rs = ArrayList<Int>(1024); val gs = ArrayList<Int>(1024); val bs = ArrayList<Int>(1024)
+        var y = outer.t + pad
+        while (y < outer.b - pad) {
+            var x = outer.l + pad
+            while (x < outer.r - pad) {
+                val inside = x >= inner.l - pad && x < inner.r + pad && y >= inner.t - pad && y < inner.b + pad
+                if (!inside && x in 0 until width && y in 0 until height) {
+                    val c = bitmap.getPixel(x, y)
+                    rs.add((c shr 16) and 0xFF); gs.add((c shr 8) and 0xFF); bs.add(c and 0xFF)
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        if (rs.size < 24) return null
+        rs.sort(); gs.sort(); bs.sort()
+        val mid = rs.size / 2
+        val r = rs[mid]; val g = gs[mid]; val b = bs[mid]
+        // Reject a ring dominated by artwork (no single dominant colour): leave it to the caller's fallback.
+        var agreeing = 0
+        for (i in rs.indices) {
+            if (Math.abs(rs[i] - r) + Math.abs(gs[i] - g) + Math.abs(bs[i] - b) <= 60) agreeing++
+        }
+        if (agreeing * 100 < rs.size * 70) return null
+        return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+    }
+
+    /** Fill a rectangle with [colour], leaving pixels that already match it untouched. Returns pixels changed. */
+    private fun fillRect(
+        bitmap: Bitmap, l: Int, t: Int, r: Int, b: Int, colour: Int, width: Int, height: Int
+    ): Int {
+        val x0 = l.coerceIn(0, width - 1); val x1 = r.coerceIn(x0 + 1, width)
+        val y0 = t.coerceIn(0, height - 1); val y1 = b.coerceIn(y0 + 1, height)
+        val w = x1 - x0; val h = y1 - y0
+        if (w <= 0 || h <= 0 || w.toLong() * h > 2_000_000L) return 0
+        val px = IntArray(w * h)
+        bitmap.getPixels(px, 0, w, x0, y0, w, h)
+        var changed = 0
+        for (i in px.indices) {
+            if (px[i] != colour) { px[i] = colour; changed++ }
+        }
+        if (changed > 0) bitmap.setPixels(px, 0, w, x0, y0, w, h)
+        return changed
+    }
+
+    /** Repaint a rectangle from its immediate surroundings (artwork / gradient), ring by ring outside in. */
+    private fun gradientFillRect(
+        bitmap: Bitmap, l: Int, t: Int, r: Int, b: Int, width: Int, height: Int
+    ): Int {
+        val x0 = l.coerceIn(0, width - 1); val x1 = r.coerceIn(x0 + 1, width)
+        val y0 = t.coerceIn(0, height - 1); val y1 = b.coerceIn(y0 + 1, height)
+        val w = x1 - x0; val h = y1 - y0
+        if (w <= 0 || h <= 0 || w.toLong() * h > 1_500_000L) return 0
+        val px = IntArray(w * h)
+        bitmap.getPixels(px, 0, w, x0, y0, w, h)
+        val out = px.copyOf()
+        // For each pixel, blend the nearest untouched pixel to the left/right/up/down (1/d weighting).
+        for (yy in 0 until h) for (xx in 0 until w) {
+            var sr = 0.0; var sg = 0.0; var sb = 0.0; var sw = 0.0
+            for ((dx, dy) in arrayOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) {
+                var d = 1
+                while (d <= 40) {
+                    val nx = xx + dx * d; val ny = yy + dy * d
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) break
+                    // Only accept a pixel outside the erased band.
+                    if (nx in 0 until w && ny in 0 until h) {
+                        val c = px[ny * w + nx]
+                        val wt = 1.0 / (d * d)
+                        sr += ((c shr 16) and 0xFF) * wt
+                        sg += ((c shr 8) and 0xFF) * wt
+                        sb += (c and 0xFF) * wt
+                        sw += wt
+                        break
+                    }
+                    d++
+                }
+            }
+            out[yy * w + xx] = if (sw > 0.0) {
+                0xFF000000.toInt() or
+                    ((sr / sw).toInt().coerceIn(0, 255) shl 16) or
+                    ((sg / sw).toInt().coerceIn(0, 255) shl 8) or
+                    (sb / sw).toInt().coerceIn(0, 255)
+            } else px[yy * w + xx]
+        }
+        bitmap.setPixels(out, 0, w, x0, y0, w, h)
+        return w * h
+    }
+
     fun cleanAndCache(
         context: Context,
         sourceUrl: String,
         encoded: ByteArray,
         bubbles: List<WmBubble>,
-        allowAi: Boolean = true
+        allowAi: Boolean = true,
+        dets: List<BubbleDetectorCore.Det>? = null
     ): Boolean {
         if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
@@ -70,6 +211,15 @@ internal object WebModeTextRemover {
             // Every bubble whose lettering was really erased (flat AND artwork). The writer only drops its
             // opaque cover box for bubbles in this set; any other bubble keeps the safe box fallback.
             val erased = HashSet<String>()
+            // Detector-driven erase first: it covers each bubble with the bubble's own colour, which is what
+            // actually removes the original lettering on artwork and inside bubbles the pixel finder could not
+            // resolve. The per-bubble passes below then only fix what is left.
+            val erasedByDetector = try { eraseDetected(bitmap, dets) } catch (_: Throwable) { 0 }
+            if (erasedByDetector > 0) {
+                totalRemoved += erasedByDetector
+                for (b in bubbles) erased.add(WebModeTextRemovalCache.bubbleKey(b))
+                OcrDiag.log("ERASE", "detector pass dets=${dets?.size ?: 0} pixels=$erasedByDetector")
+            }
             val boundedBubbles = bubbles.asSequence()
                 .filter { it.sourceText.isNotBlank() && it.w > 0f && it.h > 0f }
                 .take(500)

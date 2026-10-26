@@ -40,7 +40,16 @@ internal object BubbleDetector {
         "https://huggingface.co/Sundowner123/comic-text-and-bubble-detector/resolve/0264ac4c32ca4d5668119fe89b54caf3a7946eb3/detector.onnx"
     const val MODEL_SHA256 = "5fe9e4f576e49d4e7e8b0e029d6d3cdc252abd4694113e1cae120e62c931ea79"
     const val MODEL_BYTES = 11_120_765L
-    private const val AUTO_MIN_RAM_MB = 3500L
+    /**
+     * Auto mode runs the detector on anything reporting at least this much RAM.
+     *
+     * This was 3500 MB, so a phone sold as "3.5 GB" almost never qualified: `ActivityManager.totalMem` excludes
+     * memory reserved by the kernel and GPU, so such a device reports well under 3500 and the detector was
+     * silently OFF in the default mode — while mask colour, box geometry and placement all depended on it. An
+     * installed model is an explicit user choice, so the gate now only guards genuinely tiny devices; the real
+     * protection is the OOM handling around the run.
+     */
+    private const val AUTO_MIN_RAM_MB = 2048L
 
     @Volatile var lastError: String = ""
         private set
@@ -72,12 +81,20 @@ internal object BubbleDetector {
         if (m == "off") release()
     }
 
-    fun enabled(c: Context): Boolean {
-        if (broken || !isInstalled(c)) return false
+    fun enabled(c: Context): Boolean = disabledReason(c) == null
+
+    /**
+     * Why the detector is not running, or null when it is. The status pill and the OCR log show this so "the
+     * detector is off" is never a silent surprise again (it used to be the default on a 3.5 GB phone).
+     */
+    fun disabledReason(c: Context): String? {
+        if (broken) return "the model failed to load earlier"
+        if (!isInstalled(c)) return "model not installed"
         return when (mode(c)) {
-            "on" -> true
-            "off" -> false
-            else -> DeviceTier.totalRamMb(c) >= AUTO_MIN_RAM_MB
+            "on" -> null
+            "off" -> "switched off in settings"
+            else -> if (DeviceTier.totalRamMb(c) >= AUTO_MIN_RAM_MB) null
+                else "auto: needs ${AUTO_MIN_RAM_MB / 1024} GB RAM"
         }
     }
 

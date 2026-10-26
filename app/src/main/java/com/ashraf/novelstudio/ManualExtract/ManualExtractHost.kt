@@ -14,6 +14,8 @@ internal object ManualExtractHost {
     fun install(
         capture: (src: String, x: Float, y: Float, w: Float, h: Float) -> Bitmap?,
         translateAndPlace: (bubble: WmBubble, text: String, script: OcrScript, onDone: (String) -> Unit) -> Unit,
+        /** One marked request for N bubbles; the Activity places each answer at its own bubble. */
+        translateAndPlaceAll: (bubbles: List<WmBubble>, prompt: String, script: OcrScript, onDone: (List<String?>) -> Unit) -> Unit,
         /** Called on the main thread with a short user-facing reason whenever a run does not place anything. */
         onFailure: (String) -> Unit = {}
     ) {
@@ -24,6 +26,9 @@ internal object ManualExtractHost {
                 capture(src, x, y, w, h)
             override fun translateAndPlace(bubble: WmBubble, text: String, script: OcrScript, onDone: (String) -> Unit) =
                 translateAndPlace(bubble, text, script, onDone)
+            override fun translateAndPlaceAll(
+                bubbles: List<WmBubble>, prompt: String, script: OcrScript, onDone: (List<String?>) -> Unit
+            ) = translateAndPlaceAll(bubbles, prompt, script, onDone)
         })
     }
 
