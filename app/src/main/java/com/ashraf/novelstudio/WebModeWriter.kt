@@ -136,6 +136,8 @@ internal object WebModeWriter {
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
+      // Model-mask geometry is a fixed shape: fit the text inside the safe rectangle, never grow it outside the mask.
+      if(it.mf)b.setAttribute('data-mf','1');
       // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
       // overflow:hidden is what keeps a long translation inside its mask. fit() still shrinks the font to
       // avoid clipping, so this is a hard backstop rather than the normal path.
@@ -1278,6 +1280,7 @@ internal object WebModeWriter {
                                 .put(r5(Math.max(0f, mr))).put(r5(Math.max(0f, mb))))
                     }
                 }
+                .put("mf", b.modelMaskFit)
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
