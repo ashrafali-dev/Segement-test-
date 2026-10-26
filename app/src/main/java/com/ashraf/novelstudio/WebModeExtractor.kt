@@ -2092,9 +2092,12 @@ internal class WebModeExtractor(
                     if (fastMode && !earlyDet.isDone) { earlyDet.cancel(true); null }
                     else try { earlyDet.get() } catch (_: Exception) { null }
                 } else if (!fastMode && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+            // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
+            // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
+            val detectRan = detectWanted || (earlyDet == null && !fastMode && Prefs.bool(wv.context, "wmBubbleFit", true))
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
-                "lines=${blocks.size} last=${BubbleDetector.lastInfo.ifBlank { "-" }} parallel=${earlyDet != null}")
+                "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })

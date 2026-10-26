@@ -43,6 +43,13 @@ internal object OcrEngineStatus {
 
     fun currentLensDiagnostic(): String = threadLensDiagnostic.get() ?: lastLensDiagnostic
 
+    /**
+     * Diagnostic produced by THIS thread's Lens call only, or null when this thread made no Lens request
+     * (e.g. the image was skipped locally by the non-bubble pre-filter, or answered from cache). Never
+     * falls back to [lastLensDiagnostic], so a log line cannot show another request's timing/size.
+     */
+    fun threadLensDiagnosticOrNull(): String? = threadLensDiagnostic.get()
+
     @Synchronized
     fun finishRoute(ticket: Long, foreground: Boolean, actual: String) {
         // Use the most recently started visible scan, not whichever network request happened to finish last.
@@ -323,11 +330,13 @@ internal class RoutingOcrEngine : OcrEngine {
                 report("lens", false)
                 return lens
             }
-            val engineDetail = OcrEngineStatus.currentLensDiagnostic()
-            val detailImageId = Regex("imageId=([0-9a-f]+)").find(engineDetail)?.groupValues?.get(1) ?: "none"
+            // Only this thread's own Lens reply may be attached: a filtered/cached empty has no fresh
+            // diagnostic, and printing the global one made a 0 ms skip look like a 900 ms upload.
+            val engineDetail = OcrEngineStatus.threadLensDiagnosticOrNull()
+            val detailImageId = engineDetail?.let { Regex("imageId=([0-9a-f]+)").find(it)?.groupValues?.get(1) } ?: "none"
             val emptyWhy = "ROUTER_LENS_EMPTY script=${script.name} image=${bitmap.width}x${bitmap.height} " +
                 "lensNull=${lens == null} blocks=$blockCount letters=$letterCount detailImageId=$detailImageId " +
-                "lensDetail=${engineDetail.take(650)}"
+                "lensDetail=${engineDetail?.take(650) ?: "-"}"
             OcrEngineStatus.setLensDiagnostic(emptyWhy)
             Log.w("NovelStudioOCR", emptyWhy)
             // Empty Lens OCR is still a Lens result; keep engines independent.
