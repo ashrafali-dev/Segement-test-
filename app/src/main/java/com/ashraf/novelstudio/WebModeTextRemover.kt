@@ -266,7 +266,6 @@ internal object WebModeTextRemover {
                 // Reuse eraseDetected's existing OCR-box + model-mask path rather than making a second mask
                 // or a second eraser. Only mark a translated bubble as cleaned when every OCR line mapped
                 // to it was actually erased; otherwise WebModeWriter keeps the normal opaque cover.
-                val bubbleKeyByLine = java.util.IdentityHashMap<OcrBlock, String>()
                 val linesByBubble = LinkedHashMap<String, MutableList<OcrBlock>>()
                 for (line in recognizedLines) {
                     if (line.text.isBlank() || line.w < 2f || line.h < 2f) continue
@@ -287,7 +286,6 @@ internal object WebModeTextRemover {
                         kotlin.math.abs(bb.cx * width - line.cx) + kotlin.math.abs(bb.cy * height - line.cy)
                     } ?: continue
                     val key = WebModeTextRemovalCache.bubbleKey(chosen)
-                    bubbleKeyByLine[line] = key
                     linesByBubble.getOrPut(key) { ArrayList() }.add(line)
                 }
                 if (linesByBubble.isEmpty()) {
