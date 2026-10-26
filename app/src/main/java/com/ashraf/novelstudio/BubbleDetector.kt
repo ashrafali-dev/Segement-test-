@@ -33,6 +33,12 @@ internal object BubbleDetector {
     const val MODEL_URL =
         "https://huggingface.co/mednasserallah/manga109-segmentation-bubble-onnx/resolve/6839b4ea9d95be14f5bbd21ac675d92a7da95ed0/manga109_segmentation_bubble_1024.onnx"
     const val MODEL_SHA256 = "593cae61f4c9ffc773fee34d55c28069390d19415c24dc04600f983311618ea3"
+
+    // Koharu candidate path only. Deliberately NOT used by the active downloader/session yet.
+    // Its output contract is [1,300,38] + [1,32,256,256], unlike MangaBubbleSegCore's
+    // current [1,37,21504] + [1,32,256,256]; swapping MODEL_URL alone would break inference.
+    const val KOHARU_MODEL_URL =
+        "https://huggingface.co/Liiesl/bubble-segment-onnx/resolve/846d268/koharu-yolo26s-seg.onnx"
     private const val MAX_MODEL_BYTES = 16L * 1024L * 1024L
     private const val MIN_MODEL_BYTES = 10L * 1024L * 1024L
     private const val DISPLAY_MODEL_MB = 11.8
