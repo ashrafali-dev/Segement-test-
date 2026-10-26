@@ -10794,10 +10794,14 @@ ${rows.take(220).joinToString("\n")}
             b.setPositiveButton("Download (≈ 42 MB)") { _, _ ->
                 toast("⬇️ Downloading the detector…")
                 BubbleDetector.download(this, { pct ->
-                    if (pct % 25 == 0) runOnUiThread { toast("⬇️ Detector $pct%") }
+                    if (pct == 100) {
+                        runOnUiThread { toast("✅ Download complete · checking model safely…") }
+                    } else if (pct % 25 == 0) {
+                        runOnUiThread { toast("⬇️ Detector download $pct%") }
+                    }
                 }, { err ->
                     runOnUiThread {
-                        toast(if (err == null) "✅ Detector installed and tested on this phone" else "❌ Detector: $err")
+                        toast(if (err == null) "✅ Koharu installed and tested on this phone" else "❌ Koharu: $err")
                         onChanged()
                     }
                 })
