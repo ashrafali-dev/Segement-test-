@@ -4626,6 +4626,9 @@ return t.length>=40?'TXT:'+t:'';
         super.onTrimMemory(level)
         if (level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) {
             CrashLog.note("memory pressure level=$level")
+            // Free the largest optional live-memory consumers without blocking Android's UI callback.
+            WebModeExtractor.trimDetectorCaches()
+            BubbleDetector.onMemoryPressure(level)
         }
     }
 
