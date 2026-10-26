@@ -22,28 +22,24 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Optional YOLO11-nano balloon instance-segmentation model, downloaded to app-private storage on request.
- * A pinned revision and SHA-256 protect against changed or corrupt model downloads.
- *
- * This model has one class (balloon); it does not classify SFX, free text, panels, or text-inside-bubble boxes.
- * Compact instance masks are used for point-in-balloon checks; pixel fitting remains available as a fallback.
+ * Koharu YOLO26s instance-segmentation ONNX model, downloaded to app-private storage on request.
+ * The pinned dynamic-shape export emits four classes and prototype masks. Input size is reduced on low-memory
+ * phones to control activation RAM; download size and SHA-256 are validated before the model is activated.
  */
 internal object BubbleDetector {
     private const val TAG = "NsDetector"
     const val MODEL_URL =
-        "https://huggingface.co/mednasserallah/manga109-segmentation-bubble-onnx/resolve/6839b4ea9d95be14f5bbd21ac675d92a7da95ed0/manga109_segmentation_bubble_1024.onnx"
-    const val MODEL_SHA256 = "593cae61f4c9ffc773fee34d55c28069390d19415c24dc04600f983311618ea3"
-
-    // Koharu candidate path only. Deliberately NOT used by the active downloader/session yet.
-    // Its output contract is [1,300,38] + [1,32,256,256], unlike MangaBubbleSegCore's
-    // current [1,37,21504] + [1,32,256,256]; swapping MODEL_URL alone would break inference.
-    const val KOHARU_MODEL_URL =
-        "https://huggingface.co/Liiesl/bubble-segment-onnx/resolve/846d268/koharu-yolo26s-seg.onnx"
-    private const val MAX_MODEL_BYTES = 16L * 1024L * 1024L
-    private const val MIN_MODEL_BYTES = 10L * 1024L * 1024L
-    private const val DISPLAY_MODEL_MB = 11.8
+        "https://huggingface.co/ShiniShiho/koharu-yolo26s-onnx/resolve/e8d0110da6281b93ee6f6509c741931c49ace9fe/koharu-yolo26s.onnx"
+    const val MODEL_SHA256 = "25a0b06c4ce7ee7c247068a6b3633f98d0f5e913c26ef1cbd06bec3407e914f4"
+    const val MODEL_BYTES = 41_604_574L
+    private const val MAX_MODEL_BYTES = 64L * 1024L * 1024L
+    private const val MIN_MODEL_BYTES = 40L * 1024L * 1024L
+    private const val DISPLAY_MODEL_MB = 41.6
     private const val AUTO_MIN_RAM_MB = 2048L
-    private const val MODEL_FILE_NAME = "bubble_detector.onnx"
+    private const val MODEL_FILE_NAME = "koharu_yolo26s.onnx"
+    private const val LOW_MEMORY_INPUT_SIZE = 512
+    private const val MID_MEMORY_INPUT_SIZE = 640
+    private const val HIGH_MEMORY_INPUT_SIZE = 768
 
     @Volatile var lastError: String = ""
         private set
@@ -62,7 +58,7 @@ internal object BubbleDetector {
     @Synchronized
     fun isInstalled(c: Context): Boolean {
         val file = modelFile(c)
-        if (!file.isFile || file.length() !in MIN_MODEL_BYTES..MAX_MODEL_BYTES) {
+        if (!file.isFile || file.length() != MODEL_BYTES || file.length() !in MIN_MODEL_BYTES..MAX_MODEL_BYTES) {
             verifiedStamp = Long.MIN_VALUE
             verifiedInstalled = false
             return false
@@ -78,6 +74,25 @@ internal object BubbleDetector {
 
     fun isDownloading(): Boolean = downloading.get()
     fun downloadPercent(): Int = downloadPct
+
+    /**
+     * Koharu's activation memory scales with the square of the input size. Keep 4 GB phones on 512,
+     * scale up only when both total and currently available RAM give it room.
+     */
+    private fun recommendedInputSize(c: Context): Int {
+        val totalMb = DeviceTier.totalRamMb(c)
+        val availableBytes = try {
+            val manager = c.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val info = android.app.ActivityManager.MemoryInfo()
+            manager.getMemoryInfo(info)
+            info.availMem
+        } catch (_: Throwable) { 0L }
+        return when {
+            totalMb >= 8192L && availableBytes >= 800L * 1024L * 1024L -> HIGH_MEMORY_INPUT_SIZE
+            totalMb >= 6144L && availableBytes >= 512L * 1024L * 1024L -> MID_MEMORY_INPUT_SIZE
+            else -> LOW_MEMORY_INPUT_SIZE
+        }
+    }
     fun mode(c: Context): String = Prefs.get(c, "wmDetectorMode", "auto")
 
     fun setMode(c: Context, m: String) {
@@ -110,6 +125,8 @@ internal object BubbleDetector {
         sb.append("Model: ").append(state).append('\n')
         sb.append("Mode: ").append(mode(c)).append(" (auto = on with ")
             .append(AUTO_MIN_RAM_MB / 1024.0).append("+ GB RAM; this phone: ").append(phoneRam).append(" GB)\n")
+        sb.append("Input: ").append(recommendedInputSize(c)).append("px (adaptive to available RAM)\n")
+        sb.append("Classes: frame · dialogue_text · balloon · onomatopoeia_text\n")
         sb.append("Right now: ").append(if (enabled(c)) "ACTIVE" else "not active — bubble-fit fallback is used")
         if (lastError.isNotBlank()) sb.append("\nLast problem: ").append(lastError)
         return sb.toString()
@@ -152,14 +169,15 @@ internal object BubbleDetector {
                 downloadPct = 0
                 conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 20000
-                    readTimeout = 60000
+                    readTimeout = 180000
                     instanceFollowRedirects = true
                     setRequestProperty("User-Agent", "NovelStudio-BubbleSeg/1")
                 }
                 val code = conn.responseCode
                 if (code != HttpURLConnection.HTTP_OK) throw IllegalStateException("Server answered HTTP $code")
                 val total = conn.contentLengthLong
-                if (total > MAX_MODEL_BYTES) throw IllegalStateException("Model file is too large ($total bytes)")
+                if (total > MAX_MODEL_BYTES) throw IllegalStateException("Koharu ONNX exceeds the 64 MB download safety ceiling ($total bytes)")
+                if (total > 0 && total != MODEL_BYTES) throw IllegalStateException("Unexpected Koharu file size: $total bytes; expected $MODEL_BYTES")
                 val digest = MessageDigest.getInstance("SHA-256")
                 var read = 0L
                 BufferedInputStream(conn.inputStream).use { input ->
@@ -169,11 +187,11 @@ internal object BubbleDetector {
                             val n = input.read(buf)
                             if (n < 0) break
                             read += n
-                            if (read > MAX_MODEL_BYTES) throw IllegalStateException("Model file exceeded 16 MB safety limit")
+                            if (read > MAX_MODEL_BYTES) throw IllegalStateException("Koharu model download exceeded 64 MB safety ceiling")
                             output.write(buf, 0, n)
                             digest.update(buf, 0, n)
                             val pct = if (total > 0) (read * 100 / total).toInt().coerceIn(0, 99)
-                                else (read * 100 / MAX_MODEL_BYTES).toInt().coerceIn(0, 99)
+                                else (read * 100 / MODEL_BYTES).toInt().coerceIn(0, 99)
                             if (pct != downloadPct) {
                                 downloadPct = pct
                                 onProgress(pct)
@@ -182,10 +200,10 @@ internal object BubbleDetector {
                         output.fd.sync()
                     }
                 }
-                if (read < MIN_MODEL_BYTES) throw IllegalStateException("Downloaded model is too small ($read bytes)")
+                if (read != MODEL_BYTES) throw IllegalStateException("Incomplete Koharu model: downloaded $read of $MODEL_BYTES bytes")
                 val hex = digest.digest().joinToString("") { "%02x".format(it) }
                 if (!hex.equals(MODEL_SHA256, ignoreCase = true)) {
-                    throw IllegalStateException("Checksum mismatch — the file is not the expected balloon model")
+                    throw IllegalStateException("Koharu SHA-256 mismatch — refusing to activate an unexpected model file")
                 }
                 selfTest(part)?.let { throw IllegalStateException(it) }
 
@@ -234,10 +252,11 @@ internal object BubbleDetector {
         var loaded: Loaded? = null
         return try {
             loaded = Loaded(file)
-            val blank = IntArray(MangaBubbleSegCore.SIZE * MangaBubbleSegCore.SIZE) { 0xFF727272.toInt() }
+            val size = KoharuSegCore.DEFAULT_SIZE
+            val blank = IntArray(size * size) { 0xFF727272.toInt() }
             loaded.run(
-                blank, intArrayOf(0, 0, MangaBubbleSegCore.SIZE, MangaBubbleSegCore.SIZE),
-                MangaBubbleSegCore.Letterbox(1f, 1f, 0, 0, MangaBubbleSegCore.SIZE, MangaBubbleSegCore.SIZE)
+                blank, intArrayOf(0, 0, size, size),
+                KoharuSegCore.Letterbox(1f, 1f, 0, 0, size, size), size
             )
             null
         } catch (e: Throwable) {
@@ -278,18 +297,22 @@ internal object BubbleDetector {
                 sessionStamp = file.lastModified()
             }
             val t0 = SystemClock.elapsedRealtime()
+            val inputSize = recommendedInputSize(c)
             val tiles = BubbleDetectorCore.capTiles(BubbleDetectorCore.planTiles(bmp.width, bmp.height))
             val all = ArrayList<BubbleDetectorCore.Det>()
             for (tile in tiles) {
                 if (bmp.isRecycled) throw IllegalStateException("source bitmap was recycled during detection")
-                val prepared = prepareTile(bmp, tile)
-                all.addAll(loaded.run(prepared.pixels, tile, prepared.letterbox))
+                val prepared = prepareTile(bmp, tile, inputSize)
+                all.addAll(loaded.run(prepared.pixels, tile, prepared.letterbox, inputSize))
             }
             val out = BubbleDetectorCore.merge(all)
             val elapsed = SystemClock.elapsedRealtime() - t0
-            Log.i(TAG, "YOLO11-seg tiles=${tiles.size} balloons=${out.size} image=${bmp.width}x${bmp.height} ms=$elapsed")
+            val balloons = out.count { it.label == BubbleDetectorCore.CLS_BUBBLE }
+            val textRegions = out.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }
+            val freeText = out.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE }
+            Log.i(TAG, "Koharu tiles=${tiles.size} input=${inputSize} regions=${out.size} balloons=$balloons dialogueText=$textRegions sfx=$freeText image=${bmp.width}x${bmp.height} ms=$elapsed")
             lastError = ""
-            lastInfo = "${out.size} balloons · ${elapsed}ms"
+            lastInfo = "$balloons balloons · ${textRegions + freeText} text regions · ${elapsed}ms @${inputSize}px"
             out
         } catch (e: OutOfMemoryError) {
             lastError = "Not enough memory for balloon segmentation"
@@ -308,31 +331,31 @@ internal object BubbleDetector {
         }
     }
 
-    private data class PreparedTile(val pixels: IntArray, val letterbox: MangaBubbleSegCore.Letterbox)
+    private data class PreparedTile(val pixels: IntArray, val letterbox: KoharuSegCore.Letterbox)
 
-    private fun prepareTile(source: Bitmap, tile: IntArray): PreparedTile {
+    private fun prepareTile(source: Bitmap, tile: IntArray, inputSize: Int): PreparedTile {
         check(!source.isRecycled) { "source bitmap was recycled before createBitmap" }
         val x = tile[0].coerceIn(0, source.width - 1)
         val y = tile[1].coerceIn(0, source.height - 1)
         val w = (tile[2] - x).coerceIn(1, source.width - x)
         val h = (tile[3] - y).coerceIn(1, source.height - y)
-        val nominal = min(MangaBubbleSegCore.SIZE.toFloat() / w, MangaBubbleSegCore.SIZE.toFloat() / h)
-        val resizedW = (w * nominal).roundToInt().coerceIn(1, MangaBubbleSegCore.SIZE)
-        val resizedH = (h * nominal).roundToInt().coerceIn(1, MangaBubbleSegCore.SIZE)
+        val nominal = min(inputSize.toFloat() / w, inputSize.toFloat() / h)
+        val resizedW = (w * nominal).roundToInt().coerceIn(1, inputSize)
+        val resizedH = (h * nominal).roundToInt().coerceIn(1, inputSize)
         val scaleX = resizedW.toFloat() / w
         val scaleY = resizedH.toFloat() / h
-        val padX = (MangaBubbleSegCore.SIZE - resizedW) / 2
-        val padY = (MangaBubbleSegCore.SIZE - resizedH) / 2
+        val padX = (inputSize - resizedW) / 2
+        val padY = (inputSize - resizedH) / 2
 
         var crop: Bitmap? = null
         var scaled: Bitmap? = null
         try {
             crop = Bitmap.createBitmap(source, x, y, w, h)
             scaled = Bitmap.createScaledBitmap(crop, resizedW, resizedH, true)
-            val canvas = IntArray(MangaBubbleSegCore.SIZE * MangaBubbleSegCore.SIZE) { 0xFF727272.toInt() }
-            scaled.getPixels(canvas, padY * MangaBubbleSegCore.SIZE + padX, MangaBubbleSegCore.SIZE, 0, 0, resizedW, resizedH)
+            val canvas = IntArray(inputSize * inputSize) { 0xFF727272.toInt() }
+            scaled.getPixels(canvas, padY * inputSize + padX, inputSize, 0, 0, resizedW, resizedH)
             return PreparedTile(
-                canvas, MangaBubbleSegCore.Letterbox(scaleX, scaleY, padX, padY, resizedW, resizedH)
+                canvas, KoharuSegCore.Letterbox(scaleX, scaleY, padX, padY, resizedW, resizedH)
             )
         } finally {
             val sc = scaled
@@ -352,7 +375,8 @@ internal object BubbleDetector {
         private val imageName: String
         private val predictionName: String
         private val prototypeName: String
-        private val chw = FloatArray(3 * MangaBubbleSegCore.SIZE * MangaBubbleSegCore.SIZE)
+        private var chwSize = 0
+        private var chw = FloatArray(0)
 
         init {
             ses = createSession(file)
@@ -361,13 +385,13 @@ internal object BubbleDetector {
                 for ((name, info) in ses.inputInfo) {
                     val ti = info.info as? TensorInfo ?: continue
                     if (ti.shape.size == 4 && ti.shape[1] == 3L &&
-                        ti.shape[2] == MangaBubbleSegCore.SIZE.toLong() &&
-                        ti.shape[3] == MangaBubbleSegCore.SIZE.toLong()) {
+                        (ti.shape[2] <= 0L || ti.shape[2] % KoharuSegCore.STRIDE == 0L) &&
+                        (ti.shape[3] <= 0L || ti.shape[3] % KoharuSegCore.STRIDE == 0L)) {
                         img = name
                         break
                     }
                 }
-                require(img != null) { "model input is not [1,3,1024,1024]" }
+                require(img != null) { "Koharu input must be [1,3,H,W] with stride-32 spatial dimensions" }
                 imageName = img
 
                 var pred: String? = null
@@ -375,14 +399,13 @@ internal object BubbleDetector {
                 for ((name, info) in ses.outputInfo) {
                     val ti = info.info as? TensorInfo ?: continue
                     val shape = ti.shape
-                    if (shape.size == 3 && shape[1] == MangaBubbleSegCore.CHANNELS.toLong() &&
-                        shape[2] == MangaBubbleSegCore.ANCHORS.toLong()) pred = name
-                    if (shape.size == 4 && shape[1] == MangaBubbleSegCore.PROTO_CHANNELS.toLong() &&
-                        shape[2] == MangaBubbleSegCore.PROTO_SIZE.toLong() &&
-                        shape[3] == MangaBubbleSegCore.PROTO_SIZE.toLong()) proto = name
+                    if (shape.size == 3 && shape[2] == KoharuSegCore.ROW_SIZE.toLong()) pred = name
+                    if (shape.size == 4 && shape[1] == KoharuSegCore.PROTO_CHANNELS.toLong() &&
+                        (shape[2] <= 0L || shape[2] % 4L == 0L) &&
+                        (shape[3] <= 0L || shape[3] % 4L == 0L)) proto = name
                 }
                 require(pred != null && proto != null) {
-                    "model outputs do not match YOLO segmentation contract (found ${ses.outputInfo.keys})"
+                    "Koharu outputs must be [1,instances,38] and [1,32,H/4,W/4] (found ${ses.outputInfo.keys})"
                 }
                 predictionName = pred
                 prototypeName = proto
@@ -409,25 +432,43 @@ internal object BubbleDetector {
             }
         }
 
-        fun run(argb: IntArray, tile: IntArray, letterbox: MangaBubbleSegCore.Letterbox): List<BubbleDetectorCore.Det> {
-            check(argb.size >= MangaBubbleSegCore.SIZE * MangaBubbleSegCore.SIZE) { "letterboxed canvas is too small" }
-            BubbleDetectorCore.fillChw(argb, MangaBubbleSegCore.SIZE, chw)
+        fun run(
+            argb: IntArray,
+            tile: IntArray,
+            letterbox: KoharuSegCore.Letterbox,
+            inputSize: Int
+        ): List<BubbleDetectorCore.Det> {
+            require(KoharuSegCore.validInputSize(inputSize))
+            check(argb.size >= inputSize * inputSize) { "letterboxed Koharu canvas is too small" }
+            if (chwSize != inputSize) {
+                chw = FloatArray(3 * inputSize * inputSize)
+                chwSize = inputSize
+            }
+            BubbleDetectorCore.fillChw(argb, inputSize, chw)
             var input: OnnxTensor? = null
             var result: OrtSession.Result? = null
             try {
                 input = OnnxTensor.createTensor(
                     env, FloatBuffer.wrap(chw),
-                    longArrayOf(1, 3, MangaBubbleSegCore.SIZE.toLong(), MangaBubbleSegCore.SIZE.toLong())
+                    longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong())
                 )
                 result = ses.run(mapOf(imageName to input))
-                // Result.get(name) returns Optional<OnnxValue>; casting the Optional itself always fails.
                 val predValue = result.get(predictionName).orElse(null)
                 val pred = predValue as? OnnxTensor
-                    ?: throw IllegalStateException("prediction output is not a tensor")
+                    ?: throw IllegalStateException("Koharu output0 is not a tensor")
                 val protoValue = result.get(prototypeName).orElse(null)
                 val proto = protoValue as? OnnxTensor
-                    ?: throw IllegalStateException("prototype output is not a tensor")
-                return MangaBubbleSegCore.decode(toFloats(pred), toFloats(proto), tile, letterbox)
+                    ?: throw IllegalStateException("Koharu output1 is not a tensor")
+                val protoShape = proto.info.shape
+                require(protoShape.size == 4 && protoShape[1] == KoharuSegCore.PROTO_CHANNELS.toLong()) {
+                    "Koharu prototype output shape is invalid: ${protoShape.contentToString()}"
+                }
+                val protoHeight = protoShape[2].toInt()
+                val protoWidth = protoShape[3].toInt()
+                return KoharuSegCore.decode(
+                    toFloats(pred), toFloats(proto), protoWidth, protoHeight,
+                    inputSize, tile, letterbox
+                )
             } finally {
                 try { result?.close() } catch (_: Throwable) {}
                 try { input?.close() } catch (_: Throwable) {}
