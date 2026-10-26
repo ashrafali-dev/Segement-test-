@@ -33,7 +33,7 @@ internal object BubbleDetector {
     const val MODEL_SHA256 = "25a0b06c4ce7ee7c247068a6b3633f98d0f5e913c26ef1cbd06bec3407e914f4"
     const val MODEL_BYTES = 41_604_574L
     private const val MAX_MODEL_BYTES = 64L * 1024L * 1024L
-    private const val MIN_MODEL_BYTES = 40L * 1024L * 1024L
+    private const val MIN_MODEL_BYTES = 39L * 1024L * 1024L
     private const val DISPLAY_MODEL_MB = 41.6
     private const val AUTO_MIN_RAM_MB = 2048L
     private const val MODEL_FILE_NAME = "koharu_yolo26s.onnx"
@@ -165,7 +165,11 @@ internal object BubbleDetector {
                 target.parentFile?.let {
                     if (!it.exists() && !it.mkdirs()) throw IllegalStateException("Could not create the model folder")
                 }
-                if (part.exists()) part.delete()
+                        if (part.exists()) part.delete()
+                val freeBytes = android.os.StatFs(target.parentFile?.absolutePath ?: app.filesDir.absolutePath).availableBytes
+                if (freeBytes < MODEL_BYTES + 2L * 1024L * 1024L) {
+                    throw IllegalStateException("Need at least 44 MB free storage to install Koharu (available ${freeBytes / (1024 * 1024)} MB)")
+                }
                 downloadPct = 0
                 conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 20000
