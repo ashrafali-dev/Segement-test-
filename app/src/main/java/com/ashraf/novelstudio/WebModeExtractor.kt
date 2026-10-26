@@ -1980,6 +1980,7 @@ internal class WebModeExtractor(
             // Preserve OCR text boxes and model detections in native source-image coordinates for cleaning.
             val recognizedLines = ArrayList<OcrBlock>()
             val detectionsForClean = ArrayList<BubbleDetectorCore.Det>()
+            val detectorReturned = booleanArrayOf(false)
             fun finishResult(): PanelOcr {
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
@@ -1993,8 +1994,8 @@ internal class WebModeExtractor(
                 val fullTextRemoverOn = Prefs.bool(wv.context, "wmTextRemoval2", true)
                 // readSlice may run on several overlapping slices. Merge their native-coordinate
                 // detections here instead of letting the last slice overwrite every earlier mask.
-                val freshDetections = detectionsForClean.takeIf { it.isNotEmpty() }
-                    ?.let { BubbleDetectorCore.merge(it) }
+                // An empty result is meaningful too: it must replace old detections for a reused image URL.
+                val freshDetections = if (detectorReturned[0]) BubbleDetectorCore.merge(detectionsForClean) else null
                 if (freshDetections != null) synchronized(detectBySrc) { detectBySrc[src] = freshDetections }
                 val panelDetections = freshDetections ?: synchronized(detectBySrc) { detectBySrc[src] }
                 val hasBalloonMasks = panelDetections?.any {
@@ -2067,7 +2068,8 @@ internal class WebModeExtractor(
             if (h <= WebModeLogic.SLICE_H) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
                 try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh,
-                    recognizedForClean = recognizedLines, detectedForClean = detectionsForClean) } finally { bmp.recycle() }
+                    recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
+                    detectorReturned = detectorReturned) } finally { bmp.recycle() }
             } else {
                 @Suppress("DEPRECATION")
                 val region = (try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null })
@@ -2108,7 +2110,8 @@ internal class WebModeExtractor(
                                         if (rec != null)
                                             readSlice(b, st, sl[j].first, sample, w, h, src, texts, bubbles, j == 0, j == sl.size - 1,
                                                 fastMode = fastMode, forceFresh = forceFresh, preRecognized = rec,
-                                                recognizedForClean = recognizedLines, detectedForClean = detectionsForClean)
+                                                recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
+                    detectorReturned = detectorReturned)
                                     }
                                 } finally {
                                     for (f in futs) f?.cancel(true)
@@ -2125,7 +2128,8 @@ internal class WebModeExtractor(
                             try {
                                 if (bmp.width >= 32 && bmp.height >= 32)
                                     readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1,
-                                        fastMode = fastMode, forceFresh = forceFresh, recognizedForClean = recognizedLines, detectedForClean = detectionsForClean)
+                                        fastMode = fastMode, forceFresh = forceFresh, recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
+                    detectorReturned = detectorReturned)
                             } finally { bmp.recycle() }
                         }
                     }
@@ -2144,7 +2148,8 @@ internal class WebModeExtractor(
             firstSlice: Boolean, lastSlice: Boolean, x0: Int = 0, fastMode: Boolean = false,
             preRecognized: OcrResult? = null, forceFresh: Boolean = false,
             recognizedForClean: MutableList<OcrBlock>? = null,
-            detectedForClean: MutableList<BubbleDetectorCore.Det>? = null
+            detectedForClean: MutableList<BubbleDetectorCore.Det>? = null,
+            detectorReturned: BooleanArray? = null
         ) {
             val tSlice = android.os.SystemClock.elapsedRealtime()
             val outBefore = out.size
@@ -2231,6 +2236,7 @@ internal class WebModeExtractor(
             // native source-image pixels. Mask samples are normalized to their box, so the same mask
             // remains valid when the box is scaled and offset.
             if (dets != null && detectedForClean != null) {
+                detectorReturned?.let { it[0] = true }
                 for (d in dets) {
                     val l = kotlin.math.floor(x0 + d.l * k).toInt()
                     val t = kotlin.math.floor(y0 + d.t * k).toInt()
