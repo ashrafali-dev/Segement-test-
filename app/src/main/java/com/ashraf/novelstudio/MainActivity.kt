@@ -3131,23 +3131,43 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     // ---- "reading the page" that never ends: point new users to the search (re-scan) button
-    private var readingSinceMs = 0L
+    @Volatile private var readingSinceMs = 0L
+    private val longReadingTipPending = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private fun trackLongReading(reading: Boolean) {
         if (!reading) { readingSinceMs = 0L; return }
         val now = android.os.SystemClock.elapsedRealtime()
         if (readingSinceMs == 0L) { readingSinceMs = now; return }
-        if (now - readingSinceMs < 75_000L || !webModeOn() || isFinishing) return
-        val shown = Prefs.get(this, "ocrTipCount", "0").toIntOrNull() ?: 0
-        val usage = Prefs.get(this, "usageMin", "0").toIntOrNull() ?: 0
-        if (shown >= 2 || usage > 180) return
-        readingSinceMs = now + 600_000L   // not again for 10 minutes
-        Prefs.put(this, "ocrTipCount", (shown + 1).toString())
-        AlertDialog.Builder(this)
-            .setTitle("Taking a long time?")
-            .setMessage("If the reading animation keeps running, tap the search button on the right side of the screen and frame the bubble, so the model can find it. Not every text sits in a bubble — sometimes it is plain text on the image.")
-            .setPositiveButton("Got it", null)
-            .show()
+        if (now - readingSinceMs < 75_000L || isFinishing) return
+        // Do not hit SharedPreferences from updateActivityChip's 450 ms UI ticker. Reserve the
+        // cooldown before enqueueing so a slow disk cannot queue hundreds of duplicate checks.
+        readingSinceMs = now + 600_000L
+        if (!longReadingTipPending.compareAndSet(false, true)) return
+        try {
+            chipStatusExecutor.execute {
+                try {
+                    if (!webModeOn() || isFinishing) return@execute
+                    val shown = Prefs.get(this@MainActivity, "ocrTipCount", "0").toIntOrNull() ?: 0
+                    val usage = Prefs.get(this@MainActivity, "usageMin", "0").toIntOrNull() ?: 0
+                    if (shown >= 2 || usage > 180) return@execute
+                    Prefs.put(this@MainActivity, "ocrTipCount", (shown + 1).toString())
+                    handler.post {
+                        if (isFinishing || isDestroyed) return@post
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Taking a long time?")
+                            .setMessage("If the reading animation keeps running, tap the search button on the right side of the screen and frame the bubble, so the model can find it. Not every text sits in a bubble — sometimes it is plain text on the image.")
+                            .setPositiveButton("Got it", null)
+                            .show()
+                    }
+                } catch (t: Throwable) {
+                    Log.w("NsChip", "long-reading tip check failed", t)
+                } finally {
+                    longReadingTipPending.set(false)
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            longReadingTipPending.set(false)
+        }
     }
     private val communityTelegram = "https://t.me/c/4373541125/2"
     private val communityReddit = "https://www.reddit.com/r/NovelStudio/s/BWuOYCZSUe"
