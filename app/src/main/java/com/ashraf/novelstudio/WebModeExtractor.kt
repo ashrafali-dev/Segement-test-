@@ -1977,6 +1977,8 @@ internal class WebModeExtractor(
             val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
             val texts = ArrayList<String>()
             val bubbles = ArrayList<WmBubble>()
+            // Preserve OCR text boxes in native source-image coordinates for the model-mask cleaner.
+            val recognizedLines = ArrayList<OcrBlock>()
             fun finishResult(): PanelOcr {
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
@@ -2001,7 +2003,8 @@ internal class WebModeExtractor(
                         val cleaned = WebModeTextRemover.cleanAndCache(
                             wv.context, src, bytes, bubbles,
                             allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead",
-                            dets = panelDetections
+                            dets = panelDetections,
+                            recognizedLines = recognizedLines
                         )
                         val cleanerMode = if (fullTextRemoverOn) "full" else "balloon-mask-only"
                         OcrDiag.log("CLEAN", "mode=$cleanerMode ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} masks=${panelDetections?.count { it.mask != null } ?: 0} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
@@ -2051,13 +2054,15 @@ internal class WebModeExtractor(
                 try {
                     if (cropped.width < 16 || cropped.height < 16) throw DecodeException()
                     readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
-                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh)
+                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh,
+                        recognizedForClean = recognizedLines)
                 } finally { cropped.recycle() }
                 return finishResult()
             }
             if (h <= WebModeLogic.SLICE_H) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
-                try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh) } finally { bmp.recycle() }
+                try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh,
+                    recognizedForClean = recognizedLines) } finally { bmp.recycle() }
             } else {
                 @Suppress("DEPRECATION")
                 val region = (try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null })
@@ -2097,7 +2102,8 @@ internal class WebModeExtractor(
                                             catch (e: java.util.concurrent.TimeoutException) { throw RuntimeException("Lens slice timeout", e) }
                                         if (rec != null)
                                             readSlice(b, st, sl[j].first, sample, w, h, src, texts, bubbles, j == 0, j == sl.size - 1,
-                                                fastMode = fastMode, forceFresh = forceFresh, preRecognized = rec)
+                                                fastMode = fastMode, forceFresh = forceFresh, preRecognized = rec,
+                                                recognizedForClean = recognizedLines)
                                     }
                                 } finally {
                                     for (f in futs) f?.cancel(true)
@@ -2113,7 +2119,8 @@ internal class WebModeExtractor(
                             val bmp = region.decodeRegion(Rect(0, y0, w, y1), opts) ?: throw DecodeException()
                             try {
                                 if (bmp.width >= 32 && bmp.height >= 32)
-                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1, fastMode = fastMode, forceFresh = forceFresh)
+                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1,
+                                        fastMode = fastMode, forceFresh = forceFresh, recognizedForClean = recognizedLines)
                             } finally { bmp.recycle() }
                         }
                     }
@@ -2130,7 +2137,8 @@ internal class WebModeExtractor(
             bmp: Bitmap, st: ScriptState, y0: Int, sample: Int, fullW: Int, fullH: Int,
             src: String, texts: MutableList<String>, out: MutableList<WmBubble>,
             firstSlice: Boolean, lastSlice: Boolean, x0: Int = 0, fastMode: Boolean = false,
-            preRecognized: OcrResult? = null, forceFresh: Boolean = false
+            preRecognized: OcrResult? = null, forceFresh: Boolean = false,
+            recognizedForClean: MutableList<OcrBlock>? = null
         ) {
             val tSlice = android.os.SystemClock.elapsedRealtime()
             val outBefore = out.size
@@ -2169,6 +2177,26 @@ internal class WebModeExtractor(
             if (blocks.isEmpty()) return
             val rects = blocks.map { WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
             val k = sample.toFloat()
+            // Carry the original OCR boxes forward (not the larger translation/cover rectangles). These are
+            // the text-region inputs that the detector's instance masks validate and the existing eraser cleans.
+            recognizedForClean?.let { target ->
+                for (line in blocks) {
+                    val cx = x0 + line.cx * k
+                    val cy = y0 + line.cy * k
+                    val ww = line.w * k
+                    val hh = line.h * k
+                    target.add(OcrBlock(
+                        text = line.text,
+                        top = (y0 + line.top * k).toInt(),
+                        left = (x0 + line.left * k).toInt(),
+                        cx = cx, cy = cy, w = ww, h = hh,
+                        angle = line.angle, fontPx = line.fontPx * k,
+                        vertical = line.vertical, confidence = line.confidence,
+                        observations = line.observations,
+                        polygon = line.polygon.map { p -> (x0 + p.first * k) to (y0 + p.second * k) }
+                    ))
+                }
+            }
             // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
             // It only adds information: which lines belong to different bubbles and which lettering is free text.
             // In realtime we never wait on it: an unfinished detection is cancelled so the Lens text is emitted now.
