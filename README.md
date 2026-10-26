@@ -1,14 +1,6 @@
 <div align="center">
 
-# 🎌 Novel Studio — Overlay Engine
-
-**Read any webtoon, manga or web novel in your own language — without scraping a single page.**
-
-[![Kotlin](https://img.shields.io/badge/Kotlin-100%25-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
-[![Android](https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://developer.android.com)
-[![OCR](https://img.shields.io/badge/OCR-Google%20Lens%20%2B%20ML%20Kit-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://developers.google.com/ml-kit)
-[![Speed](https://img.shields.io/badge/150%20panels-under%2050s-FF6B6B?style=for-the-badge)](.#-performance)
-[![No Scraping](https://img.shields.io/badge/Scraping-Zero-success?style=for-the-badge)](#-the-middleman-concept)
+# Novel Studio — Reading & Translation Overlay
 
 [English](README.md) · [বাংলা](README_bn.md)
 
@@ -16,175 +8,81 @@
 
 ---
 
-## ✨ What is this?
+## What is Novel Studio?
 
-The **extended (advanced) version of Novel Studio** — a non-destructive, on-the-fly **OCR + translation overlay** for webtoons, manga and web novels.
+Novel Studio is an Android reading app that works as a middleman between the page you are reading and the AI chatbot you choose. For web novels, it can extract chapter text from the page and send it to the chatbot for translation. For image-based webtoons and manga, it can use OCR to recognize text in the images, send that text through the translation workflow, and place the translated result back over the original page. The idea is simple: keep reading on the page you already use while Novel Studio handles the steps between the source text and its translation.
 
-It does not download chapters. It does not rewrite a site's database. It does not host pirated content.
-It sits *on top* of the page you are already reading and paints your language over the original lettering, in the exact spot the original text sat.
+Novel Studio uses a chatbot's web interface rather than shipping its own general-purpose translation model. It does not host or redistribute the website's original chapters. Some features can save translated text locally, such as the translation library.
 
-> **Think of it as a translator standing behind the page, whispering into your ear — the page itself is untouched.**
+## What it can do
 
----
+### Web novels
+- Extract chapter text from a reader page when the site's structure allows it.
+- Send the extracted text to the configured chatbot and insert the translation back into the reading workflow.
+- Support next/previous chapter navigation and optional automatic extraction/translation.
+- Keep translated chapters in a local library, with options to view and export them as TXT.
+- Use a glossary and editable prompts to help keep names and terminology consistent.
 
-## 🧠 The "Middleman" Concept
+### Webtoons and manga
+- Recognize text inside chapter images with OCR.
+- Show translated text over the original lettering instead of requiring a separate translated-image reader.
+- Offer chapter-wide scanning, real-time scanning while reading, and manual OCR for a selected area or missed text.
+- Keep the original view available so readers can compare the source and translation.
+- Use bubble/layout analysis to place translated lines near their source positions.
 
-The app is a **broker between two browsers**.
+### Reading tools
+- Read websites inside the app's WebView.
+- Use reader and chatbot views as supported by the current interface.
+- Keep bookmarks and browsing history.
+- Adjust translation prompts and target-language settings.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        YOUR PHONE                            │
-│                                                              │
-│   ┌────────────────────────────────────────────────────┐     │
-│   │  WebView #1  — the page you read                   │     │
-│   │                                                    │     │
-│   │   ┌──────────┐   ┌──────────┐   ┌──────────┐       │     │
-│   │   │ panel 1  │   │ panel 2  │   │ panel 3  │       │     │
-│   │   │  漫画の   │   │  テキスト │   │  SFX!!   │       │     │
-│   │   │  テキスト │   │          │   │          │       │     │
-│   │   └────┬─────┘   └────┬─────┘   └────┬─────┘       │     │
-│   └────────┼──────────────┼──────────────┼─────────────┘     │
-│            │  pixels      │              │                   │
-│            ▼              ▼              ▼                   │
-│   ┌────────────────────────────────────────────────────┐     │
-│   │        OCR   →   text boxes + geometry             │     │
-│   │        Google Lens  (remote, primary)              │     │
-│   │        ML Kit       (local, pre-filter + fallback) │     │
-│   └────────────────────┬───────────────────────────────┘     │
-│                        │  "this line lives at x, y, w, h"    │
-│                        ▼                                     │
-│   ┌────────────────────────────────────────────────────┐     │
-│   │  WebView #2 — your chatbot / translation provider  │     │
-│   └────────────────────┬───────────────────────────────┘     │
-│                        │  translated text                    │
-│                        ▼                                     │
-│   ┌────────────────────────────────────────────────────┐     │
-│   │   HTML OVERLAY  →  painted back onto WebView #1    │     │
-│   │   〔 これが翻訳です 〕  ← same box, same bubble      │     │
-│   └────────────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────────────┘
-```
+The results and available controls depend on the website, the selected mode, and the configured chatbot. Compatibility is not guaranteed for every website.
 
-**Top → bottom:** the app reads the comic, asks the translator, and writes the answer back onto the page.
+## How it works
 
-**Bottom → top:** the same bridge runs in reverse — text the chatbot produces can be read and placed too.
+**For a web novel:** Novel Studio reads the chapter text available from the reader page, sends it to the selected chatbot, and then places or saves the translated result.
 
-### 🔒 Non-Destructive HTML Overlay
+**For an image-based chapter:** Novel Studio reads the page images or visible screen area, runs OCR to identify text and its position, sends the extracted text through the translation workflow, and renders the translated text over the corresponding areas. OCR and translation are separate steps: recognizing the source text correctly does not automatically guarantee a perfect translation.
 
-| Traditional scraper | Novel Studio Overlay |
-|---|---|
-| Downloads and rehosts the chapter | ❌ Never downloads a chapter |
-| Breaks when the site changes markup | ✅ Uses the site's own DOM to place text |
-| Images no longer match the original | ✅ Same page, same scroll, same zoom |
-| Needs mirrors and storage | ✅ Zero copies on disk |
+Novel Studio does not require a Novel Studio-specific AI API key for its web-chatbot workflow. You use the chatbot website configured in the app; that service's own sign-in requirements, access rules, and usage limits still apply.
 
-Because placement uses the **page's own HTML and JS**, the translation scrolls with the artwork, resizes with the viewport, and lands inside the original bubble — not in a separate reader view.
+## OCR languages and reader-reported results
 
----
+The current code supports ML Kit OCR recognizers for **Latin, Chinese, Japanese, and Korean** scripts. Google ML Kit is the default OCR engine in the current branch. Google Lens OCR is also available as an optional engine. OCR script selection can depend on the selected setting and the page being read.
 
-## ⚡ Performance
+From my experience as an everyday reader, ordinary Korean text and ordinary text in Japanese manga often work at **around 90% or better**. This is a personal, informal estimate—not a measured benchmark, a controlled study, or a guarantee for every page. It describes regular text, not every kind of lettering. Small or blurry text, unusual fonts, stylized sound effects, complex image layouts, and other difficult cases can reduce results.
 
-| Mode | What it does | Measured on SM-A136B (3 GB RAM) |
-|---|---|---|
-| 🚀 **Fast Scan (Batch)** | Whole chapter, pipelined OCR + parallel Lens requests | **64 panels in 52 s** |
-| 🎯 **Realtime** | Instant translation as you scroll | ~0.2–1.5 s per visible panel |
-| 🧠 **Ahead (Pre-fetch)** | Translates the *next* chapters while you read | **7+ chapters** pre-translated |
-| ✋ **Manual Lite** | One tap = one crop = highest-quality read | Sub-second, zero background work |
+The remaining mistakes are not all the same kind of problem. Some begin with OCR missing or misreading the source text; translation quality can also depend on the selected chatbot, target language, prompt, and surrounding story context. A stronger prompt and better context can help the translation, but they cannot recover source text that OCR never read correctly.
 
-### Why a whole chapter no longer takes five minutes
+## Performance and testing
 
-```
-fetch (6 threads) ─┐
-                   ├─► ML Kit pre-filter (~40 ms) ──► no text? skip Lens
-                   │                                  └─ text? ──► Google Lens
-                   └─► Semaphore(3) ─────────────────────────────► parallel replies
-```
+On the developer's own low-budget Samsung SM-A136B phone with 3 GB RAM, some chapter translation jobs have taken roughly **50 seconds** in testing. One recorded Fast Scan test processed **64 panels in 52 seconds**. These are observations from specific tests, not a universal speed claim or a guarantee that every chapter will finish within that time.
 
-* **Pipelining** — panel #2 downloads while panel #1 is being read.
-* **Local pre-filter** — silent art panels never cost a network round trip.
-* **Strict rate limiting** — three Lens requests in flight, 200 ms apart. One 429 costs more time than the parallelism saves.
-* **Honest failures** — a bug in our own code never silently downgrades the whole chapter to the local engine.
+Actual speed can vary with the phone, available memory, network, number and quality of images, website behavior, and chatbot response time.
+
+**This project has not yet undergone large-scale testing** across a wide range of phones, websites, chapters, and reading conditions. Community testing is needed to find compatibility issues, OCR mistakes, layout bugs, and performance problems. Feedback and bug reports are welcome.
+
+## Technical overview
+
+- **Platform:** Android, Kotlin, minSdk 24 (Android 7.0 or later); Java/Kotlin target 17.
+- **Page integration:** Android WebView with a JavaScript bridge.
+- **OCR:** ML Kit recognizers for Latin, Chinese, Japanese, and Korean; optional Google Lens OCR.
+- **Text placement:** OCR text blocks and their geometry, bubble/layout analysis, and an HTML/JavaScript overlay.
+- **Optional image cleanup:** ONNX Runtime supports optional detection/inpainting components. The LaMa inpainting model is downloaded separately rather than bundled in the APK; whether it can be used depends on device resources and model availability.
+- **Translation:** The chatbot web interface configured by the reader; translation behavior depends on that service and the prompt.
+
+These are implementation details, not a claim that every optional model is installed or enabled on every device.
+
+## Community testing
+
+This project is still being improved, and broad real-world validation is not complete. If you try it, reports that include the phone model, website, mode, source language, and a short description of what went wrong are especially helpful. Please avoid sharing private account information or session details in bug reports.
+
+## Credits
+
+Built by Ashraf Ali 🇧🇩
+
+Special thanks to the open-source community and everyone whose work helped make this project possible.
 
 ---
 
-## 📱 Built for real phones
-
-| Device class | What you get |
-|---|---|
-| 💎 **4 GB+ RAM** | **AI Inpainting (aiPainter)** — the model rebuilds the artwork under erased lettering. Invisible seams. |
-| 📱 **Budget / 2–3 GB** | **SFX-aware masking** — lettering is detected, painted out with sampled page colour, and the translation is fitted inside the bubble. No heavy model, no OOM kill. |
-
-Both paths keep the same overlay, the same translation quality and the same chapter position. Only the *erasing technique* changes.
-
----
-
-## 🔬 Engine stack
-
-| Role | Engine | Why |
-|---|---|---|
-| Primary OCR | **Google Lens** | Best accuracy on dense CJK columns and stylised lettering |
-| Local pre-filter | **ML Kit (on-device)** | Free, ~40 ms, answers "is there text at all?" before a network call |
-| Fallback OCR | **ML Kit (thorough)** | Runs on the *same crop* when Lens fails or finds nothing |
-| Bubble geometry | **BubbleFit** (pixel) + optional **ONNX detector** | Finds the bubble interior so text is fitted, not just covered |
-| Translation | **Your chatbot / provider** | Any LLM web UI you already use — it stays the translator |
-
-**The chatbot is the translation engine.** The app drives it through the same WebView you see, reads the reply, parses the numbered markers, and maps each answer back to the exact OCR box it came from.
-
----
-
-## 📖 Novel Mode
-
-Web novels in Chinese, Korean, Japanese or any other language — read them in yours.
-
-* Extracts chapter text straight from the reader DOM (fast path, no OCR needed).
-* Falls back to OCR only when a site renders its text as images.
-* Same overlay, same translation provider, same glossary behaviour.
-
----
-
-## 🗺️ Roadmap
-
-| Status | Feature |
-|---|---|
-| 🚧 Planned | **Community Glossaries** — upload a chapter's term list; anyone can apply it in one tap so names stay consistent across groups |
-| 🚧 Planned | **Story / Chapter Communities** — discuss characters and plot with readers of the same chapter |
-| 🚧 Planned | **Mihon-style Extensions** — a library of per-site extensions instead of one generic engine |
-| ✅ Shipped | Fast Scan, Realtime, Ahead pre-fetch, Manual Lite, Novel Mode, AI inpainting, SFX masking |
-
----
-
-## 🛠 Tech stack
-
-```
-Kotlin · Android (minSdk 24) · WebView · JavaScript bridge
-Google Lens OCR (HTTP)      ML Kit Text Recognition (4 script models)
-ONNX Runtime (optional)     LaMa inpainting (optional)
-PixelCopy · Canvas overlay  Custom HTML overlay renderer
-ExecutorService + Semaphore · LRU caches · bounded memory
-```
-
----
-
-## 🙏 Credits
-
-This project is the **extended (advanced) version of Novel Studio**.
-
-**Developer:** **Ashraf Ali** — from 🇧🇩 **Bangladesh**
-
-**Special thanks** to the open-source community and to the many ready-made sources, libraries and reference implementations that made this possible. Standing on the shoulders of people who share their work.
-
----
-
-## 📌 A note on use
-
-This is a **personal reading aid**. It does not host, mirror or distribute any comic, manga or novel. All content stays on the site you visit; the app only draws text on top of what your browser already displays.
-
-Please respect the terms of the sites you read and the authors who create the work.
-
-<div align="center">
-
-**Made for readers who just want to understand the story.**
-
-⭐ Star the repo if this saved you a chapter of guessing.
-
-</div>
+Novel Studio is intended as a reading aid. Please respect the terms of the websites you use and the authors who create the original work.
