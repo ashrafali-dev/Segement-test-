@@ -1881,9 +1881,16 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 queueRtAheadTask(task, front = true)
                 return
             }
-            val syntheticUrl = Uri.parse(queued.pageUrl).buildUpon()
-                .appendQueryParameter("__ns_rt_ahead", id)
-                .build().toString()
+            // buildUpon() throws unless the URI is hierarchical. Read-ahead page URLs are normally http(s),
+            // but a canvas/about:/blob: identity must not take the app down here either.
+            val syntheticUrl = try {
+                Uri.parse(queued.pageUrl).buildUpon()
+                    .appendQueryParameter("__ns_rt_ahead", id)
+                    .build().toString()
+            } catch (_: Throwable) {
+                val sep = if ('?' in queued.pageUrl) "&" else "?"
+                queued.pageUrl + sep + "__ns_rt_ahead=" + id
+            }
             val aheadChapter = base.copy(
                 title = base.title.ifBlank { "Upcoming panels" },
                 number = "rtAhead-${id.take(16)}",
@@ -7238,6 +7245,8 @@ return t.length>=40?'TXT:'+t:'';
     private fun inferEpisodeUrl(url: String, dir: String): String? {
         val delta = if (dir == "next") 1 else if (dir == "prev") -1 else return null
         val uri = try { Uri.parse(url) } catch (_: Exception) { return null }
+        // getQueryParameter below throws on a non-hierarchical URI (about:, blob:, data:).
+        if (!uri.isHierarchical) return null
         // NAVER Webtoon mobile episode URLs use ?titleId=<series>&no=<episode>.
         // Do not treat arbitrary "no" parameters as chapter numbers on unrelated sites.
         val isNaverWebtoon = (uri.host.orEmpty().equals("m.comic.naver.com", true) ||

@@ -137,7 +137,9 @@ internal object WebModeWriter {
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
       // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
-      b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+      // overflow:hidden is what keeps a long translation inside its mask. fit() still shrinks the font to
+      // avoid clipping, so this is a hard backstop rather than the normal path.
+      b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:hidden;'
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
         +'background:transparent;color:'+it.fg+';font-family:'+fam+';font-weight:600;border-radius:0;box-shadow:none;';
       var t=document.createElement('div'); t.textContent=it.t;
@@ -145,7 +147,7 @@ internal object WebModeWriter {
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
       // measures both axes and shrinks the text instead of letting it spill outside.
       t.style.cssText='display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;'
-        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:normal;text-wrap:balance;'
+        +'text-align:center;line-height:1.25;white-space:normal;word-break:break-word;overflow-wrap:break-word;'
         // Bengali vowel signs (ি ী ু ৃ ে ৈ) stick out above and below the line box; room for them
         // stops them being clipped by the box edge or by the gradient's background-clip.
         +'padding:0.16em 0.1em;'
