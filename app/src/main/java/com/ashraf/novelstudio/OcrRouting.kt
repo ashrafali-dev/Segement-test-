@@ -112,6 +112,11 @@ internal object OcrEngineStatus {
 }
 
 internal class RoutingOcrEngine : OcrEngine {
+    private companion object {
+        /** Cap on how long a foreground Lens route waits for the shared gate (see OcrGate.run(timeoutMs)). */
+        const val FOREGROUND_LENS_GATE_TIMEOUT_MS = 1_200L
+    }
+
     @Volatile private var appContext: Context? = null
     private val mlKit: OcrEngine = MlKitOcrEngine()
     @Volatile private var selectedMode: String = "mlkit"
@@ -203,6 +208,11 @@ internal class RoutingOcrEngine : OcrEngine {
             val result = when {
                 OcrGate.isBackgroundThread() -> OcrGate.run(waited, routeBlock)
                 concurrentLens -> OcrGate.runLensForeground(waited, routeBlock)
+                // Foreground with Lens selected but not yet active (first call / activation in progress): the
+                // route body still initializes Lens. Bound the gate wait so this never stalls unboundedly
+                // behind a local inference (the "concurrentLens=false, gateWaitMs=300–600 ms" case). ML Kit
+                // keeps the fully serialized, no-timeout gate because it shares the model the lock protects.
+                selectedMode == "lens" -> OcrGate.run(waited, timeoutMs = FOREGROUND_LENS_GATE_TIMEOUT_MS, block = routeBlock)
                 else -> OcrGate.run(waited, routeBlock)
             }
             // Stamp the label onto the result itself. The global OcrEngineStatus.label is overwritten by any
