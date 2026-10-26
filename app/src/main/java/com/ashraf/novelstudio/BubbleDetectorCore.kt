@@ -20,13 +20,29 @@ internal object BubbleDetectorCore {
     const val CLS_TEXT_FREE = 2
     const val SCORE_MIN = 0.30f
 
+    /** Compact instance mask sampled over the associated detector box. 1 = inside the balloon mask. */
+    class Mask(val width: Int, val height: Int, val pixels: ByteArray) {
+        fun contains(x: Float, y: Float, l: Int, t: Int, r: Int, b: Int): Boolean {
+            if (width <= 0 || height <= 0 || pixels.size < width * height || r <= l || b <= t) return true
+            val mx = (((x - l) / (r - l) * width).toInt()).coerceIn(0, width - 1)
+            val my = (((y - t) / (b - t) * height).toInt()).coerceIn(0, height - 1)
+            return pixels[my * width + mx].toInt() != 0
+        }
+    }
+
     /** One detection in the coordinates of the page that was scanned. */
-    class Det(val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int) {
+    class Det(
+        val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int,
+        val mask: Mask? = null
+    ) {
         val w: Int get() = r - l
         val h: Int get() = b - t
         val area: Long get() = w.toLong() * h
-        fun contains(x: Float, y: Float): Boolean = x >= l && x < r && y >= t && y < b
-        override fun toString(): String = "Det(label=$label score=$score box=[$l,$t,$r,$b])"
+        fun contains(x: Float, y: Float): Boolean {
+            if (x < l || x >= r || y < t || y >= b) return false
+            return mask?.contains(x, y, l, t, r, b) ?: true
+        }
+        override fun toString(): String = "Det(label=$label score=$score box=[$l,$t,$r,$b] hasMask=${mask != null})"
     }
 
     /**

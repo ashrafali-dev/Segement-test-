@@ -2146,9 +2146,9 @@ internal class WebModeExtractor(
                 (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
                 Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
             if (detectWanted) {
-                detFuture = try {
-                    DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
-                } catch (_: Throwable) { null }
+                // This work can outlive readSlice (for example if OCR returns early), so do not give the
+                // worker a bitmap owned by this method: the caller recycles that source at slice completion.
+                detFuture = submitDetectorSnapshot(wv.context, bmp, null)
             }
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
@@ -2781,21 +2781,49 @@ internal class WebModeExtractor(
          * and the cached result serves the next one (a visible panel is re-read on every scroll tick).
          */
         private fun detectWithBudget(ctx: android.content.Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
-            val key = md5Of(bmp)
+            val key = try { md5Of(bmp) } catch (_: Throwable) { return null }
             synchronized(detectCache) { detectCache[key]?.let { return it } }
-            val f = try {
-                DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> {
-                    try { BubbleDetector.detect(ctx, bmp) } catch (_: Throwable) { null }
-                })
-            } catch (_: Throwable) { return null }
+            // This job may continue after the 450 ms UI budget expires. It owns a bitmap copy and populates the
+            // cache when it completes; the source slice can safely be recycled immediately.
+            val f = submitDetectorSnapshot(ctx, bmp, key) ?: return null
             return try {
                 val dets = f.get(DETECT_FAST_WAIT_MS, TimeUnit.MILLISECONDS)
                 synchronized(detectCache) { detectCache[key] = dets }
                 dets
             } catch (_: java.util.concurrent.TimeoutException) {
-                // Keep the future running; the next pass benefits from it.
                 null
             } catch (_: Throwable) {
+                null
+            }
+        }
+
+        /**
+         * The caller owns source and may recycle it immediately after this returns. The worker owns a deep ARGB copy
+         * and always recycles that copy after detection, preventing recycled-source createBitmap crashes.
+         */
+        private fun submitDetectorSnapshot(
+            ctx: android.content.Context,
+            source: Bitmap,
+            cacheKey: String?
+        ): java.util.concurrent.Future<List<BubbleDetectorCore.Det>?>? {
+            val snapshot = try {
+                if (source.isRecycled) return null
+                source.copy(Bitmap.Config.ARGB_8888, false) ?: return null
+            } catch (_: Throwable) {
+                return null
+            }
+            return try {
+                DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> {
+                    try {
+                        val dets = try { BubbleDetector.detect(ctx, snapshot) } catch (_: Throwable) { null }
+                        if (cacheKey != null) synchronized(detectCache) { detectCache[cacheKey] = dets }
+                        dets
+                    } finally {
+                        try { if (!snapshot.isRecycled) snapshot.recycle() } catch (_: Throwable) {}
+                    }
+                })
+            } catch (_: Throwable) {
+                try { if (!snapshot.isRecycled) snapshot.recycle() } catch (_: Throwable) {}
                 null
             }
         }
