@@ -1,6 +1,6 @@
-# Manga speech-bubble segmentation model notice
+# Legacy Manga speech-bubble segmentation model notice
 
-Novel Studio downloads this model on user request; the ONNX weights are not bundled in the APK.
+This notice describes the older `mednasserallah/manga109-segmentation-bubble-onnx` export that earlier Novel Studio revisions used. The active detector in the current Koharu integration downloads [Koharu YOLO26s](KOHARU_YOLO26S_MODEL_NOTICE.md) instead. The legacy ONNX weights are not bundled in the APK.
 
 - Model export: [mednasserallah/manga109-segmentation-bubble-onnx](https://huggingface.co/mednasserallah/manga109-segmentation-bubble-onnx)
 - Pinned revision: 6839b4ea9d95be14f5bbd21ac675d92a7da95ed0
