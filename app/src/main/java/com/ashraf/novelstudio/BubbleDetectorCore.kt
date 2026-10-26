@@ -122,13 +122,6 @@ internal object BubbleDetectorCore {
         return if (uni <= 0L) 0f else inter.toFloat() / uni
     }
 
-    private fun containedShare(small: Det, big: Det): Float {
-        val iw = Math.min(small.r, big.r) - Math.max(small.l, big.l)
-        val ih = Math.min(small.b, big.b) - Math.max(small.t, big.t)
-        if (iw <= 0 || ih <= 0 || small.area <= 0L) return 0f
-        return (iw.toLong() * ih).toFloat() / small.area
-    }
-
     /** Joins the detections of overlapping tiles: the same object seen twice is kept once (best score). */
     fun merge(all: List<Det>, maxOut: Int = 150): List<Det> {
         val kept = ArrayList<Det>()
@@ -136,7 +129,7 @@ internal object BubbleDetectorCore {
             var dup = false
             for (k in kept) {
                 if (k.label != d.label) continue
-                if (iou(d, k) > 0.7f || containedShare(if (d.area <= k.area) d else k, if (d.area <= k.area) k else d) > 0.85f) {
+                if (iou(d, k) > 0.7f) {
                     dup = true; break
                 }
             }
