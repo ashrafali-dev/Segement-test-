@@ -49,18 +49,22 @@ internal object KoharuSegCore {
     }
 
     fun validInputSize(size: Int): Boolean = size in 320..1280 && size % STRIDE == 0
+    fun validInputShape(width: Int, height: Int): Boolean = validInputSize(width) && validInputSize(height)
 
     fun decode(
         predictions: FloatArray,
         prototypes: FloatArray,
         protoWidth: Int,
         protoHeight: Int,
-        inputSize: Int,
+        inputWidth: Int,
+        inputHeight: Int,
         tile: IntArray,
         letterbox: Letterbox,
         scoreMin: Float = SCORE_MIN
     ): List<BubbleDetectorCore.Det> {
-        require(validInputSize(inputSize)) { "invalid Koharu input size: $inputSize" }
+        require(validInputShape(inputWidth, inputHeight)) {
+            "invalid Koharu input shape: ${inputWidth}x${inputHeight}"
+        }
         require(predictions.size >= ROW_SIZE) { "Koharu prediction output is too small: ${predictions.size}" }
         require(predictions.size % ROW_SIZE == 0) { "Koharu output0 must use [1,instances,38] rows" }
         require(protoWidth > 0 && protoHeight > 0 &&
@@ -129,7 +133,7 @@ internal object KoharuSegCore {
         return kept.map { c ->
             BubbleDetectorCore.Det(
                 c.label, c.score, c.l, c.t, c.r, c.b,
-                makeMask(c, prototypes, protoWidth, protoHeight, inputSize)
+                makeMask(c, prototypes, protoWidth, protoHeight, inputWidth, inputHeight)
             )
         }
     }
@@ -149,17 +153,18 @@ internal object KoharuSegCore {
         prototypes: FloatArray,
         protoWidth: Int,
         protoHeight: Int,
-        inputSize: Int
+        inputWidth: Int,
+        inputHeight: Int
     ): BubbleDetectorCore.Mask? {
         val pixels = ByteArray(MASK_SIZE * MASK_SIZE)
         var positive = 0
         val protoPlane = protoWidth * protoHeight
         for (my in 0 until MASK_SIZE) {
             val modelY = c.modelT + (my + 0.5f) * (c.modelB - c.modelT) / MASK_SIZE
-            val py = floor(modelY * protoHeight / inputSize).toInt().coerceIn(0, protoHeight - 1)
+            val py = floor(modelY * protoHeight / inputHeight).toInt().coerceIn(0, protoHeight - 1)
             for (mx in 0 until MASK_SIZE) {
                 val modelX = c.modelL + (mx + 0.5f) * (c.modelR - c.modelL) / MASK_SIZE
-                val px = floor(modelX * protoWidth / inputSize).toInt().coerceIn(0, protoWidth - 1)
+                val px = floor(modelX * protoWidth / inputWidth).toInt().coerceIn(0, protoWidth - 1)
                 val p = py * protoWidth + px
                 var logit = 0f
                 for (ch in 0 until PROTO_CHANNELS) {
