@@ -2273,18 +2273,19 @@ internal class WebModeExtractor(
             })
             fun freeAt(i: Int): Boolean {
                 val current = dets ?: return false
-                val x = (rects[i][0] + rects[i][2]) / 2f
-                val y = (rects[i][1] + rects[i][3]) / 2f
+                val text = rects[i]
+                val x = (text[0] + text[2]) / 2f
+                val y = (text[1] + text[3]) / 2f
                 if (BubbleDetectorCore.isFreeText(current, x, y)) return true
-                // YOLO segmentation exposes balloon masks only; it has no separate text_free class.
-                // OCR text whose centre is outside every predicted balloon must stay free text instead
-                // of being pulled into a nearby bubble by BubbleFit's pixel search.
-                val hasSegmentationMasks = current.any {
-                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
+                // The active YOLO model only exposes balloon masks. A whisper/note can sit just over the
+                // balloon edge, so centre-in-mask alone can falsely absorb it into the main dialogue.
+                val masked = current.asSequence()
+                    .filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null && it.contains(x, y) }
+                    .minByOrNull { it.area }
+                if (masked != null) {
+                    return BubbleDetectorCore.maskCoverage(masked, text[0], text[1], text[2], text[3]) < 0.58f
                 }
-                return hasSegmentationMasks && current.none {
-                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.contains(x, y)
-                }
+                return current.any { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }
             }
 
             // A flat speech bubble can contain lettering that the first pass missed.
@@ -2468,38 +2469,64 @@ internal class WebModeExtractor(
                 // Free lettering (sound effects, narration on artwork) has no bubble to fit into.
                 if (!rotated && !freeAt(i) && Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     val seedBox = refinedSeed[i] ?: rects[i]
-                    val tFit = android.os.SystemClock.elapsedRealtime()
-                    val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
-                    fitMs += android.os.SystemClock.elapsedRealtime() - tFit
-                    if (fit != null) {
-                        val sf = fit.safe
-                        val aL = Math.floor((cx - bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
-                        val aT = Math.floor((cy - bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
-                        val aR = Math.ceil((cx + bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
-                        val aB = Math.ceil((cy + bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
-                        var cL = aL; var cT = aT; var cR = aR; var cB = aB
-                        // cover = old box + safe rectangle, if that stays inside the bubble; else the lettering + safe rectangle
-                        val uL = Math.min(aL, sf[0]); val uT = Math.min(aT, sf[1])
-                        val uR = Math.max(aR, sf[2]); val uB = Math.max(aB, sf[3])
-                        if (fit.coverage(uL, uT, uR, uB) >= 0.90f) {
-                            cL = uL; cT = uT; cR = uR; cB = uB
-                        } else {
-                            val sL = Math.min(seedBox[0] - 2, sf[0]).coerceAtLeast(0)
-                            val sT = Math.min(seedBox[1] - 2, sf[1]).coerceAtLeast(0)
-                            val sR = Math.max(seedBox[2] + 2, sf[2]).coerceAtMost(bmp.width)
-                            val sB = Math.max(seedBox[3] + 2, sf[3]).coerceAtMost(bmp.height)
-                            if (fit.coverage(sL, sT, sR, sB) >= 0.90f) { cL = sL; cT = sT; cR = sR; cB = sB }
-                        }
-                        val xl = Math.max(cL, sf[0]); val xt = Math.max(cT, sf[1])
-                        val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
+                    // Prefer the actual YOLO instance mask for BOTH text placement and cover shape. The old
+                    // pixel-colour reconstruction is only a fallback; on cloud/oval balloons it sometimes
+                    // inferred a narrow interior and forced a long translation into a thin column.
+                    val modelShape = BubbleDetectorCore.maskGeometryFor(
+                        dets, seedBox[0], seedBox[1], seedBox[2], seedBox[3]
+                    )
+                    if (modelShape != null) {
+                        val d = modelShape.detection
+                        val sf = modelShape.safe
+                        val cL = d.l.coerceIn(0, bmp.width - 1)
+                        val cT = d.t.coerceIn(0, bmp.height - 1)
+                        val cR = d.r.coerceIn(cL + 1, bmp.width)
+                        val cB = d.b.coerceIn(cT + 1, bmp.height)
                         val coverArea = (cR - cL).toLong() * (cB - cT)
-                        val textArea = (xr - xl).toLong() * (xb - xt)
-                        if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
-                            tL = xl; tT = xt; tR = xr; tB = xb
-                            // The whole interior (not just the lettering box) is what gets painted over when the picture
-                            // itself is not cleaned.
-                            coverBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
-                            cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
+                        val textArea = (sf[2] - sf[0]).toLong() * (sf[3] - sf[1])
+                        if (sf[2] - sf[0] >= 10 && sf[3] - sf[1] >= 10 &&
+                            coverArea > 0 && textArea * 5 >= coverArea) {
+                            tL = sf[0]; tT = sf[1]; tR = sf[2]; tB = sf[3]
+                            // These are row bands from the MODEL'S mask, not a second image-derived mask.
+                            coverBands = modelShape.bands
+                            cx = (cL + cR) / 2f; cy = (cT + cB) / 2f
+                            bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
+                            OcrDiag.log("MASK_LAYOUT", "safe=${sf[2] - sf[0]}x${sf[3] - sf[1]} cover=${cR - cL}x${cB - cT} bands=${coverBands.size}")
+                        }
+                    } else {
+                        val tFit = android.os.SystemClock.elapsedRealtime()
+                        val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
+                        fitMs += android.os.SystemClock.elapsedRealtime() - tFit
+                        if (fit != null) {
+                            val sf = fit.safe
+                            val aL = Math.floor((cx - bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
+                            val aT = Math.floor((cy - bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
+                            val aR = Math.ceil((cx + bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
+                            val aB = Math.ceil((cy + bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
+                            var cL = aL; var cT = aT; var cR = aR; var cB = aB
+                            // cover = old box + safe rectangle, if that stays inside the bubble; else the lettering + safe rectangle
+                            val uL = Math.min(aL, sf[0]); val uT = Math.min(aT, sf[1])
+                            val uR = Math.max(aR, sf[2]); val uB = Math.max(aB, sf[3])
+                            if (fit.coverage(uL, uT, uR, uB) >= 0.90f) {
+                                cL = uL; cT = uT; cR = uR; cB = uB
+                            } else {
+                                val sL = Math.min(seedBox[0] - 2, sf[0]).coerceAtLeast(0)
+                                val sT = Math.min(seedBox[1] - 2, sf[1]).coerceAtLeast(0)
+                                val sR = Math.max(seedBox[2] + 2, sf[2]).coerceAtMost(bmp.width)
+                                val sB = Math.max(seedBox[3] + 2, sf[3]).coerceAtMost(bmp.height)
+                                if (fit.coverage(sL, sT, sR, sB) >= 0.90f) { cL = sL; cT = sT; cR = sR; cB = sB }
+                            }
+                            val xl = Math.max(cL, sf[0]); val xt = Math.max(cT, sf[1])
+                            val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
+                            val coverArea = (cR - cL).toLong() * (cB - cT)
+                            val textArea = (xr - xl).toLong() * (xb - xt)
+                            if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
+                                tL = xl; tT = xt; tR = xr; tB = xb
+                                // The whole interior (not just the lettering box) is what gets painted over when the picture
+                                // itself is not cleaned.
+                                coverBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
+                                cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
+                            }
                         }
                     }
                 }
