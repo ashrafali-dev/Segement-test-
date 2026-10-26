@@ -1516,9 +1516,18 @@ internal class WebModeExtractor(
                 val lensOn = (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true
                 val noisy: (OcrBlock) -> Boolean = { b -> if (lensOn) OcrPost.isNoiseLens(b) else OcrPost.isNoise(b) }
                 val dropOwnBengali = Langs.target(wv.context) == "Bengali"
+                // The WebView pixels still contain the page's own header/footer chrome (site name, "Reading this"
+                // prompts, the app's own overlay). Realtime viewport OCR drops the top/bottom ~150 dp so those
+                // never become "text" bubbles. Full-chapter Force keeps the whole frame.
+                val bandPx = if (req.visibleOnly) {
+                    (150f * (wv.context.resources.displayMetrics.density)).toInt()
+                } else 0
+                val upper = bandPx
+                val lower = (bmp.height - bandPx).coerceAtLeast(upper)
                 val blocks = result.blocks
                     .filter { it.text.isNotBlank() && !noisy(it) &&
-                        !(dropOwnBengali && OcrPost.isMostlyBengaliScript(it.text)) }
+                        !(dropOwnBengali && OcrPost.isMostlyBengaliScript(it.text)) &&
+                        (bandPx == 0 || ((it.top + it.h).toInt() > upper && it.top < lower)) }
                     .sortedWith(compareBy<OcrBlock>({ it.top }, { it.left }))
                 val letters = blocks.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } }
                 OcrDiag.log("SCREEN_OCR", "step=$forceStepNo ${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0} " +
