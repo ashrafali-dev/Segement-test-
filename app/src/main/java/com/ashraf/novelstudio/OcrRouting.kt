@@ -182,6 +182,18 @@ internal class RoutingOcrEngine : OcrEngine {
         OcrGate.run { active(script) }
     }
 
+    /**
+     * True once a full scan may issue Lens requests from several threads at once.
+     *
+     * The scan calls this AFTER prepareForConcurrentLens(), so the engine is already active and the shared
+     * local-inference gate has nothing left to protect. Without it every worker fell through to the
+     * bounded-gate path and paid FOREGROUND_LENS_GATE_TIMEOUT_MS of serialisation per panel — the reason a
+     * 116-panel chapter still took 191 s after the pools were widened.
+     */
+    @Synchronized
+    fun lensReadyForParallelScan(): Boolean =
+        selectedMode == "lens" && activeMode == "lens" && activeCustom is LensOcrEngine
+
     /** Only bypass the shared local-inference gate after the Lens client is fully active. */
     @Synchronized
     private fun canRunLensConcurrently(): Boolean =
@@ -245,7 +257,10 @@ internal class RoutingOcrEngine : OcrEngine {
             }
             // Do not queue visible Lens OCR behind a remote read-ahead request. Local model engines
             // and the first Lens activation still use the serialized gate for safe lifecycle changes.
-            val concurrentLens = !OcrGate.isBackgroundThread() && canRunLensConcurrently()
+            // The Lens client is network-bound and safe for overlapping requests, so once it is active there is
+            // nothing for the shared local-inference gate to protect. Gating it anyway is what serialised a full
+            // scan: every worker waited out the gate one after another.
+            val concurrentLens = canRunLensConcurrently()
             val result = when {
                 OcrGate.isBackgroundThread() -> OcrGate.run(waited, routeBlock)
                 concurrentLens -> OcrGate.runLensForeground(waited, routeBlock)
