@@ -79,8 +79,12 @@ internal object WebModeTextRemover {
             // colour. This does not depend on the lettering test below, so Japanese columns, bold SFX and lettering the
             // recogniser missed are wiped too, and the bubble counts as cleaned. (Before, any bubble that failed one of the
             // strict glyph checks kept its old text and fell back to an ugly background box.)
+            // `soft` only says the ring around the OCR box is textured; the bubble interior itself can still be
+            // flat paper. Dense Japanese/Korean columns touch the ring and were tagged soft, which skipped this
+            // whole pass — the old lettering then stayed under the translation. wipeInterior() already refuses
+            // when the interior is mostly dark/coloured, so it is safe to try it for soft bubbles too.
             for (bubble in boundedBubbles) {
-                if (bubble.soft || bubble.cv.size < 4) continue
+                if (bubble.cv.size < 4) continue
                 val n = try { wipeInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)) } catch (_: Exception) { 0 }
                 if (n > 0) { totalRemoved += n; erased.add(WebModeTextRemovalCache.bubbleKey(bubble)) }
             }
@@ -291,8 +295,11 @@ internal object WebModeTextRemover {
                 }
 
                 // If the inferred mask covers too much of the OCR box, it is probably art rather than text.
-                // Dense bold CJK glyphs legitimately hold more ink than Latin text.
-                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.5 else 0.6)) continue
+                // Dense bold CJK glyphs legitimately hold more ink than Latin text: a tight Japanese OCR box
+                // around two heavy kanji columns is ~70 % ink, and the old 50 % cap threw the whole bubble away.
+                // Only very dense (>= 85 %) masks are treated as artwork now; the shape-size limits above and
+                // the on-artwork AI gate still decide whether this is really lettering.
+                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
                 // Flat bubble: sweep EVERYTHING inside the OCR box (slightly widened) that differs from the paper
                 // colour, unless it belongs to a protected shape. This removes the faint ghosts that the strict
@@ -389,6 +396,15 @@ internal object WebModeTextRemover {
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
             if (totalRemoved < 8) return false
+
+            // A canvas panel is identified by its on-screen position ("ns-canvas:<left>,<top>,WxH"), which changes
+            // on every scroll: caching an image under that key would never hit twice, and storing a new multi-MB
+            // file per scroll would grow the cache without bound. The erased marks are still recorded — the writer
+            // uses them to drop the opaque cover box for these bubbles — but no cleaned image is stored.
+            if (sourceUrl.startsWith("ns-canvas:", true)) {
+                WebModeTextRemovalCache.setErased(sourceUrl, erased)
+                return true
+            }
 
             val bytesOut = ByteArrayOutputStream()
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead

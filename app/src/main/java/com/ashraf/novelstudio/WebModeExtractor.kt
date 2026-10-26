@@ -1911,8 +1911,12 @@ internal class WebModeExtractor(
                 // coordinate system and must never be used to rewrite the underlying source image.
                 // NOT limited to the slow pass: realtime/visible reads (fastMode) must erase the old lettering too, otherwise every
                 // visible panel keeps its Japanese text and the translation sits on a cover box.
-                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) &&
-                    (src.startsWith("https://", true) || src.startsWith("http://", true))) {
+                // Canvas pages have no image URL (the picture is drawn by JS), so the old http(s)-only test
+                // meant they were never cleaned and every bubble there kept its lettering under the
+                // translation. The bytes here are the real panel pixels either way, which is all the remover needs.
+                val cleanableSrc = src.startsWith("https://", true) || src.startsWith("http://", true) ||
+                    src.startsWith("ns-canvas:", true) || src.startsWith("blob:", true)
+                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) && cleanableSrc) {
                     try {
                         // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
                         val tClean = SystemClock.elapsedRealtime()

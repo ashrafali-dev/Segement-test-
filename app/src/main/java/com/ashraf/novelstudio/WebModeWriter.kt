@@ -129,6 +129,8 @@ internal object WebModeWriter {
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
       b.setAttribute('data-cl',it.cl||'');
+      // Erased in place (canvas panel): the old lettering is already gone from the page pixels, so no cover box.
+      b.setAttribute('data-er',it.er?'1':'');
       b.setAttribute('data-bg',it.bg);
       b.setAttribute('data-sf',it.sf?'1':'0');
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
@@ -165,7 +167,7 @@ internal object WebModeWriter {
       }
       b.appendChild(t);
       var cover=null;
-      if(!it.cl){
+      if(!it.cl&&!it.er){
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
           +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
@@ -658,7 +660,7 @@ internal object WebModeWriter {
       // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
       for(var i=0;i<vis.length;i++){
         var R=vis[i].R,bb=R.b;
-        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed)||R.rot||bb.getAttribute('data-cl')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
+        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed)||R.rot||bb.getAttribute('data-cl')||bb.getAttribute('data-er')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
         var pad=Math.max(3,Math.min(8,R.inkH*0.15));
         var lc=ensureLabelCover(bb),cx=vis[i].l-orgX-pad,cy=vis[i].t-orgY-pad,cwid=vis[i].r-vis[i].l+2*pad,chei=vis[i].b-vis[i].t+2*pad;
         var lk='t'+Math.round(cx)+','+Math.round(cy)+','+Math.round(cwid)+','+Math.round(chei);
@@ -1245,7 +1247,12 @@ internal object WebModeWriter {
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
                 .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
-                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else ""))
+                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else "")
+                // Canvas panels (no image URL) are erased in place by the screen-capture path, so they have no
+                // cleaned image to swap in. `er` tells the overlay to drop the cover box without one; before,
+                // `cl` was the only signal, so every canvas bubble kept an opaque box over the artwork.
+                .put("er", WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)) &&
+                    WebModeTextRemovalCache.urlFor(b.src) == null))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()
