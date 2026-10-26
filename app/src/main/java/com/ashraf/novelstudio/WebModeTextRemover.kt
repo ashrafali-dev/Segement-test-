@@ -40,7 +40,8 @@ internal object WebModeTextRemover {
      */
     fun eraseDetected(
         bitmap: Bitmap,
-        dets: List<BubbleDetectorCore.Det>?
+        dets: List<BubbleDetectorCore.Det>?,
+        recognizedLines: List<OcrBlock> = emptyList()
     ): Int {
         if (dets.isNullOrEmpty()) return 0
         val width = bitmap.width
@@ -69,7 +70,54 @@ internal object WebModeTextRemover {
                 changed += gradientFillRect(bitmap, free.l, free.t, free.r, free.b, width, height)
             }
         }
+
+        // The replacement YOLO model predicts balloon masks only (it has no text_bubble/text_free classes). Manual
+        // extraction already has OCR line boxes, so use those lines as the text regions and the real segmentation
+        // mask as the trusted background sampling area. This keeps flat white lettering removable without guessing
+        // from the balloon's full rectangular bounding box.
+        if (recognizedLines.isNotEmpty()) {
+            val maskedBalloons = dets.filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }
+            for (line in recognizedLines) {
+                if (line.w < 2f || line.h < 2f || line.text.isBlank()) continue
+                val cx = line.cx
+                val cy = line.cy
+                val outer = maskedBalloons.asSequence()
+                    .filter { it.contains(cx, cy) }
+                    .minByOrNull { it.area } ?: continue
+
+                val rawL = (cx - line.w / 2f).toInt()
+                val rawT = (cy - line.h / 2f).toInt()
+                val rawR = (cx + line.w / 2f).toInt()
+                val rawB = (cy + line.h / 2f).toInt()
+                val l = max(rawL, outer.l).coerceIn(0, width - 1)
+                val t = max(rawT, outer.t).coerceIn(0, height - 1)
+                val r = min(rawR, outer.r).coerceIn(l + 1, width)
+                val b = min(rawB, outer.b).coerceIn(t + 1, height)
+                if (r - l < 2 || b - t < 2) continue
+
+                val inner = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
+                if (maskCoverage(outer, inner) < 0.72f) continue
+                val fill = medianRingColour(bitmap, outer, inner, width, height) ?: continue
+                changed += fillRect(bitmap, l, t, r, b, fill, width, height)
+            }
+        }
         return changed
+    }
+
+    /** Fraction of a text box that actually falls inside the instance mask. */
+    private fun maskCoverage(
+        balloon: BubbleDetectorCore.Det,
+        text: BubbleDetectorCore.Det
+    ): Float {
+        if (balloon.mask == null) return 0f
+        var inside = 0
+        val grid = 5
+        for (gy in 0 until grid) for (gx in 0 until grid) {
+            val x = text.l + (gx + 0.5f) * text.w / grid
+            val y = text.t + (gy + 0.5f) * text.h / grid
+            if (balloon.contains(x, y)) inside++
+        }
+        return inside.toFloat() / (grid * grid)
     }
 
     /** Median colour of the ring between [inner] and [outer]; null when the ring is too textured to trust. */
@@ -85,7 +133,8 @@ internal object WebModeTextRemover {
             var x = outer.l + pad
             while (x < outer.r - pad) {
                 val inside = x >= inner.l - pad && x < inner.r + pad && y >= inner.t - pad && y < inner.b + pad
-                if (!inside && x in 0 until width && y in 0 until height) {
+                if (!inside && x in 0 until width && y in 0 until height &&
+                    (outer.mask == null || outer.contains(x.toFloat(), y.toFloat()))) {
                     val c = bitmap.getPixel(x, y)
                     rs.add((c shr 16) and 0xFF); gs.add((c shr 8) and 0xFF); bs.add(c and 0xFF)
                 }

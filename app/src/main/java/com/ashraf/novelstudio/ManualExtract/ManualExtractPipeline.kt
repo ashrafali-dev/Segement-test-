@@ -135,7 +135,7 @@ internal class ManualExtractPipeline(
             // an image URL and served through the WebView interceptor, while a manual crop is a one-off bitmap.
             // Same idea, applied in place: fill each detected bubble with its own colour.
             try {
-                val erasedPx = com.ashraf.novelstudio.WebModeTextRemover.eraseDetected(ocrBmp, dets)
+                val erasedPx = com.ashraf.novelstudio.WebModeTextRemover.eraseDetected(ocrBmp, dets, outcome.blocks)
                 if (erasedPx > 0) OcrDiag.log("ERASE", "manual crop pixels=$erasedPx dets=${dets?.size ?: 0}")
             } catch (_: Throwable) { }
             val groups = BubbleBuilder.group(outcome.blocks, dets)
