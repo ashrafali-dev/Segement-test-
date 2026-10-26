@@ -2737,7 +2737,7 @@ internal class WebModeExtractor(
         /** Lens requests in flight during a full scan; the engine's own slot semaphore bounds the real work. */
         private const val SCAN_LENS_THREADS = 5
         // At most this many Lens requests of tall-panel slices in flight at once (all panels together).
-        private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(4)
+        private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(5)
         private val DETECT_POOL: java.util.concurrent.ExecutorService =
             java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-detect").apply { isDaemon = true } }
         private const val JOB_MAX_MS = 12 * 60_000L

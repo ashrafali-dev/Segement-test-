@@ -480,21 +480,27 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
      * Returns false when the wait would exceed the caller's remaining deadline.
      */
     private fun awaitStartTurn(maxWaitMs: Long): Boolean {
-        val sleeper = object : Any() {}
-        synchronized(sleeper) {
+        // Reserve the next start slot under a real class-level lock, then sleep OUTSIDE it. Sleeping inside
+        // the lock would serialise every Lens request behind one another — that is what made a 145-panel
+        // scan take 238 s. (A per-call `object : Any() {}` as the monitor, as an earlier version had, locked
+        // nothing at all.)
+        val nextStart: Long
+        synchronized(START_LOCK) {
             val now = SystemClock.elapsedRealtime()
-            val wait = (lastStartAt + START_GAP_MS) - now
-            if (wait <= 0L) { lastStartAt = now; return true }
-            if (wait >= maxWaitMs) return false
+            nextStart = maxOf(now, lastStartAt + START_GAP_MS)
+            if (nextStart - now >= maxWaitMs) return false
+            lastStartAt = nextStart
+        }
+        val sleep = nextStart - SystemClock.elapsedRealtime()
+        if (sleep > 0L) {
             try {
-                Thread.sleep(wait)
+                Thread.sleep(sleep)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 return false
             }
-            lastStartAt = SystemClock.elapsedRealtime()
-            return true
         }
+        return true
     }
 
     /** One logical request: bounded retries inside one overall deadline. Throws [OcrUnavailableException] only. */
@@ -871,9 +877,11 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
          * A full scan overlaps panels for speed; without this cap that burst is what produces HTTP 429 in the
          * first place. Three is the value that has kept Lens answering on the test device.
          */
-        private val REQUEST_SLOTS = java.util.concurrent.Semaphore(3)
-        /** Spacing between request starts so a burst is not mistaken for abuse. Waits for a slot first. */
-        private val START_GAP_MS = 200L
+        private val REQUEST_SLOTS = java.util.concurrent.Semaphore(5)
+        /** Spacing between request starts so a burst is not mistaken for abuse. */
+        private val START_GAP_MS = 120L
+        /** Guards the reservation of the next request start; the sleep itself happens outside it. */
+        private val START_LOCK = Any()
         @Volatile private var lastStartAt = 0L
 
         // Two timeouts in a row used to switch Lens off for 45 s, which looked like whole panels being skipped.
