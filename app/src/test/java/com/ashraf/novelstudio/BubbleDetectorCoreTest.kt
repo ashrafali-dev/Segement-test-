@@ -90,4 +90,38 @@ class BubbleDetectorCoreTest {
         assertFalse(C.isFreeText(dets, 800f, 800f))
         assertFalse(C.isFreeText(null, 150f, 650f))
     }
+
+    private fun ellipseDetection(): C.Det {
+        val mw = 40
+        val mh = 30
+        val pixels = ByteArray(mw * mh)
+        for (y in 0 until mh) for (x in 0 until mw) {
+            val dx = (x - 19.5f) / 18f
+            val dy = (y - 14.5f) / 13f
+            if (dx * dx + dy * dy <= 1f) pixels[y * mw + x] = 1
+        }
+        return C.Det(0, .95f, 100, 200, 300, 500, C.Mask(mw, mh, pixels))
+    }
+
+    @Test fun modelMaskProvidesSafeRectangleAndInteriorCoverBands() {
+        val d = ellipseDetection()
+        val geometry = C.maskGeometryFor(listOf(d), 135, 275, 265, 425)
+        assertTrue("mask geometry should be usable", geometry != null)
+        val g = geometry!!
+        assertTrue(g.safe[0] > d.l)
+        assertTrue(g.safe[1] > d.t)
+        assertTrue(g.safe[2] < d.r)
+        assertTrue(g.safe[3] < d.b)
+        assertTrue((g.safe[2] - g.safe[0]).toLong() * (g.safe[3] - g.safe[1]) * 5L >= d.area)
+        assertTrue(g.bands.isNotEmpty())
+        assertTrue(g.bands.all { it[2] > it[0] && it[3] > it[1] })
+    }
+
+    @Test fun mostlyOutsideWhisperBoxHasLowCoverageInBalloonMask() {
+        val d = ellipseDetection()
+        val mainDialogueCoverage = C.maskCoverage(d, 135, 275, 265, 425)
+        val whisperCoverage = C.maskCoverage(d, 240, 405, 310, 475)
+        assertTrue("main dialogue should map to the balloon", mainDialogueCoverage >= 0.58f)
+        assertTrue("whisper outside the balloon should remain a separate text region", whisperCoverage < 0.58f)
+    }
 }
