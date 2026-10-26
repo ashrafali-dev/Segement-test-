@@ -42,6 +42,7 @@ internal object BubbleDetector {
     private const val MID_MEMORY_INPUT_SIZE = 640
     private const val HIGH_MEMORY_INPUT_SIZE = 768
     private const val EMERGENCY_INPUT_SIZE = 320
+    private const val PRESSURE_INPUT_SIZE = 256
 
     @Volatile var lastError: String = ""
         private set
@@ -54,6 +55,8 @@ internal object BubbleDetector {
     @Volatile private var broken = false
     private var session: Loaded? = null
     private var sessionStamp = 0L
+    @Volatile private var forceLowMemoryUntilMs = 0L
+    @Volatile private var trimReleaseQueued = false
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), MODEL_FILE_NAME)
     private fun legacyModelFile(c: Context): File =
@@ -108,6 +111,7 @@ internal object BubbleDetector {
      * smaller inputs and an unoptimised single-thread CPU session avoid a second activation-memory spike.
      */
     private fun recommendedInputSize(c: Context): Int {
+        if (SystemClock.elapsedRealtime() < forceLowMemoryUntilMs) return PRESSURE_INPUT_SIZE
         val ram = ramSnapshot(c)
         val lowHardware = ram.lowRamDevice || ram.totalMb in 1..4600L
         if (lowHardware) {
@@ -129,8 +133,30 @@ internal object BubbleDetector {
 
     private fun shouldUseLowMemorySession(c: Context): Boolean {
         val ram = ramSnapshot(c)
-        return ram.lowRamDevice || ram.totalMb in 1..4600L || ram.lowMemory ||
+        return SystemClock.elapsedRealtime() < forceLowMemoryUntilMs ||
+            ram.lowRamDevice || ram.totalMb in 1..4600L || ram.lowMemory ||
             ram.availableBytes < 512L * 1024L * 1024L
+    }
+
+    /**
+     * Android calls this on the UI thread under global memory pressure. Never wait here: force a small
+     * next inference immediately and release native ONNX session memory on a background thread after any
+     * current inference leaves the process-wide gate.
+     */
+    fun onMemoryPressure(level: Int) {
+        forceLowMemoryUntilMs = SystemClock.elapsedRealtime() + 60_000L
+        if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || trimReleaseQueued) return
+        trimReleaseQueued = true
+        Thread({
+            try {
+                OnnxHeavyGate.lock.lock()
+                try { release() } finally { OnnxHeavyGate.lock.unlock() }
+            } catch (t: Throwable) {
+                Log.w(TAG, "session trim failed after memory pressure", t)
+            } finally {
+                trimReleaseQueued = false
+            }
+        }, "ns-koharu-memory-trim").apply { isDaemon = true; priority = Thread.MIN_PRIORITY; start() }
     }
     fun mode(c: Context): String = Prefs.get(c, "wmDetectorMode", "auto")
 
