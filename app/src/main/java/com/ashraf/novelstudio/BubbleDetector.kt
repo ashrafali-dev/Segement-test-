@@ -261,7 +261,7 @@ internal object BubbleDetector {
             val blank = IntArray(size * size) { 0xFF727272.toInt() }
             loaded.run(
                 blank, intArrayOf(0, 0, size, size),
-                KoharuSegCore.Letterbox(1f, 1f, 0, 0, size, size), size
+                KoharuSegCore.Letterbox(1f, 1f, 0, 0, size, size), size, size
             )
             null
         } catch (e: Throwable) {
@@ -362,36 +362,50 @@ internal object BubbleDetector {
         for (tile in tiles) {
             if (bmp.isRecycled) throw IllegalStateException("source bitmap was recycled during detection")
             val prepared = prepareTile(bmp, tile, inputSize)
-            all.addAll(loaded.run(prepared.pixels, tile, prepared.letterbox, inputSize))
+            all.addAll(loaded.run(
+                prepared.pixels, tile, prepared.letterbox, prepared.inputWidth, prepared.inputHeight
+            ))
         }
         return all
     }
 
-    private data class PreparedTile(val pixels: IntArray, val letterbox: KoharuSegCore.Letterbox)
+    private data class PreparedTile(
+        val pixels: IntArray,
+        val inputWidth: Int,
+        val inputHeight: Int,
+        val letterbox: KoharuSegCore.Letterbox
+    )
 
-    private fun prepareTile(source: Bitmap, tile: IntArray, inputSize: Int): PreparedTile {
+    /**
+     * Preserve the tile aspect ratio and round only the padded canvas dimensions to stride 32. Koharu's
+     * dynamic ONNX accepts rectangular tensors; this avoids wasting memory on large square side bars.
+     */
+    private fun prepareTile(source: Bitmap, tile: IntArray, longSide: Int): PreparedTile {
         check(!source.isRecycled) { "source bitmap was recycled before createBitmap" }
         val x = tile[0].coerceIn(0, source.width - 1)
         val y = tile[1].coerceIn(0, source.height - 1)
         val w = (tile[2] - x).coerceIn(1, source.width - x)
         val h = (tile[3] - y).coerceIn(1, source.height - y)
-        val nominal = min(inputSize.toFloat() / w, inputSize.toFloat() / h)
-        val resizedW = (w * nominal).roundToInt().coerceIn(1, inputSize)
-        val resizedH = (h * nominal).roundToInt().coerceIn(1, inputSize)
+        val nominal = min(longSide.toFloat() / w, longSide.toFloat() / h)
+        val resizedW = (w * nominal).roundToInt().coerceIn(1, longSide)
+        val resizedH = (h * nominal).roundToInt().coerceIn(1, longSide)
+        val inputWidth = ((resizedW + KoharuSegCore.STRIDE - 1) / KoharuSegCore.STRIDE) * KoharuSegCore.STRIDE
+        val inputHeight = ((resizedH + KoharuSegCore.STRIDE - 1) / KoharuSegCore.STRIDE) * KoharuSegCore.STRIDE
         val scaleX = resizedW.toFloat() / w
         val scaleY = resizedH.toFloat() / h
-        val padX = (inputSize - resizedW) / 2
-        val padY = (inputSize - resizedH) / 2
+        val padX = (inputWidth - resizedW) / 2
+        val padY = (inputHeight - resizedH) / 2
 
         var crop: Bitmap? = null
         var scaled: Bitmap? = null
         try {
             crop = Bitmap.createBitmap(source, x, y, w, h)
             scaled = Bitmap.createScaledBitmap(crop, resizedW, resizedH, true)
-            val canvas = IntArray(inputSize * inputSize) { 0xFF727272.toInt() }
-            scaled.getPixels(canvas, padY * inputSize + padX, inputSize, 0, 0, resizedW, resizedH)
+            val canvas = IntArray(inputWidth * inputHeight) { 0xFF727272.toInt() }
+            scaled.getPixels(canvas, padY * inputWidth + padX, inputWidth, 0, 0, resizedW, resizedH)
             return PreparedTile(
-                canvas, KoharuSegCore.Letterbox(scaleX, scaleY, padX, padY, resizedW, resizedH)
+                canvas, inputWidth, inputHeight,
+                KoharuSegCore.Letterbox(scaleX, scaleY, padX, padY, resizedW, resizedH)
             )
         } finally {
             val sc = scaled
@@ -411,7 +425,7 @@ internal object BubbleDetector {
         private val imageName: String
         private val predictionName: String
         private val prototypeName: String
-        private var chwSize = 0
+        private var chwPixels = 0
         private var chw = FloatArray(0)
 
         init {
@@ -472,21 +486,23 @@ internal object BubbleDetector {
             argb: IntArray,
             tile: IntArray,
             letterbox: KoharuSegCore.Letterbox,
-            inputSize: Int
+            inputWidth: Int,
+            inputHeight: Int
         ): List<BubbleDetectorCore.Det> {
-            require(KoharuSegCore.validInputSize(inputSize))
-            check(argb.size >= inputSize * inputSize) { "letterboxed Koharu canvas is too small" }
-            if (chwSize != inputSize) {
-                chw = FloatArray(3 * inputSize * inputSize)
-                chwSize = inputSize
+            require(KoharuSegCore.validInputShape(inputWidth, inputHeight))
+            check(argb.size >= inputWidth * inputHeight) { "letterboxed Koharu canvas is too small" }
+            val pixels = inputWidth * inputHeight
+            if (chwPixels != pixels) {
+                chw = FloatArray(3 * pixels)
+                chwPixels = pixels
             }
-            BubbleDetectorCore.fillChw(argb, inputSize, chw)
+            BubbleDetectorCore.fillChw(argb, inputWidth, inputHeight, chw)
             var input: OnnxTensor? = null
             var result: OrtSession.Result? = null
             try {
                 input = OnnxTensor.createTensor(
                     env, FloatBuffer.wrap(chw),
-                    longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong())
+                    longArrayOf(1, 3, inputHeight.toLong(), inputWidth.toLong())
                 )
                 result = ses.run(mapOf(imageName to input))
                 val predValue = result.get(predictionName).orElse(null)
@@ -503,7 +519,7 @@ internal object BubbleDetector {
                 val protoWidth = protoShape[3].toInt()
                 return KoharuSegCore.decode(
                     toFloats(pred), toFloats(proto), protoWidth, protoHeight,
-                    inputSize, tile, letterbox
+                    inputWidth, inputHeight, tile, letterbox
                 )
             } finally {
                 try { result?.close() } catch (_: Throwable) {}
