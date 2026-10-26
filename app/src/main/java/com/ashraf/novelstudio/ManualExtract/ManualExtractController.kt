@@ -57,12 +57,29 @@ internal object ManualExtractController {
      * flight it is cancelled first.
      */
     fun startExtract(context: Context, src: String, x: Float, y: Float, w: Float, h: Float, script: OcrScript) {
+        startExtractInternal(context, src, x, y, w, h, script, preset = null)
+    }
+
+    /**
+     * Runs on pixels the Activity already captured (the 6-dot frame). The bitmap is owned by this run and is
+     * recycled when the pipeline finishes; the caller must not touch it afterwards.
+     */
+    fun startExtractWithBitmap(context: Context, bitmap: android.graphics.Bitmap, script: OcrScript) {
+        startExtractInternal(context, "", 0f, 0f, 1f, 1f, script, preset = bitmap)
+    }
+
+    private fun startExtractInternal(
+        context: Context, src: String, x: Float, y: Float, w: Float, h: Float, script: OcrScript,
+        preset: android.graphics.Bitmap?
+    ) {
         if (!ManualExtractConfig.ENABLED) {
             OcrDiag.log("MANUAL", "skip: mode disabled")
+            preset?.recycle()
             return
         }
         val attached = host ?: run {
             OcrDiag.log("MANUAL", "skip: host not attached (installManualExtractHost never ran)")
+            preset?.recycle()
             return
         }
         // Single flight: a tap that arrives while a run is in progress is dropped, not queued. Touches arrive
@@ -70,20 +87,29 @@ internal object ManualExtractController {
         // ever finished and the log filled with 1 ms "capture failed" runs.
         if (state == State.RUNNING) {
             OcrDiag.log("MANUAL", "skip: a run is already in flight")
+            preset?.recycle()
             return
         }
         cancel()
 
         OcrDiag.setMode("manual")
-        OcrDiag.log("MANUAL", "start src=${src.take(90)} rect=${"%.3f".format(x)},${"%.3f".format(y)} ${"%.3f".format(w)}x${"%.3f".format(h)} script=${script.name}")
+        OcrDiag.log(
+            "MANUAL",
+            if (preset != null) "start frame=${preset.width}x${preset.height} script=${script.name}"
+            else "start src=${src.take(90)} rect=${"%.3f".format(x)},${"%.3f".format(y)} ${"%.3f".format(w)}x${"%.3f".format(h)} script=${script.name}"
+        )
         val token = runSeq.incrementAndGet()
         val o = ocr ?: ManualExtractOcr(context.applicationContext).also { ocr = it }
         val pipeline = ManualExtractPipeline(o, attached)
         state = State.RUNNING
         val t = Thread({
             try {
-                if (token != runSeq.get()) return@Thread   // a newer tap owns the screen
-                val result = pipeline.run(src, x, y, w, h, script) { token != runSeq.get() }
+                if (token != runSeq.get()) {
+                    preset?.recycle()
+                    return@Thread   // a newer tap owns the screen
+                }
+                val result = if (preset != null) pipeline.runOnBitmap(preset, script) { token != runSeq.get() }
+                    else pipeline.run(src, x, y, w, h, script) { token != runSeq.get() }
                 // Tell the user why nothing appeared. Silent failure was the whole complaint.
                 if (!result.ok && token == runSeq.get()) notifyFailure(result.reason)
             } catch (e: Throwable) {

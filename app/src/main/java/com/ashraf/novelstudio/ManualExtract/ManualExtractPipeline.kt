@@ -45,6 +45,26 @@ internal class ManualExtractPipeline(
         // 1) capture region only
         val raw = host.captureCrop(src, x, y, w, h) ?: return fail(m, "capture failed")
         m.mark("capture")
+        return ocrAndPlace(raw, src, x, y, w, h, hasTapPoint, m, tStart, script, cancelled)
+    }
+
+    /**
+     * Same pipeline, on pixels the caller already captured (the 6-dot frame drawn by the user).
+     * Takes ownership of [bitmap] and recycles it. There is no tap point: the frame IS the selection.
+     */
+    fun runOnBitmap(bitmap: Bitmap, script: OcrScript, cancelled: () -> Boolean = { false }): Result {
+        val m = ManualExtractMetrics()
+        val tStart = SystemClock.elapsedRealtime()
+        if (cancelled()) { bitmap.recycle(); return fail(m, "cancelled") }
+        m.cropW = bitmap.width; m.cropH = bitmap.height
+        m.mark("capture")
+        return ocrAndPlace(bitmap, "", 0f, 0f, 1f, 1f, false, m, tStart, script, cancelled)
+    }
+
+    private fun ocrAndPlace(
+        raw: Bitmap, src: String, x: Float, y: Float, w: Float, h: Float, hasTapPoint: Boolean,
+        m: ManualExtractMetrics, tStart: Long, script: OcrScript, cancelled: () -> Boolean
+    ): Result {
         var crop: Bitmap = raw
         try {
             if (cancelled()) return fail(m, "cancelled")
@@ -72,8 +92,9 @@ internal class ManualExtractPipeline(
             if (hasTapPoint) outcome = outcome.narrowToTap(ocrBmp, x, y)
             m.mark("ocr")
             if (outcome.blocks.isEmpty() && SystemClock.elapsedRealtime() - tStart < ManualExtractConfig.TOTAL_CAP_MS / 2) {
-                // one slightly-expanded retry — still a crop, never full-panel
-                val expanded = expandCrop(host, src, x, y, w, h)
+                // one slightly-expanded retry — still a crop, never full-panel. A preset bitmap (6-dot frame)
+                // has no source image to re-capture from, and the frame is exactly what the user chose.
+                val expanded = if (src.isBlank()) null else expandCrop(host, src, x, y, w, h)
                 if (expanded != null) {
                     try {
                         val e = downscale(expanded, ManualExtractConfig.MAX_OCR_DIM)

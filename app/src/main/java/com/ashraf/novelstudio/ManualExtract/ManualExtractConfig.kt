@@ -20,8 +20,14 @@ internal object ManualExtractConfig {
     const val ABORT_IF_LARGER_THAN = 1024
 
     // ---- OCR -----------------------------------------------------------------------------------
-    /** Longest side sent to OCR. Never upscaled. */
-    const val MAX_OCR_DIM = 720
+    /**
+     * Longest side sent to OCR. Never upscaled.
+     *
+     * The user marked this box, so the crop keeps far more detail than realtime scanning: shrinking it to
+     * 720 px threw away small Japanese/Korean glyphs before the engine saw them. Only oversized selections
+     * are scaled, and never below this.
+     */
+    const val MAX_OCR_DIM = 1600
     /** One slightly-expanded retry when the crop reads empty (never a full-panel retry). */
     const val EXPAND_RETRY = 0.15f
 

@@ -320,6 +320,11 @@ class MainActivity : Activity() {
             return null
         }
         try {
+            // draw() only contains the WebView, so our own buttons cannot be in here — but a WebView drawn
+            // under a native overlay can still show that overlay if it is a sibling composited above. Mask the
+            // app's own floating controls anyway: they are never comic lettering, and the 6-dot button sits
+            // right where a bubble often is.
+            maskNativeControls(view)
             val k = if (vw > 0f) view.width / vw else 1f
             val il = r.optDouble("l").toFloat() * k
             val it = r.optDouble("t").toFloat() * k
@@ -343,6 +348,90 @@ class MainActivity : Activity() {
         } finally {
             view.recycle()
         }
+    }
+
+    /**
+     * Paint over the app's own floating controls in a captured frame.
+     *
+     * These are native views (the 6-dot re-scan button, Extract, the progress chip). They must never reach OCR:
+     * a box drawn on top of a bubble hides lettering, and their own labels came back as "text" in past reports.
+     * Colours are sampled from just outside each rect so the mask matches the page behind it.
+     */
+    private fun maskNativeControls(bmp: android.graphics.Bitmap) {
+        val targets = listOfNotNull(reOcrBtn, if (::extractBtn.isInitialized) extractBtn else null)
+            .filter { it.isShown && it.width > 0 && it.height > 0 }
+        if (targets.isEmpty()) return
+        val loc = IntArray(2)
+        val wvLoc = IntArray(2)
+        novelWv.getLocationInWindow(wvLoc)
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint()
+        for (v in targets) {
+            v.getLocationInWindow(loc)
+            val l = loc[0] - wvLoc[0]
+            val t = loc[1] - wvLoc[1]
+            val r = l + v.width
+            val b = t + v.height
+            if (r <= 0 || b <= 0 || l >= bmp.width || t >= bmp.height) continue
+            val x0 = l.coerceAtLeast(0); val y0 = t.coerceAtLeast(0)
+            val x1 = r.coerceAtMost(bmp.width); val y1 = b.coerceAtMost(bmp.height)
+            if (x1 - x0 < 2 || y1 - y0 < 2) continue
+            // Sample the page colour a little outside the control so the cover blends in.
+            val sx = ((x0 + x1) / 2).coerceIn(0, bmp.width - 1)
+            val sy = (y1 + 4).coerceIn(0, bmp.height - 1)
+            paint.color = try { bmp.getPixel(sx, sy) } catch (_: Throwable) { android.graphics.Color.WHITE }
+            canvas.drawRect(x0.toFloat(), y0.toFloat(), x1.toFloat(), y1.toFloat(), paint)
+        }
+        OcrDiag.log("MANUAL", "live capture: masked ${targets.size} native control(s)")
+    }
+
+    /**
+     * Crop the user's 6-dot frame straight out of the live WebView (fractions of the view).
+     *
+     * This is the path used when the frame does not cover a <img> — canvas readers, background-image panels,
+     * or a box drawn over page art. It is the user's explicit selection, so nothing is filtered out first.
+     */
+    private fun captureManualRegionFromView(fx0: Float, fy0: Float, fx1: Float, fy1: Float): android.graphics.Bitmap? {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var view: android.graphics.Bitmap? = null
+        handler.post {
+            try {
+                val cw = novelWv.width; val ch = novelWv.height
+                if (cw > 0 && ch > 0) {
+                    val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+                    b.eraseColor(android.graphics.Color.WHITE)
+                    novelWv.draw(android.graphics.Canvas(b))
+                    view = b
+                }
+            } catch (_: Throwable) {
+            } finally { latch.countDown() }
+        }
+        try { latch.await(1800, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
+        val v = view ?: run {
+            OcrDiag.log("MANUAL", "frame capture: WebView draw returned nothing")
+            return null
+        }
+        try {
+            maskNativeControls(v)
+            val l = (fx0.coerceIn(0f, 1f) * v.width).toInt().coerceIn(0, v.width - 2)
+            val t = (fy0.coerceIn(0f, 1f) * v.height).toInt().coerceIn(0, v.height - 2)
+            val r = (fx1.coerceIn(0f, 1f) * v.width).toInt().coerceIn(l + 2, v.width)
+            val b = (fy1.coerceIn(0f, 1f) * v.height).toInt().coerceIn(t + 2, v.height)
+            OcrDiag.log("MANUAL", "frame capture ok view=${v.width}x${v.height} crop=${r - l}x${b - t}")
+            return android.graphics.Bitmap.createBitmap(v, l, t, r - l, b - t)
+                .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        } catch (e: Throwable) {
+            OcrDiag.log("MANUAL", "frame capture: crop failed ${e.javaClass.simpleName}: ${e.message?.take(70)}")
+            return null
+        } finally {
+            v.recycle()
+        }
+    }
+
+    /** Run the manual pipeline on an already-captured bitmap (no second screenshot, no image lookup). */
+    private fun startManualExtractOnBitmap(bmp: android.graphics.Bitmap) {
+        OcrDiag.setMode("manual")
+        com.ashraf.novelstudio.manualextract.ManualExtractHost.startOnBitmap(this, bmp, manualExtractScript())
     }
 
     /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
@@ -543,7 +632,10 @@ class MainActivity : Activity() {
             "if(r.width<120||r.height<120)continue;" +
             "var t=Math.max(0,r.top),b=Math.min(vh,r.bottom),vis=b-t;if(vis<=0)continue;" +
             "var w=Math.max(0,Math.min(vw,r.right)-Math.max(0,r.left));if(vis*w>area){area=vis*w;best=im.currentSrc||im.src||'';}}" +
-            "return JSON.stringify(best);})()"
+            // No JSON.stringify here: evaluateJavascript already JSON-encodes the returned string, so wrapping
+            // it added a second layer of quotes and the URL reached the image lookup as "https://..." (with the
+            // quotes), which matched no DOM image. decode() unwraps exactly one layer.
+            "return best;})()"
         novelWv.evaluateJavascript(js) { raw ->
             val src = decode(raw)
             if (src.isBlank()) {
@@ -698,7 +790,10 @@ class MainActivity : Activity() {
         reOcrBusy = true
         val run = ++reOcrRun
         rtPausedForReOcr = true
-        toast("⟳ Reading the selected area — other work is paused")
+        // The 6-dot frame is the user saying "there is text here": manual mode runs the dedicated fresh-capture,
+        // zero-filter pipeline and shows progress, instead of waiting for the realtime queue to drain.
+        val manual = manualExtractOn()
+        toast(if (manual) "⟳ Reading the marked area…" else "⟳ Reading the selected area — other work is paused")
         fun finish(msg: String?) {
             if (run != reOcrRun) return
             reOcrBusy = false
@@ -729,7 +824,27 @@ class MainActivity : Activity() {
         novelWv.evaluateJavascript(js) { raw ->
             val txt = decode(raw)
             val o = try { JSONObject(txt) } catch (_: Exception) { null }
-            if (o == null || o.optString("s").isBlank()) { finish("⚠️ No page image under the frame"); return@evaluateJavascript }
+            if (o == null || o.optString("s").isBlank()) {
+                // No image element under the frame (canvas reader, or the box sits over a background image).
+                // Manual mode still honours the intent: read exactly what was framed, from the live screen.
+                if (manual) {
+                    val hit = captureManualRegionFromView(fx0, fy0, fx1, fy1)
+                    if (hit == null) { finish("⚠️ Nothing under the frame — try again"); return@evaluateJavascript }
+                    startManualExtractOnBitmap(hit)
+                    finish(null)
+                    return@evaluateJavascript
+                }
+                finish("⚠️ No page image under the frame"); return@evaluateJavascript
+            }
+            if (manual) {
+                // Straight into the manual pipeline: no realtime queue to wait for, no pause/resume dance.
+                requestForceOcrArea(
+                    o.optString("s"), o.optDouble("x").toFloat(), o.optDouble("y").toFloat(),
+                    o.optDouble("w").toFloat(), o.optDouble("h").toFloat(), fromReOcr = true
+                )
+                finish(null)
+                return@evaluateJavascript
+            }
             whenIdle(0) {
                 requestForceOcrArea(
                     o.optString("s"), o.optDouble("x").toFloat(), o.optDouble("y").toFloat(),

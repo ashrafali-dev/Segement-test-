@@ -24,9 +24,23 @@ internal class ManualExtractOcr(context: Context) {
     private var lens: LensOcrEngine? = null
     private var mlkit: MlKitOcrEngine? = null
 
+    private companion object {
+        /**
+         * Manual crops are only downscaled when they exceed this. Lens/ML Kit both lose small glyphs when a
+         * big selection is shrunk first, so a user-marked box keeps far more resolution than the realtime cap.
+         */
+        const val MAX_FORCE_DIM = 1600
+    }
+
     data class Outcome(val blocks: List<OcrBlock>, val engine: String)
 
-    /** Blocks whose text is non-blank. May be empty when neither engine saw text. */
+    /**
+     * Blocks whose text is non-blank. May be empty when neither engine saw text.
+     *
+     * This is the user's own selection, so nothing about it is guessed: the request always goes out fresh
+     * (no image cache, no negative cache), and the crop is never shrunk beyond [MAX_FORCE_DIM]. A tap means
+     * "there is text here", so the engines are asked at full quality rather than in fast mode.
+     */
     fun read(bitmap: Bitmap, script: OcrScript, deadlineMs: Long): Outcome {
         val t0 = SystemClock.elapsedRealtime()
         val useLens = Prefs.get(app, "ocrEngine", "mlkit") == "lens"
@@ -34,7 +48,9 @@ internal class ManualExtractOcr(context: Context) {
         if (useLens) {
             val lensBlocks = try {
                 val e = lens ?: LensOcrEngine(app).also { lens = it }
-                e.recognizeRegion(bitmap, script).blocks.filter { it.text.isNotBlank() }
+                // Fresh: bypassCache also skips the short-lived empty-region cache, which would otherwise
+                // answer a user-selected crop with "empty" just because realtime scanned that area before.
+                e.recognizeFresh(bitmap, script, fastMode = false).blocks.filter { it.text.isNotBlank() }
             } catch (_: Throwable) { emptyList() }
             if (lensBlocks.isNotEmpty()) return Outcome(lensBlocks, "Google Lens")
             // No text from Lens → ML Kit on the SAME crop (never a different/larger image).
@@ -42,7 +58,8 @@ internal class ManualExtractOcr(context: Context) {
         }
         val mlBlocks = try {
             val e = mlkit ?: MlKitOcrEngine().also { mlkit = it }
-            e.recognizeFast(bitmap, script).blocks.filter { it.text.isNotBlank() }
+            // Full inference, not the fast path: the user marked this box to get every glyph.
+            e.recognizeRegion(bitmap, script).blocks.filter { it.text.isNotBlank() }
         } catch (_: Throwable) { emptyList() }
         val engine = if (useLens) "ML Kit (Lens found none)" else "ML Kit"
         return Outcome(mlBlocks, engine)
