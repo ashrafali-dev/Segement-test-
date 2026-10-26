@@ -2235,16 +2235,25 @@ internal class WebModeExtractor(
             // Preserve the detector's instance masks while mapping each local slice/tile box back to
             // native source-image pixels. Mask samples are normalized to their box, so the same mask
             // remains valid when the box is scaled and offset.
-            if (dets != null && detectedForClean != null) {
-                detectorReturned?.let { it[0] = true }
+            if (dets != null) {
+                val sourceDets = ArrayList<BubbleDetectorCore.Det>(dets.size)
                 for (d in dets) {
                     val l = kotlin.math.floor(x0 + d.l * k).toInt()
                     val t = kotlin.math.floor(y0 + d.t * k).toInt()
                     val r = kotlin.math.ceil(x0 + d.r * k).toInt()
                     val b = kotlin.math.ceil(y0 + d.b * k).toInt()
-                    if (r > l && b > t) detectedForClean.add(
+                    if (r > l && b > t) sourceDets.add(
                         BubbleDetectorCore.Det(d.label, d.score, l, t, r, b, d.mask)
                     )
+                }
+                if (detectedForClean != null) {
+                    // Preserve even an empty completed inference so it can replace stale masks for this URL.
+                    detectorReturned?.let { it[0] = true }
+                    detectedForClean.addAll(sourceDets)
+                } else {
+                    // Other viewport/screen OCR callers do not own a whole-image accumulator; keep their
+                    // existing behaviour, but store the boxes in source coordinates rather than slice pixels.
+                    synchronized(detectBySrc) { detectBySrc[src] = BubbleDetectorCore.merge(sourceDets) }
                 }
             }
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
