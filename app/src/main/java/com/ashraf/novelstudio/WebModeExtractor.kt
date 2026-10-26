@@ -1184,14 +1184,12 @@ internal class WebModeExtractor(
         }
 
         /**
-         * Fingerprint the original pixels of a tainted Shonen Jump+ canvas from the clean PixelCopy bitmap.
+         * Fingerprint original canvas pixels from the clean PixelCopy bitmap.
          * This runs before OCR, so a page swap is detectable even if Lens is offline or OCR returns no text.
          * Sample points are element-relative (not viewport-relative); clipped points are marked '?' and
          * ignored by the comparison, so normal scrolling does not by itself count as a new manga page.
          */
         private fun observeCanvasPixelFingerprints(bmp: Bitmap, info: JSONObject, url: String) {
-            val host = hostOf(url).lowercase().removePrefix("www.")
-            if (host != "shonenjumpplus.com" && !host.endsWith(".shonenjumpplus.com")) return
             val viewportWidth = info.optDouble("vw", 0.0).toFloat()
             if (viewportWidth <= 0f) return
             val scale = bmp.width / viewportWidth
@@ -1385,11 +1383,16 @@ internal class WebModeExtractor(
                 try { Thread.sleep(if (steps == 0) 450L else 350L) } catch (_: InterruptedException) { return }
                 val info = evalWait(wrap(LIB + forceInfoScript)) { parseJson(it) }
                 val blankBefore = forceBlank
-                val host = hostOf(meta.url).lowercase().removePrefix("www.")
+                // Only fingerprint screenshot crops explicitly identified as canvas sources.
+                // Other image / DOM OCR paths keep their existing behavior.
+                val hasCanvasPlaceholder = info?.optJSONArray("imgs")?.let { candidates ->
+                    (0 until candidates.length()).any { i ->
+                        candidates.optJSONObject(i)?.optString("s").orEmpty().startsWith("ns-canvas:")
+                    }
+                } == true
                 // Always take the screenshot WITHOUT our own translation overlay, otherwise the Bengali text drawn on the
                 // page is read again as if it were lettering (and for a non-Bengali target it is even "translated").
                 val hideOverlayForShot = req.visibleOnly
-                val canvasSite = host == "shonenjumpplus.com" || host.endsWith(".shonenjumpplus.com")
                 if (hideOverlayForShot) {
                     evalWait(wrap(JS_TEMP_HIDE_OVERLAY)) { null }
                     // Wait for the visibility change to reach the WebView surface before PixelCopy.
@@ -1419,7 +1422,7 @@ internal class WebModeExtractor(
                 }
                 if (bmp != null) {
                     forceBlank = blankBefore   // a retry succeeded: this screen was not blank after all
-                    if (canvasSite && hideOverlayForShot && info != null) {
+                    if (hasCanvasPlaceholder && hideOverlayForShot && info != null) {
                         try { observeCanvasPixelFingerprints(bmp, info, meta.url) }
                         catch (e: Exception) { Log.w(TAG, "Canvas fingerprint failed: ${e.javaClass.simpleName}") }
                     }

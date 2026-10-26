@@ -14,6 +14,48 @@ class WebModeLayoutTest {
     private val pageA = listOf(
         b("where are you going", 0.3f, 0.2f), b("I have to leave now", 0.7f, 0.4f), b("please wait for me", 0.4f, 0.7f))
 
+    @Test fun canvasLifecycleIsSelectedByCanvasSourceNotHost() {
+        assertTrue(WebModeLayoutStore.hasCanvasSources(WebModeLayout(0, pageA)))
+        val ordinaryImageLayout = WebModeLayout(0, pageA.map {
+            it.copy(src = "https://cdn.example.test/manga/page-1.jpg")
+        })
+        assertFalse(WebModeLayoutStore.hasCanvasSources(ordinaryImageLayout))
+    }
+
+    @Test fun resizedCanvasUsesTheSameStableSlot() {
+        val resized = pageA.map { it.copy(src = "ns-canvas:0,0,900x1350") }
+        assertTrue(WebModeLayoutStore.sameCanvasSource(src, "ns-canvas:0,0,900x1350"))
+        assertTrue(WebModeLayoutStore.canvasSourceSlot(src) == WebModeLayoutStore.canvasSourceSlot("ns-canvas:0,0,900x1350"))
+        assertFalse(WebModeLayoutStore.canvasTransitionDetected(pageA, resized))
+    }
+
+    @Test fun changedPageOnResizedCanvasIsStillATransition() {
+        val other = listOf(
+            b("different page line one", 0.1f, 0.1f),
+            b("different page line two", 0.5f, 0.5f),
+            b("different page line three", 0.9f, 0.9f)
+        ).map { it.copy(src = "ns-canvas:0,0,900x1350") }
+        assertTrue(WebModeLayoutStore.canvasTransitionDetected(pageA, other))
+    }
+
+    @Test fun canvasGenerationIdentitySurvivesSpaUrlAndSizeChanges() {
+        val pageOne = WebModeLayoutStore.canvasIdentityKey(
+            "https://reader.example/chapter/1", "ns-canvas:0,0,800x1200"
+        )
+        val nextPage = WebModeLayoutStore.canvasIdentityKey(
+            "https://reader.example/chapter/2", "ns-canvas:0,0,900x1350"
+        )
+        val otherHost = WebModeLayoutStore.canvasIdentityKey(
+            "https://other.example/chapter/2", "ns-canvas:0,0,900x1350"
+        )
+        assertTrue(pageOne == nextPage)
+        assertFalse(pageOne == otherHost)
+    }
+
+    @Test fun differentCanvasSlotsDoNotMatch() {
+        assertFalse(WebModeLayoutStore.sameCanvasSource(src, "ns-canvas:0,30,800x1200"))
+    }
+
     @Test fun sparseTotallyDifferentReadIsATransition() {
         val fresh = listOf(b("completely other words", 0.5f, 0.1f), b("nothing in common here", 0.2f, 0.9f))
         assertTrue(WebModeLayoutStore.canvasTransitionDetected(pageA, fresh))

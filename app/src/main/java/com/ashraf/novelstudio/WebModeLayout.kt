@@ -226,6 +226,14 @@ internal object WebModeLayoutStore {
     private val canvasPixelSnapshots = object : LinkedHashMap<String, String>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 128
     }
+    private val canvasPixelSourceBySlot = object : LinkedHashMap<String, String>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 128
+    }
+    // URL that owns the last confirmed pixel baseline. Do not delete a previously visited page's cache
+    // merely because the reader navigated to a different SPA URL and reused its canvas element.
+    private val canvasPixelUrlBySlot = object : LinkedHashMap<String, String>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 128
+    }
 
     // Reader SPAs (MangaDex) rewrite the trailing page number while the page is scrolled:
     // /chapter/<uuid>/1 -> /chapter/<uuid>/8. The layout saved during the scan and the chapter that later
@@ -239,32 +247,43 @@ internal object WebModeLayoutStore {
         val k = key(url)
         // Load persisted translations before comparing so a restart cannot resurrect bubbles from
         // an old page after the reader recycles its canvas at the same URL/coordinates.
-        val previousLayout = mem[k] ?: if (isShonenJumpPlus(url)) get(ctx, url) else null
+        // Canvas identity is carried by the synthetic source, not by a hard-coded reader hostname.
+        // Only layouts that actually contain a canvas crop enter this page-reuse lifecycle.
+        val hasCanvas = hasCanvasSources(layout)
+        val previousLayout = mem[k] ?: if (hasCanvas) get(ctx, url) else null
         val transitions = LinkedHashSet<String>()
 
-        if (isShonenJumpPlus(url)) {
+        if (hasCanvas) {
             val sources = layout.bubbles.asSequence()
                 .map { WebModeLogic.normalizeUrl(it.src) }
                 .filter { it.startsWith("ns-canvas:") }
-                .distinct()
+                .distinctBy { canvasSourceSlot(it) ?: it }
                 .toList()
             for (src in sources) {
                 val fresh = layout.bubbles.filter {
-                    WebModeLogic.normalizeUrl(it.src) == src && it.sourceText.isNotBlank()
+                    sameCanvasSource(it.src, src) && it.sourceText.isNotBlank()
                 }
                 if (fresh.isEmpty()) continue
-                val snapshotKey = "$k|$src"
+                // Width/height may change when a reader recycles a canvas. The slot (left + document top)
+                // stays stable, so compare the new bitmap against the prior page regardless of dimensions.
+                val snapshotKey = canvasStateKey(k, src)
                 val prior = canvasSnapshots[snapshotKey]?.bubbles
-                    ?: scans[k]?.bubbles?.filter { WebModeLogic.normalizeUrl(it.src) == src }
-                    ?: previousLayout?.bubbles?.filter { WebModeLogic.normalizeUrl(it.src) == src }
+                    ?: scans[k]?.bubbles?.filter { sameCanvasSource(it.src, src) }
+                    ?: previousLayout?.bubbles?.filter { sameCanvasSource(it.src, src) }
                     ?: emptyList()
                 val transition = canvasTransitionDetected(prior, fresh)
                 // A sparse read (< 3 bubbles) that does not contradict the stored page is only a partial
                 // view of it: keep the fuller snapshot instead of overwriting it.
                 if (fresh.size < 3 && !transition) continue
                 if (transition) {
+                    // Remove all old geometry variants belonging to this reused canvas slot.
+                    val candidates = prior + previousLayout?.bubbles.orEmpty() + scans[k]?.bubbles.orEmpty()
+                    candidates.map { WebModeLogic.normalizeUrl(it.src) }
+                        .filter { sameCanvasSource(it, src) }
+                        .forEach { transitions.add(it) }
                     transitions.add(src)
-                    canvasGenerationBySource[snapshotKey] = (canvasGenerationBySource[snapshotKey] ?: 0L) + 1L
+                    val generationKey = canvasIdentityKey(url, src)
+                    canvasGenerationBySource[generationKey] = (canvasGenerationBySource[generationKey] ?: 0L) + 1L
                 }
                 canvasSnapshots[snapshotKey] = WebModeLayout(layout.titleOffset, fresh)
             }
@@ -300,13 +319,22 @@ internal object WebModeLayoutStore {
      */
     @Synchronized
     fun observeCanvasFrame(ctx: Context, url: String, src: String, signature: String): Boolean {
-        if (!isShonenJumpPlus(url)) return false
         val normalizedSource = WebModeLogic.normalizeUrl(src)
         if (!normalizedSource.startsWith("ns-canvas:") || signature.isBlank()) return false
         val k = key(url)
-        val sourceKey = "$k|$normalizedSource"
-        val previous = canvasPixelSnapshots.put(sourceKey, signature) ?: return false
-        if (previous.length != signature.length) return false
+        // Key the fingerprint by stable canvas slot, because dimensions can change between pages.
+        // Use host + canvas slot (not the page URL): a canvas reader may update its SPA URL while
+        // keeping the same visible canvas and the same DOM overlay alive.
+        val sourceKey = canvasIdentityKey(url, normalizedSource)
+        val previous = canvasPixelSnapshots[sourceKey]
+        val previousSource = canvasPixelSourceBySlot[sourceKey]
+        val previousUrlKey = canvasPixelUrlBySlot[sourceKey]
+        if (previous == null || previous.length != signature.length) {
+            canvasPixelSnapshots[sourceKey] = signature
+            canvasPixelSourceBySlot[sourceKey] = normalizedSource
+            canvasPixelUrlBySlot[sourceKey] = k
+            return false
+        }
 
         var comparable = 0
         var changed = 0
@@ -317,28 +345,38 @@ internal object WebModeLayoutStore {
             comparable++
             if (a != b) changed++
         }
-        // Require a broad change across the canvas, not a few antialiasing pixels or a UI artifact.
+        // Keep the last stable page as the baseline until a real transition is confirmed. This allows
+        // several small canvas repaints to accumulate instead of losing the change on every screenshot.
         if (comparable < 16 || changed.toFloat() / comparable.toFloat() < 0.45f) return false
 
+        canvasPixelSnapshots[sourceKey] = signature
+        canvasPixelSourceBySlot[sourceKey] = normalizedSource
+        canvasPixelUrlBySlot[sourceKey] = k
         canvasGenerationBySource[sourceKey] = (canvasGenerationBySource[sourceKey] ?: 0L) + 1L
-        pendingCanvasTransitions.getOrPut(k) { LinkedHashSet() }.add(normalizedSource)
+        val pageLayoutKey = canvasStateKey(k, normalizedSource)
+        val changedSources = LinkedHashSet<String>()
+        if (!previousSource.isNullOrBlank()) changedSources.add(WebModeLogic.normalizeUrl(previousSource))
+        changedSources.add(normalizedSource)
+        pendingCanvasTransitions.getOrPut(k) { LinkedHashSet() }.addAll(changedSources)
 
-        // This bitmap, not OCR, is what proved the page changed. Drop the old OCR baseline and both
-        // the cumulative and latest-scan entries for this canvas, so a later text-only fallback cannot
-        // accidentally fetch the prior page's geometry after OCR failure.
-        canvasSnapshots.remove(sourceKey)
-        scans[k]?.let { scanned ->
-            scans[k] = WebModeLayout(scanned.titleOffset, scanned.bubbles.filterNot {
-                WebModeLogic.normalizeUrl(it.src) == normalizedSource
-            })
-        }
-        val previousLayout = mem[k] ?: get(ctx, url)
-        if (previousLayout != null) {
-            mem[k] = WebModeLayout(previousLayout.titleOffset, previousLayout.bubbles.filterNot {
-                WebModeLogic.normalizeUrl(it.src) == normalizedSource
-            })
-            // Persist removal immediately; do not resurrect the prior page if OCR/chat fails or the app restarts.
-            persist(ctx, url)
+        // This bitmap proved that the page changed. Clear the current page's layout only when the
+        // baseline belongs to the same URL. If the SPA URL changed, its cached layout belongs to that
+        // other page and must survive for later navigation back; the live DOM overlay is still cleared.
+        if (previousUrlKey == null || previousUrlKey == k) {
+            canvasSnapshots.remove(pageLayoutKey)
+            scans[k]?.let { scanned ->
+                scans[k] = WebModeLayout(scanned.titleOffset, scanned.bubbles.filterNot {
+                    sameCanvasSource(it.src, normalizedSource)
+                })
+            }
+            val previousLayout = mem[k] ?: get(ctx, url)
+            if (previousLayout != null) {
+                mem[k] = WebModeLayout(previousLayout.titleOffset, previousLayout.bubbles.filterNot {
+                    sameCanvasSource(it.src, normalizedSource)
+                })
+                // Persist removal immediately; do not resurrect the prior page if OCR/chat fails or the app restarts.
+                persist(ctx, url)
+            }
         }
         return true
     }
@@ -346,18 +384,20 @@ internal object WebModeLayoutStore {
     /** Capture the current reader-page generation for each canvas source in this request's layout. */
     @Synchronized
     fun canvasVersions(url: String, layout: WebModeLayout?): Map<String, Long> {
-        if (layout == null || !isShonenJumpPlus(url)) return emptyMap()
+        if (!hasCanvasSources(layout)) return emptyMap()
+        val currentLayout = layout ?: return emptyMap()
         val k = key(url)
-        val sources = layout.bubbles.asSequence()
+        val sources = currentLayout.bubbles.asSequence()
             .map { WebModeLogic.normalizeUrl(it.src) }
             .filter { it.startsWith("ns-canvas:") }
-            .distinct()
+            .distinctBy { canvasSourceSlot(it) ?: it }
             .toList()
         return sources.associate { src ->
-            val sourceKey = "$k|$src"
-            val snapshot = canvasSnapshots[sourceKey]?.bubbles.orEmpty()
-            val requestBubbles = layout.bubbles.filter {
-                WebModeLogic.normalizeUrl(it.src) == src && it.sourceText.isNotBlank()
+            val snapshotKey = canvasStateKey(k, src)
+            val generationKey = canvasIdentityKey(url, src)
+            val snapshot = canvasSnapshots[snapshotKey]?.bubbles.orEmpty()
+            val requestBubbles = currentLayout.bubbles.filter {
+                sameCanvasSource(it.src, src) && it.sourceText.isNotBlank()
             }
             // A batch may be queued while another scan detects the next manga page. If we blindly
             // capture the *new* generation here, an old batch would appear current. Every bubble in
@@ -367,8 +407,8 @@ internal object WebModeLayoutStore {
                 requestBubbles.all { request ->
                     snapshot.any { scanned -> sameBubbleReading(scanned, request) }
                 }
-            sourceKey to if (belongsToCurrentPage) {
-                canvasGenerationBySource[sourceKey] ?: 0L
+            generationKey to if (belongsToCurrentPage) {
+                canvasGenerationBySource[generationKey] ?: 0L
             } else {
                 Long.MIN_VALUE
             }
@@ -480,7 +520,7 @@ internal object WebModeLayoutStore {
      * real bubble silently vanished. Different bubbles are at least a bubble-height apart; a re-read only jitters.
      */
     internal fun samePosition(a: WmBubble, b: WmBubble): Boolean {
-        if (WebModeLogic.normalizeUrl(a.src) != WebModeLogic.normalizeUrl(b.src)) return false
+        if (!sameCanvasSource(a.src, b.src)) return false
         val maxW = maxOf(a.w, b.w); val maxH = maxOf(a.h, b.h)
         if (maxW <= 0f || maxH <= 0f) return false
         if (kotlin.math.abs(a.cx - b.cx) > 0.15f * maxW + 0.0008f) return false
@@ -500,7 +540,7 @@ internal object WebModeLayoutStore {
 
     /** A later OCR pass may grow a tight text box into the full speech-balloon interior. */
     private fun sameBubbleReading(a: WmBubble, b: WmBubble): Boolean {
-        if (WebModeLogic.normalizeUrl(a.src) != WebModeLogic.normalizeUrl(b.src)) return false
+        if (!sameCanvasSource(a.src, b.src)) return false
         val x = WebModeLayout.normalizeOcrText(a.sourceText)
         val y = WebModeLayout.normalizeOcrText(b.sourceText)
         if (x.isBlank() || y.isBlank()) return false
@@ -513,7 +553,7 @@ internal object WebModeLayoutStore {
      * (a re-read of part of the bubble, e.g. "PIN ONES" from "...KEEPING AN EYE ON THE ONES"), not a bubble.
      */
     private fun ghostOf(big: WmBubble, small: WmBubble): Boolean {
-        if (big === small || big.src != small.src) return false
+        if (big === small || !sameCanvasSource(big.src, small.src)) return false
         val bigArea = big.w * big.h
         val smallArea = small.w * small.h
         if (smallArea <= 0f || bigArea < smallArea * 1.8f) return false
@@ -533,10 +573,39 @@ internal object WebModeLayoutStore {
         return hit * 100 >= n * 70
     }
 
-    private fun isShonenJumpPlus(url: String): Boolean {
+    /** True only for OCR layouts whose source identity is a measured canvas crop. */
+    internal fun hasCanvasSources(layout: WebModeLayout?): Boolean =
+        layout?.bubbles?.any {
+            WebModeLogic.normalizeUrl(it.src).startsWith("ns-canvas:")
+        } == true
+
+    private val CANVAS_SLOT = Regex(
+        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)$"
+    )
+
+    /** Stable identity for a recycled canvas independent of the current bitmap dimensions. */
+    internal fun canvasSourceSlot(src: String): String? {
+        val match = CANVAS_SLOT.matchEntire(WebModeLogic.normalizeUrl(src)) ?: return null
+        return "ns-canvas:${match.groupValues[1]},${match.groupValues[2]}"
+    }
+
+    /** Ordinary images require exact identity; recycled canvas crops match by stable slot. */
+    internal fun sameCanvasSource(a: String, b: String): Boolean {
+        val left = WebModeLogic.normalizeUrl(a)
+        val right = WebModeLogic.normalizeUrl(b)
+        if (left == right) return true
+        val leftSlot = canvasSourceSlot(left) ?: return false
+        return leftSlot == canvasSourceSlot(right)
+    }
+
+    private fun canvasStateKey(urlKey: String, src: String): String =
+        "$urlKey|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
+
+    /** The live canvas can survive a reader's SPA URL change; tie generation checks to host/slot. */
+    internal fun canvasIdentityKey(url: String, src: String): String {
         val host = url.substringAfter("://", "").substringBefore('/').substringBefore('?')
             .substringBefore(':').lowercase().removePrefix("www.")
-        return host == "shonenjumpplus.com" || host.endsWith(".shonenjumpplus.com")
+        return "$host|${canvasSourceSlot(src) ?: WebModeLogic.normalizeUrl(src)}"
     }
 
     /**
@@ -556,7 +625,7 @@ internal object WebModeLayoutStore {
     }
 
     private fun explainsBubble(a: WmBubble, b: WmBubble): Boolean {
-        if (WebModeLogic.normalizeUrl(a.src) != WebModeLogic.normalizeUrl(b.src)) return false
+        if (!sameCanvasSource(a.src, b.src)) return false
         if (boxOverlapOfSmaller(a, b) < 0.3f) return false
         return OcrLineFusion.agreement(a.sourceText, b.sourceText) >= 0.5f
     }
