@@ -10740,7 +10740,7 @@ ${rows.take(220).joinToString("\n")}
             BubbleDetector.isDownloading() -> "downloading… " + BubbleDetector.downloadPercent() + "%"
             BubbleDetector.enabled(this) -> "ACTIVE"
             BubbleDetector.isInstalled(this) -> "installed (mode: " + BubbleDetector.mode(this) + ")"
-            else -> "not installed · tap to download (≈ 11 MB)"
+            else -> "not installed · tap to download (≈ 42 MB)"
         }
         return "🫧 Bubble & text detector\n" + state +
             (if (BubbleDetector.lastError.isNotBlank()) " · " + BubbleDetector.lastError.take(60) else "")
@@ -10780,18 +10780,18 @@ ${rows.take(220).joinToString("\n")}
         "🫧 Bubble & text detector: " + (if (BubbleDetector.enabled(this)) "ACTIVE" else if (BubbleDetector.isInstalled(this)) "installed" else "not installed")
 
     /**
-     * Optional detector of speech bubbles and free lettering (ONNX, 11 MB). It is downloaded from inside the app; the
-     * file is only accepted after its size and SHA-256 match and a test run succeeded on this phone.
+     * Koharu YOLO26s ONNX segmentation model (≈ 42 MB). The file is downloaded from inside the app and accepted
+     * only after the exact size, pinned SHA-256, output-contract self-test and real inference smoke test succeed.
      */
     private fun detectorDialog(onChanged: () -> Unit) {
         val installed = BubbleDetector.isInstalled(this)
         val b = AlertDialog.Builder(this)
             .setTitle("Bubble & text detector")
             .setMessage(BubbleDetector.status(this) +
-                "\n\nThe app already finds bubble shapes without any download. The detector additionally tells bubble lettering " +
-                "from free lettering (sound effects) and keeps lines of different bubbles apart.")
+                "\n\nKoharu segments frame, dialogue_text, balloon and onomatopoeia_text regions and returns instance masks. " +
+                "Input resolution adapts to available RAM; low-memory phones use smaller stride-aligned inputs.")
         if (!installed && !BubbleDetector.isDownloading()) {
-            b.setPositiveButton("Download (≈ 11 MB)") { _, _ ->
+            b.setPositiveButton("Download (≈ 42 MB)") { _, _ ->
                 toast("⬇️ Downloading the detector…")
                 BubbleDetector.download(this, { pct ->
                     if (pct % 25 == 0) runOnUiThread { toast("⬇️ Detector $pct%") }
