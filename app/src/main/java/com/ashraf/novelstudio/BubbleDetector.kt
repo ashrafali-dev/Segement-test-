@@ -123,6 +123,7 @@ internal object BubbleDetector {
     fun status(c: Context): String {
         val phoneRam = String.format("%.1f", DeviceTier.totalRamMb(c) / 1024.0)
         val state = when {
+            isDownloading() && downloadPercent() >= 100 -> "download complete · validating at low memory…"
             isDownloading() -> "downloading… $downloadPct%"
             isInstalled(c) -> "installed (${DISPLAY_MODEL_MB} MB, SHA-256 checked)"
             else -> "not installed (download ≈ ${DISPLAY_MODEL_MB} MB)"
