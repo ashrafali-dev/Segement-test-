@@ -122,6 +122,63 @@ internal object MarkerCodec {
         return out
     }
 
+    /**
+     * Recover non-empty bodies attached to duplicate/out-of-range markers into spatially ordered empty slots.
+     *
+     * Valid markers keep their exact destinations. A malformed marker only borrows an empty slot near its
+     * ordinal position in [spatialOrder]; it never overwrites a valid translation. Extra trailing markers
+     * beyond the number of bubbles are ignored, and empty bodies are never drawn.
+     */
+    fun recoverFailedMarkersBySpatialOrder(
+        text: String,
+        bubbleCount: Int,
+        titleOffset: Int,
+        existing: List<String?>,
+        spatialOrder: List<Int>,
+        onFallback: (no: Int, targetIndex: Int, reason: String) -> Unit = { _, _, _ -> }
+    ): List<String?> {
+        val out = MutableList<String?>(bubbleCount) { existing.getOrNull(it) }
+        if (bubbleCount <= 0) return out
+        val matches = MARK.findAll(text).toList()
+        if (matches.isEmpty()) return out
+
+        val firstBubbleNo = 1 + titleOffset
+        val lastBubbleNo = bubbleCount + titleOffset
+        val seen = HashSet<Int>()
+        val order = (spatialOrder.filter { it in 0 until bubbleCount }.distinct() +
+            (0 until bubbleCount).filter { it !in spatialOrder })
+        for ((ordinal, match) in matches.withIndex()) {
+            val end = if (ordinal + 1 < matches.size) matches[ordinal + 1].range.first else text.length
+            val body = oneLine(text.substring(match.range.last + 1, end))
+            if (body.isEmpty() || body.matches(Regex("[~～]+"))) continue
+
+            val raw = match.groupValues[1]
+            val no = raw.toIntOrNull() ?: -1
+            val validUnique = no in firstBubbleNo..lastBubbleNo && seen.add(no)
+            if (validUnique) continue // MarkerCodec.align has already handled this body.
+
+            // A trailing extra marker cannot correspond to another source bubble. Do not recycle it to
+            // overwrite or randomly duplicate a translation.
+            val ordinalSlot = ordinal - titleOffset
+            if (ordinalSlot !in order.indices) continue
+
+            var pivot = ordinalSlot
+            var target = order[pivot]
+            if (!out[target].isNullOrBlank()) {
+                // Prefer the next empty spatial slot (the next bubble in reading order), then the nearest
+                // earlier empty slot. This is the best recoverable mapping when the returned marker is bad.
+                val after = (pivot + 1 until order.size).firstOrNull { out[order[it]].isNullOrBlank() }
+                val before = (pivot - 1 downTo 0).firstOrNull { out[order[it]].isNullOrBlank() }
+                val chosen = after ?: before ?: continue
+                pivot = chosen
+                target = order[pivot]
+            }
+            out[target] = body
+            onFallback(no, target, if (no in firstBubbleNo..lastBubbleNo) "duplicate marker" else "marker out of range")
+        }
+        return out
+    }
+
     /** True when at least one bubble got text. */
     fun hasPlacement(placed: List<String?>): Boolean = placed.any { !it.isNullOrBlank() }
 
