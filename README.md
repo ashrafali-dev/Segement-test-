@@ -66,7 +66,7 @@ Novel Studio does not require a Novel Studio-specific AI API key for its web-cha
 
 The current code supports ML Kit OCR recognizers for **Latin, Chinese, Japanese, and Korean** scripts. Google ML Kit is the default OCR engine in the current branch. Google Lens OCR is also available as an optional engine. OCR script selection can depend on the selected setting and the page being read.
 
-From my experience as an everyday reader, ordinary Korean text and ordinary text in Japanese manga often work at **around 90% or better**. This is a personal, informal estimate—not a measured benchmark, a controlled study, or a guarantee for every page. It describes regular text, not every kind of lettering. Small or blurry text, unusual fonts, stylized sound effects, complex image layouts, and other difficult cases can reduce results.
+From my experience as an everyday reader, ordinary **Chinese and Korean text** are recognized at **around 90%** in typical cases, while ordinary Japanese manga text is around **80–90%**. These are personal, informal estimates—not measured benchmarks, controlled studies, or guarantees for every page. They describe regular text, not every kind of lettering. Small or blurry text, unusual fonts, stylized sound effects, complex image layouts, and other difficult cases can reduce results.
 
 The remaining mistakes are not all the same kind of problem. Some begin with OCR missing or misreading the source text; translation quality can also depend on the selected chatbot, target language, prompt, and surrounding story context. A stronger prompt and better context can help the translation, but they cannot recover source text that OCR never read correctly.
 
