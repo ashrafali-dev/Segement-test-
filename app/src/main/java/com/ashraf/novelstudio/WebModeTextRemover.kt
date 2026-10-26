@@ -645,8 +645,8 @@ internal object WebModeTextRemover {
         val erased = LinkedHashSet<String>()
         for (bubble in bubbles.asSequence().take(500)) {
             if (bubble.sourceText.isBlank()) continue
-            // tcx/tcy/tbw/tbh are the precise OCR text-region geometry when available. cx/cy/w/h
-            // are the safe cover geometry and are only a fallback for older saved layouts.
+            // tcx/tcy/tbw/tbh are the fit-safe text/translation region inside a detected balloon.
+            // cx/cy/w/h are the cover geometry; use it only when no inner text region was available.
             val useTextRegion = bubble.tbw > 0f && bubble.tbh > 0f &&
                 bubble.tcx.isFinite() && bubble.tcy.isFinite()
             val cxN = if (useTextRegion) bubble.tcx else bubble.cx
