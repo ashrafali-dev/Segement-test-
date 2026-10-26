@@ -113,7 +113,16 @@ internal object WebModeTextRemovalCache {
         // (that left a broken <img>: no cleaned picture AND no cover box, original lettering showing through).
         if (!has(sourceUrl)) return null
         val raw = sourceUrl.substringBefore('#')
-        if (Uri.parse(raw).getQueryParameter(MARKER) == "1") return raw
+        // Uri.getQueryParameter() throws UnsupportedOperationException on a non-hierarchical URI, and a
+        // canvas panel's synthetic identity ("ns-canvas:<left>,<top>,WxH") is exactly that. The old code
+        // only survived because such sources never reached the cache; now that they do, parsing must be
+        // guarded or the whole app dies right as a translation is placed.
+        val alreadyMarked = try {
+            Uri.parse(raw).getQueryParameter(MARKER) == "1"
+        } catch (_: Throwable) {
+            raw.contains("$MARKER=1")
+        }
+        if (alreadyMarked) return raw
         val sep = when {
             '?' !in raw -> "?"
             raw.endsWith("?") || raw.endsWith("&") -> ""
