@@ -55,6 +55,8 @@ internal object BubbleDetector {
     private var sessionStamp = 0L
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), MODEL_FILE_NAME)
+    private fun legacyModelFile(c: Context): File =
+        File(File(c.applicationContext.filesDir, "models/detection"), "bubble_detector.onnx")
 
     @Synchronized
     fun isInstalled(c: Context): Boolean {
@@ -137,6 +139,8 @@ internal object BubbleDetector {
         release()
         try { modelFile(c).delete() } catch (_: Throwable) {}
         try { File(modelFile(c).path + ".part").delete() } catch (_: Throwable) {}
+        try { legacyModelFile(c).delete() } catch (_: Throwable) {}
+        try { File(legacyModelFile(c).path + ".part").delete() } catch (_: Throwable) {}
         verifiedStamp = Long.MIN_VALUE
         verifiedInstalled = false
         broken = false
@@ -221,6 +225,10 @@ internal object BubbleDetector {
                     }
                     part.delete()
                 }
+                // The old one-class model is no longer active. Remove it only AFTER Koharu has passed
+                // checksum and inference self-tests and has been committed to the new model path.
+                try { legacyModelFile(app).delete() } catch (_: Throwable) {}
+                try { File(legacyModelFile(app).path + ".part").delete() } catch (_: Throwable) {}
                 verifiedStamp = target.lastModified()
                 verifiedInstalled = true
                 sessionStamp = 0L
