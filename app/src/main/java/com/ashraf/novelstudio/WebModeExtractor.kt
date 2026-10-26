@@ -763,6 +763,11 @@ internal class WebModeExtractor(
                         diag.downloaded++; diag.decoded++
                         val ct = hit.text
                         if (ct.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += ct.length }
+                        // Emit a source line even when this panel came from the read-ahead cache. Without it a
+                        // JOB_DONE with ocrOk/chars had no matching OCR/LENS line, which looked like OCR that
+                        // never ran (and hid the fact that ahead had already produced the text).
+                        OcrDiag.log("AHEAD_HIT", "panel ${i + 1}/$total from read-ahead cache blocks=${hit.bubbles.size} " +
+                            "letters=${ct.count { it.isLetterOrDigit() }} first=[${OcrDiag.snip(hit.bubbles.firstOrNull()?.sourceText ?: ct)}] src=${p.src.take(70)}")
                         texts[i] = ct
                         layouts[i] = hit.bubbles
                         continue
