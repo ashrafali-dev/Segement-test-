@@ -144,10 +144,9 @@ internal class WebModeExtractor(
     // keep occupying the look-ahead window, otherwise art-only panels would stop it from moving forward.
     private val aheadBlank: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val aheadFails = ConcurrentHashMap<String, Int>()
-    // Cross-job dedupe: the same panel keeps scrolling into view across consecutive realtime jobs, and the
-    // URL can differ between passes (lazy data-src, canvas export) although it is the same picture. Remember
-    // panel-top -> image hash + cache key for a short TTL so a panel read in job N is not re-read in job N+1.
-    private data class PanelHash(val hash: String, val urlKey: String, val atMs: Long)
+    // Cross-job visibility: the same panel keeps scrolling into view across consecutive realtime jobs.
+    // Remember panel-top -> image hash for a short TTL so a repeat can be logged (it is not used to skip work).
+    private data class PanelHash(val hash: String, val atMs: Long)
     private val recentPanelHash = ConcurrentHashMap<Int, PanelHash>()
     private val jobIds = AtomicInteger(0)
     private val bridge = PageBridge()
@@ -321,9 +320,11 @@ internal class WebModeExtractor(
                         val p = arr.optJSONObject(i) ?: continue
                         val s = p.optString("s")
                         if (s.isBlank()) continue
-                        val nk = WebModeLogic.normalizeUrl(s)
+                        val top = p.optInt("t")
+                        // Must match the cache key used by processAhead/rememberVisibleRead (URL + offset).
+                        val nk = panelKey(s, top)
                         if (aheadDone.contains(nk) || aheadBlank.contains(nk)) continue
-                        refs.add(PanelRef(s, p.optInt("t"), p.optInt("l"), p.optInt("w"), p.optInt("h")))
+                        refs.add(PanelRef(s, top, p.optInt("l"), p.optInt("w"), p.optInt("h")))
                     }
                     if (req.fullChapterLinks) refs.sortBy { it.top }
                     while (refs.size > aheadN) refs.removeAt(refs.size - 1)
@@ -338,10 +339,20 @@ internal class WebModeExtractor(
 
         private fun aheadFinished() { onMain { req.onAheadDone?.invoke() } }
 
+        /**
+         * Cache key for a panel: URL + document offset. Several Naver panels share one image URL string
+         * (only the reader's query/data attribute differs), so keying by URL alone made one panel's OCR
+         * answer for the next one (Japanese fragments on a Korean page). The offset keeps them distinct.
+         */
+        private fun panelKey(src: String, top: Int): String {
+            val base = WebModeLogic.normalizeUrl(src)
+            return if (base.isBlank()) "" else "$base@$top"
+        }
+
         /** A finished visible read is kept like a read-ahead result: the same panel is never read twice. */
-        private fun rememberVisibleRead(liveView: Boolean, src: String, po: PanelOcr) {
+        private fun rememberVisibleRead(liveView: Boolean, src: String, top: Int, po: PanelOcr) {
             if (!liveView) return
-            val key = WebModeLogic.normalizeUrl(src)
+            val key = panelKey(src, top)
             if (key.isBlank()) return
             if (po.text.isNotBlank()) {
                 synchronized(aheadCache) { aheadCache[key] = po }
@@ -367,7 +378,7 @@ internal class WebModeExtractor(
             progress("Read-ahead OCR: preparing ${refs.size} upcoming panels", 0)
             for ((index, p) in refs.withIndex()) {
                 if (!alive()) return
-                val key = WebModeLogic.normalizeUrl(p.src)
+                val key = panelKey(p.src, p.top)
                 // Deliver cached OCR too. A previous successful OCR must not be invisible to the translation cache.
                 val cached = synchronized(aheadCache) { aheadCache[key] }
                 if (cached != null) {
@@ -740,7 +751,7 @@ internal class WebModeExtractor(
                 if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
                 if (req.visibleOnly && req.forceOcrSrc.isNullOrBlank() && !req.forceFreshOcr) {
                     // Real-time: this panel may already have been read ahead (download + full OCR done).
-                    val hitKey = WebModeLogic.normalizeUrl(p.src)
+                    val hitKey = panelKey(p.src, p.top)
                     var hit = synchronized(aheadCache) { aheadCache[hitKey] }
                     if (hit == null && aheadBusyKey == hitKey) {
                         // The read-ahead is working on exactly this panel: let it finish rather than doing the work twice.
@@ -766,7 +777,7 @@ internal class WebModeExtractor(
                         // Emit a source line even when this panel came from the read-ahead cache. Without it a
                         // JOB_DONE with ocrOk/chars had no matching OCR/LENS line, which looked like OCR that
                         // never ran (and hid the fact that ahead had already produced the text).
-                        OcrDiag.log("AHEAD_HIT", "panel ${i + 1}/$total from read-ahead cache blocks=${hit.bubbles.size} " +
+                        OcrDiag.log("AHEAD_HIT", "panel ${i + 1}/$total top=${p.top} from read-ahead cache blocks=${hit.bubbles.size} " +
                             "letters=${ct.count { it.isLetterOrDigit() }} first=[${OcrDiag.snip(hit.bubbles.firstOrNull()?.sourceText ?: ct)}] src=${p.src.take(70)}")
                         texts[i] = ct
                         layouts[i] = hit.bubbles
@@ -810,24 +821,17 @@ internal class WebModeExtractor(
                 }
                 val imgHash = md5(bytes)
                 if (!seen.add(imgHash)) { diag.duplicates++; continue }
-                // Cross-job dedupe: if a recent job already read this exact panel (same document offset AND same
-                // image hash), reuse the cached OCR instead of reading it again. "afterDedupe" only covers one
-                // job; consecutive realtime jobs re-processed the same visible panel.
-                val priorUrlKey = recentPanelHash[p.top]?.takeIf { it.hash == imgHash &&
-                    SystemClock.elapsedRealtime() - it.atMs < PANEL_HASH_TTL_MS }?.urlKey
-                if (priorUrlKey != null) {
-                    val prior = synchronized(aheadCache) { aheadCache[priorUrlKey] }
-                    if (prior != null) {
-                        diag.downloaded++
-                        if (prior.text.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += prior.text.length }
-                        OcrDiag.log("DEDUPE_HIT", "panel ${i + 1}/$total top=${p.top} reused another job's read")
-                        texts[i] = prior.text
-                        layouts[i] = prior.bubbles
-                        continue
-                    }
+                // Cross-job visibility: consecutive realtime jobs re-process the same visible panel (afterDedupe
+                // only covers one job). Record top -> image hash; if the exact same panel (same offset AND same
+                // bytes) was read by a recent job, log it. We deliberately do NOT substitute the earlier OCR here:
+                // the ahead cache is keyed by URL and several distinct Naver panels share one URL string, so
+                // reusing its bubbles attached the wrong geometry to this panel (DECODE_FAILED / wrong text).
+                val prior = recentPanelHash[p.top]
+                if (prior != null && prior.hash == imgHash &&
+                    SystemClock.elapsedRealtime() - prior.atMs < PANEL_HASH_TTL_MS) {
+                    OcrDiag.log("DEDUPE_HIT", "panel ${i + 1}/$total top=${p.top} same image as a recent job (re-read)")
                 }
-                val panelUrlKey = WebModeLogic.normalizeUrl(p.src)
-                recentPanelHash[p.top] = PanelHash(imgHash, panelUrlKey, SystemClock.elapsedRealtime())
+                recentPanelHash[p.top] = PanelHash(imgHash, SystemClock.elapsedRealtime())
                 diag.downloaded++
                 panelFetchStartedAt[i] = tFetch
                 if (lensParallel) {
@@ -875,7 +879,7 @@ internal class WebModeExtractor(
                     if (t.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += t.length }
                     texts[i] = t
                     layouts[i] = po.bubbles
-                    rememberVisibleRead(liveView, p.src, po)
+                    rememberVisibleRead(liveView, p.src, p.top, po)
                     if (liveView && t.isNotBlank()) SiteLearner.recordDownload(wv.context, hostOf(meta.url), true, SystemClock.elapsedRealtime() - tFetch)
                 } catch (e: OcrUnavailableException) {
                     fail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label)
@@ -928,7 +932,7 @@ internal class WebModeExtractor(
                             if (t.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += t.length }
                             texts[i] = t
                             layouts[i] = po.bubbles
-                            rememberVisibleRead(liveView, panels[i].src, po)
+                            rememberVisibleRead(liveView, panels[i].src, panels[i].top, po)
                             if (liveView && t.isNotBlank()) {
                                 SiteLearner.recordDownload(wv.context, hostOf(meta.url),
                                     true, SystemClock.elapsedRealtime() - panelFetchStartedAt[i])
