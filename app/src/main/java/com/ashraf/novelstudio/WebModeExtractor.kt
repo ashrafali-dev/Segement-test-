@@ -1987,16 +1987,24 @@ internal class WebModeExtractor(
                 // translation. The bytes here are the real panel pixels either way, which is all the remover needs.
                 val cleanableSrc = src.startsWith("https://", true) || src.startsWith("http://", true) ||
                     src.startsWith("ns-canvas:", true) || src.startsWith("blob:", true)
-                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) && cleanableSrc) {
+                val fullTextRemoverOn = Prefs.bool(wv.context, "wmTextRemoval2", true)
+                val panelDetections = synchronized(detectBySrc) { detectBySrc[src] }
+                val hasBalloonMasks = panelDetections?.any {
+                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
+                } == true
+                // Menu OFF disables the legacy pixel/AI cleaner, not the model's segmentation mask.
+                // The mask-only path is attempted only when the detector actually returned balloon masks.
+                if (crop == null && cleanableSrc && (fullTextRemoverOn || hasBalloonMasks)) {
                     try {
                         // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
                             wv.context, src, bytes, bubbles,
                             allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead",
-                            dets = synchronized(detectBySrc) { detectBySrc[src] }
+                            dets = panelDetections
                         )
-                        OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
+                        val cleanerMode = if (fullTextRemoverOn) "full" else "balloon-mask-only"
+                        OcrDiag.log("CLEAN", "mode=$cleanerMode ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} masks=${panelDetections?.count { it.mask != null } ?: 0} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
