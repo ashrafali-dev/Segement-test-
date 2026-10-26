@@ -11166,6 +11166,7 @@ ${rows.take(220).joinToString("\n")}
         try { prefetchWv.destroy() } catch (_: Exception) {}
         botWebViews.values.toSet().forEach { wv -> try { wv.destroy() } catch (_: Exception) {} }
         botWebViews.clear()
+        chipStatusExecutor.shutdownNow()
         super.onDestroy()
     }
 }
