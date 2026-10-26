@@ -2905,12 +2905,18 @@ internal class WebModeExtractor(
 
         /** Detector results by image hash, so a panel is analysed once and the next pass is free. */
         private val detectCache = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>?>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>?>?): Boolean = size > 12
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>?>?): Boolean = size > 6
         }
 
         /** Latest detector boxes per image source, so the eraser works from real bubbles rather than a guess. */
-        private val detectBySrc = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>>(8, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>>?): Boolean = size > 8
+        private val detectBySrc = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>>(4, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>>?): Boolean = size > 4
+        }
+
+        /** Drop compact instance masks after Android reports memory pressure; next scan can rebuild them at 256px. */
+        fun trimDetectorCaches() {
+            synchronized(detectCache) { detectCache.clear() }
+            synchronized(detectBySrc) { detectBySrc.clear() }
         }
 
         /**
