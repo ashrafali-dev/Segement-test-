@@ -2283,7 +2283,7 @@ internal class WebModeExtractor(
                     .filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null && it.contains(x, y) }
                     .minByOrNull { it.area }
                 if (masked != null) {
-                    return BubbleDetectorCore.maskCoverage(masked, text[0], text[1], text[2], text[3]) < 0.58f
+                    return BubbleDetectorCore.maskCoverage(masked, text[0], text[1], text[2], text[3]) < 0.62f
                 }
                 return current.any { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }
             }
