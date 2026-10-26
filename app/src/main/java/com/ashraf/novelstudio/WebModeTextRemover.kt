@@ -41,7 +41,8 @@ internal object WebModeTextRemover {
     fun eraseDetected(
         bitmap: Bitmap,
         dets: List<BubbleDetectorCore.Det>?,
-        recognizedLines: List<OcrBlock> = emptyList()
+        recognizedLines: List<OcrBlock> = emptyList(),
+        onOcrRegionErased: ((OcrBlock) -> Unit)? = null
     ): Int {
         if (dets.isNullOrEmpty()) return 0
         val width = bitmap.width
@@ -98,7 +99,9 @@ internal object WebModeTextRemover {
                 val inner = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
                 if (maskCoverage(outer, inner) < 0.72f) continue
                 val fill = medianRingColour(bitmap, outer, inner, width, height) ?: continue
-                changed += fillRect(bitmap, l, t, r, b, fill, width, height)
+                val regionChanged = fillRect(bitmap, l, t, r, b, fill, width, height)
+                changed += regionChanged
+                if (regionChanged >= 4) onOcrRegionErased?.invoke(line)
             }
         }
         return changed
@@ -222,7 +225,8 @@ internal object WebModeTextRemover {
         encoded: ByteArray,
         bubbles: List<WmBubble>,
         allowAi: Boolean = true,
-        dets: List<BubbleDetectorCore.Det>? = null
+        dets: List<BubbleDetectorCore.Det>? = null,
+        recognizedLines: List<OcrBlock> = emptyList()
     ): Boolean {
         // When the menu toggle is OFF, keep the legacy pixel/AI remover disabled, but still allow
         // a dedicated segmentation-mask pass for OCR regions that the balloon model can actually
@@ -254,13 +258,57 @@ internal object WebModeTextRemover {
                     OcrDiag.log("MASK_CLEAN", "skip: no balloon instance masks")
                     return false
                 }
-                val erasedByMask = eraseOcrRegionsInsideBalloonMasks(bitmap, balloonMasks, bubbles)
-                if (erasedByMask.isEmpty()) {
-                    OcrDiag.log("MASK_CLEAN", "skip: no safe OCR regions inside balloon masks")
+                if (recognizedLines.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: OCR regions unavailable")
                     return false
                 }
-                val stored = storeCleanedBitmap(context, sourceUrl, bitmap, erasedByMask)
-                OcrDiag.log("MASK_CLEAN", "ocrRegions=${bubbles.size} masks=${balloonMasks.size} erased=${erasedByMask.size} stored=$stored")
+
+                // Reuse eraseDetected's existing OCR-box + model-mask path rather than making a second mask
+                // or a second eraser. Only mark a translated bubble as cleaned when every OCR line mapped
+                // to it was actually erased; otherwise WebModeWriter keeps the normal opaque cover.
+                val bubbleKeyByLine = java.util.IdentityHashMap<OcrBlock, String>()
+                val linesByBubble = LinkedHashMap<String, MutableList<OcrBlock>>()
+                for (line in recognizedLines) {
+                    if (line.text.isBlank() || line.w < 2f || line.h < 2f) continue
+                    val nx = line.cx / width
+                    val ny = line.cy / height
+                    val covering = bubbles.filter { bb ->
+                        nx >= bb.cx - bb.w / 2f && nx <= bb.cx + bb.w / 2f &&
+                            ny >= bb.cy - bb.h / 2f && ny <= bb.cy + bb.h / 2f
+                    }
+                    if (covering.isEmpty()) continue
+                    val lineText = WebModeLayout.normalizeOcrText(line.text)
+                    val textMatch = covering.filter { bb ->
+                        val bText = WebModeLayout.normalizeOcrText(bb.sourceText)
+                        bText.isNotBlank() && lineText.isNotBlank() &&
+                            (bText.contains(lineText) || lineText.contains(bText))
+                    }
+                    val chosen = (textMatch.ifEmpty { covering }).minByOrNull { bb ->
+                        kotlin.math.abs(bb.cx * width - line.cx) + kotlin.math.abs(bb.cy * height - line.cy)
+                    } ?: continue
+                    val key = WebModeTextRemovalCache.bubbleKey(chosen)
+                    bubbleKeyByLine[line] = key
+                    linesByBubble.getOrPut(key) { ArrayList() }.add(line)
+                }
+                if (linesByBubble.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: OCR regions did not map to overlay bubbles")
+                    return false
+                }
+
+                val erasedLines = java.util.Collections.newSetFromMap(
+                    java.util.IdentityHashMap<OcrBlock, Boolean>()
+                )
+                val changedPixels = eraseDetected(bitmap, balloonMasks, recognizedLines) { erasedLines.add(it) }
+                val erasedKeys = LinkedHashSet<String>()
+                for ((key, lines) in linesByBubble) {
+                    if (lines.isNotEmpty() && lines.all { erasedLines.contains(it) }) erasedKeys.add(key)
+                }
+                if (changedPixels < 4 || erasedKeys.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: masks did not safely erase a complete OCR bubble")
+                    return false
+                }
+                val stored = storeCleanedBitmap(context, sourceUrl, bitmap, erasedKeys)
+                OcrDiag.log("MASK_CLEAN", "ocrRegions=${recognizedLines.size} masks=${balloonMasks.size} erased=${erasedKeys.size} pixels=$changedPixels stored=$stored")
                 return stored
             }
 
@@ -625,57 +673,6 @@ internal object WebModeTextRemover {
         } finally {
             bitmap.recycle()
         }
-    }
-
-    /**
-     * Mask-only path used while the menu's full Text Remover is OFF.
-     *
-     * The detector returns a balloon instance mask. OCR supplies the actual text region. We only
-     * erase that OCR region when it lies inside the balloon mask and the surrounding masked balloon
-     * has a stable paper colour. If the test is uncertain, the caller keeps the normal cover-box
-     * overlay so original lettering is never silently exposed under a transparent translation.
-     */
-    private fun eraseOcrRegionsInsideBalloonMasks(
-        bitmap: Bitmap,
-        balloonMasks: List<BubbleDetectorCore.Det>,
-        bubbles: List<WmBubble>
-    ): Set<String> {
-        val width = bitmap.width
-        val height = bitmap.height
-        val erased = LinkedHashSet<String>()
-        for (bubble in bubbles.asSequence().take(500)) {
-            if (bubble.sourceText.isBlank()) continue
-            // tcx/tcy/tbw/tbh are the fit-safe text/translation region inside a detected balloon.
-            // cx/cy/w/h are the cover geometry; use it only when no inner text region was available.
-            val useTextRegion = bubble.tbw > 0f && bubble.tbh > 0f &&
-                bubble.tcx.isFinite() && bubble.tcy.isFinite()
-            val cxN = if (useTextRegion) bubble.tcx else bubble.cx
-            val cyN = if (useTextRegion) bubble.tcy else bubble.cy
-            val wN = if (useTextRegion) bubble.tbw else bubble.w
-            val hN = if (useTextRegion) bubble.tbh else bubble.h
-            if (!cxN.isFinite() || !cyN.isFinite() || !wN.isFinite() || !hN.isFinite() ||
-                wN <= 0f || hN <= 0f) continue
-
-            val l = kotlin.math.floor((cxN - wN / 2f) * width).toInt().coerceIn(0, width - 1)
-            val t = kotlin.math.floor((cyN - hN / 2f) * height).toInt().coerceIn(0, height - 1)
-            val r = ceil((cxN + wN / 2f) * width).toInt().coerceIn(l + 1, width)
-            val b = ceil((cyN + hN / 2f) * height).toInt().coerceIn(t + 1, height)
-            if (r - l < 2 || b - t < 2 || (r - l).toLong() * (b - t) > 1_250_000L) continue
-
-            val textRegion = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
-            val cx = (l + r) / 2f
-            val cy = (t + b) / 2f
-            val outer = balloonMasks.asSequence()
-                .filter { it.contains(cx, cy) }
-                .minByOrNull { it.area } ?: continue
-            // Require strong support from the instance mask so a neighbouring panel or background
-            // lettering cannot be erased by mistake.
-            if (maskCoverage(outer, textRegion) < 0.80f) continue
-            val fill = medianRingColour(bitmap, outer, textRegion, width, height) ?: continue
-            val changed = fillRect(bitmap, l, t, r, b, fill, width, height)
-            if (changed >= 4) erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
-        }
-        return erased
     }
 
     /** Save one cleaned bitmap through the same cache path used by the full remover. */
