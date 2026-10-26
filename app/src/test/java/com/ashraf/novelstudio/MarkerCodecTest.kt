@@ -99,6 +99,15 @@ class MarkerCodecTest {
         assertEquals("third", repaired[2])
     }
 
+    @Test fun `markerless paragraphs use actual spatial order even when counts differ`() {
+        val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
+            "upper whisper\\n\\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
+        )
+        assertEquals("main bubble", repaired[0])
+        assertNull(repaired[1])
+        assertEquals("upper whisper", repaired[2])
+    }
+
     @Test fun `trailing extra marker is ignored once all spatial slots are filled`() {
         val reply = "[001] one\n[002] two\n[003] three\n[999] extra"
         val firstPass = MarkerCodec.align(reply, 3)
