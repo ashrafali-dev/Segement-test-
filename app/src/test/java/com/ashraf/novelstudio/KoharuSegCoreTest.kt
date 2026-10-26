@@ -69,7 +69,7 @@ class KoharuSegCoreTest {
         val badRows = FloatArray(37)
         val proto = FloatArray(KoharuSegCore.PROTO_CHANNELS * protoSize * protoSize)
         try {
-            KoharuSegCore.decode(badRows, proto, protoSize, protoSize, size, tile, letterbox)
+            KoharuSegCore.decode(badRows, proto, protoSize, protoSize, size, size, tile, letterbox)
             throw AssertionError("expected the wrong output-row shape to be rejected")
         } catch (expected: IllegalArgumentException) {
             assertTrue(expected.message.orEmpty().contains("too small") ||
