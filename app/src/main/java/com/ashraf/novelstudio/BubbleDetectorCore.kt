@@ -147,9 +147,15 @@ internal object BubbleDetectorCore {
     }
 
     /** Fills a CHW float plane set (R, G, B, each size*size, 0..1) from ARGB pixels (row-major, size*size). */
-    fun fillChw(argb: IntArray, size: Int, out: FloatArray) {
-        val plane = size * size
-        require(argb.size >= plane && out.size >= plane * 3) { "buffer too small" }
+    fun fillChw(argb: IntArray, size: Int, out: FloatArray) =
+        fillChw(argb, size, size, out)
+
+    /** Fills RGB planes for a dynamic Koharu input; the image is row-major ARGB. */
+    fun fillChw(argb: IntArray, width: Int, height: Int, out: FloatArray) {
+        val plane = width * height
+        require(width > 0 && height > 0 && argb.size >= plane && out.size >= plane * 3) {
+            "buffer too small for ${width}x${height}"
+        }
         for (i in 0 until plane) {
             val p = argb[i]
             out[i] = ((p ushr 16) and 0xff) / 255f
