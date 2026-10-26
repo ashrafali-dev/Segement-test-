@@ -296,6 +296,20 @@ internal object WebModeWriter {
       for(var i=0;i<k.length;i++){if(k[i]===ns)return true;}
       return false;
     }
+    /**
+     * How many of this overlay's images are still unusable for placement: not decoded yet, or laid out at zero
+     * size because the reader has not finished sizing them. Only the first pass consults this.
+     */
+    function unsizedImages(nodes){
+      var n=0;
+      for(var i=0;i<nodes.length;i++){
+        var im=findImg(nodes[i].getAttribute('data-s'),null);
+        if(!im||!im.complete||!im.naturalWidth)continue;
+        var r=im.getBoundingClientRect();
+        if(r.width<2||r.height<2)n++;
+      }
+      return n;
+    }
     function findImg(s, index){
       var spec=canvasSpec(s);
       if(spec){
@@ -680,6 +694,18 @@ internal object WebModeWriter {
         if(!document.contains(w))return;
       }
       var bs=w.querySelectorAll('.__ns_b'),vh=window.innerHeight;
+      // Startup guard: the first pass right after page load runs before lazy images have their final size,
+      // so boxes landed in random spots and some were sized against a 0-height image, then visibly jumped
+      // once layout settled. Wait (briefly) for every referenced image to be decoded and sized before the
+      // first placement; after that the normal scroll/resize re-layout handles everything.
+      if(!window.__nsSettled){
+        var un=unsizedImages(bs),waited=Date.now()-(window.__nsWaitFrom||(window.__nsWaitFrom=Date.now()));
+        if((un>0||document.readyState!=='complete')&&waited<1200){
+          for(var qi=0;qi<bs.length;qi++)bs[qi].style.display='none';
+          sched();return;
+        }
+        window.__nsSettled=1;
+      }
       if(!ABS&&(de.scrollHeight||0)>(window.innerHeight||0)+80){
         // The overlay was built while the page was still short (images not loaded yet), so it chose the
         // script-driven FIXED mode, which trails behind the picture while scrolling. The page now scrolls
