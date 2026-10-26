@@ -55,6 +55,9 @@ class KoharuSegCoreTest {
     }
 
     @Test fun dynamicInputSizesMustRespectTheModelStride() {
+        assertTrue(KoharuSegCore.validInputSize(256))
+        assertTrue(KoharuSegCore.validInputSize(320))
+        assertTrue(KoharuSegCore.validInputSize(384))
         assertTrue(KoharuSegCore.validInputSize(448))
         assertTrue(KoharuSegCore.validInputSize(512))
         assertTrue(KoharuSegCore.validInputSize(640))
