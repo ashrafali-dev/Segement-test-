@@ -24,6 +24,26 @@ versionName '1.7.1'
         }
     }
 
+    // Two products:
+    //   full       - the existing realtime app (ONNX Runtime + LaMa aiPainter + ONNX bubble detector).
+    //   manualLite - low-RAM build: NO ONNX Runtime at all, so neither the 37 MB LaMa inpainter nor the
+    //                bubble detector can ever load into the ~192 MB heap. Manual extract uses the built-in
+    //                BubbleFit mask instead. Stub classes live in src/manualLite/.
+    // The dependency is declared per-flavour so manualLite does not ship libonnxruntime*.so.
+    flavorDimensions += 'build'
+    productFlavors {
+        full {
+            dimension 'build'
+            buildConfigField 'boolean', 'MANUAL_LITE', 'false'
+        }
+        manualLite {
+            dimension 'build'
+            applicationIdSuffix '.lite'
+            versionNameSuffix '-lite'
+            buildConfigField 'boolean', 'MANUAL_LITE', 'true'
+        }
+    }
+
     signingConfigs {
         release {
             if (releaseKeystore && releaseStorePassword && releaseKeyAlias && releaseKeyPassword) {
@@ -45,10 +65,23 @@ versionName '1.7.1'
         }
     }
 
+    buildFeatures {
+        // Needed for BuildConfig.MANUAL_LITE (manualLite vs full).
+        buildConfig true
+    }
+
     sourceSets {
         main {
             assets.srcDirs = ['src/main/assets', 'src/assets']
+            // The two ONNX-backed engines live in their own flavour source sets (src/full = the real ones,
+            // src/manualLite = no-op stubs). Compiling both would clash, and a flavour's exclude cannot
+            // reach files held in main, so they are moved out of main instead.
+            java.exclude 'com/ashraf/novelstudio/WebModeInpainter.kt'
+            java.exclude 'com/ashraf/novelstudio/BubbleDetector.kt'
         }
+        // manualLite replaces the two engines with stubs: no ONNX Runtime at all in that APK.
+        manualLite { java.srcDirs += 'src/manualLite/java' }
+        full { java.srcDirs += 'src/full/java' }
     }
 
     compileOptions {
@@ -73,7 +106,9 @@ dependencies {
 
     // ONNX Runtime: runs the optional speech-bubble/text detector (BubbleDetector) and the optional LaMa inpainter.
     // OCR itself is ML Kit (above) or Google Lens; there is no downloadable OCR engine any more.
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.21.1'
+    // Scoped to the full flavour only: manualLite ships no libonnxruntime*.so, so neither model can load
+    // into a low-RAM phone's heap (that is the whole point of the lite build).
+    fullImplementation 'com.microsoft.onnxruntime:onnxruntime-android:1.21.1'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
     testImplementation 'junit:junit:4.13.2'

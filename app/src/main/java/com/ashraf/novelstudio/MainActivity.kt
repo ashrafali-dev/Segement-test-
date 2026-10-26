@@ -231,10 +231,59 @@ class MainActivity : Activity() {
         requestForceOcrArea(src, x, y, rw, rh)
     }
 
+    // ---- Manual extract (manualLite build): thin hook into ManualExtract/ ------------------------------------
+    private fun manualExtractScript(): OcrScript = when (Prefs.get(this, "ocrLang", "auto")) {
+        "ko" -> OcrScript.KOREAN
+        "ja" -> OcrScript.JAPANESE
+        "zh" -> OcrScript.CHINESE
+        "en" -> OcrScript.LATIN
+        else -> WebModeLogic.pickScript("auto", novelWv.url.orEmpty())
+    }
+
+    /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
+    private fun installManualExtractHost() {
+        if (!com.ashraf.novelstudio.BuildConfig.MANUAL_LITE) return
+        com.ashraf.novelstudio.manualextract.ManualExtractHost.install(
+            capture = { src, x, y, w, h ->
+                val bytes = ImageTap.get(WebModeLogic.normalizeUrl(src)) ?: return@install null
+                val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@install null
+                try {
+                    val l = (x.coerceIn(0f, 1f) * full.width).toInt().coerceIn(0, full.width - 1)
+                    val t = (y.coerceIn(0f, 1f) * full.height).toInt().coerceIn(0, full.height - 1)
+                    val r = ((x + w).coerceIn(0f, 1f) * full.width).toInt().coerceIn(l + 1, full.width)
+                    val b = ((y + h).coerceIn(0f, 1f) * full.height).toInt().coerceIn(t + 1, full.height)
+                    android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t)
+                } finally { full.recycle() }
+            },
+            translateAndPlace = { bubble, text, _script, onDone ->
+                handler.post {
+                    val url = cleanUrl(novelWv.url.orEmpty())
+                    if (url.isBlank()) { onDone(""); return@post }
+                    val chapter = Chapter(
+                        title = "", text = text, next = null, prev = null, url = url,
+                        novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
+                        number = "", contentSel = ""
+                    )
+                    val layout = WebModeLayout(0, listOf(bubble))
+                    WebModeLayoutStore.setScan(url, layout)
+                    val hashes = setOf(WebModeLayout.fingerprint(bubble))
+                    registerRealtimeBatch(chapter, hashes, layout)
+                    handleChapter(chapter, useSavedTranslation = false)
+                    onDone("")
+                }
+            }
+        )
+    }
+
     private fun requestForceOcrArea(
         src: String, x: Float, y: Float, w: Float, h: Float,
         fromReOcr: Boolean = false, expanded: Boolean = false, onFinished: (() -> Unit)? = null
     ) {
+        // manualLite build: one tap = one lean crop-only run (no realtime pipeline). See ManualExtract/.
+        if (com.ashraf.novelstudio.BuildConfig.MANUAL_LITE) {
+            com.ashraf.novelstudio.manualextract.ManualExtractHost.start(this, src, x, y, w, h, manualExtractScript())
+            return
+        }
         if (!webModeOn()) {
             toast("🔎 Area re-scan needs Scanning or Real-time mode")
             return
@@ -3763,6 +3812,7 @@ return t.length>=40?'TXT:'+t:'';
         }
         setContentView(root)
         handler.post(scanIndicatorRunnable)
+        installManualExtractHost()
 
         buildStrip()
         buildSiteShortcuts()
@@ -10660,6 +10710,7 @@ ${rows.take(220).joinToString("\n")}
     }
 
     override fun onDestroy() {
+        try { com.ashraf.novelstudio.manualextract.ManualExtractController.release() } catch (_: Throwable) {}
         ScanKeepAlive.stop(this)
         aheadOcrHandle?.cancel()
         webModeHandle?.cancel()

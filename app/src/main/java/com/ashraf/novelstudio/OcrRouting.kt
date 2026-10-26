@@ -344,7 +344,7 @@ internal class RoutingOcrEngine : OcrEngine {
             Log.w("NovelStudioOCR", OcrEngineStatus.lastError)
             // Lens answered normally (HTTP 200) and found no text: ML Kit on the same picture only repeats the work
             // (1-2 s per art-only panel; in the report it found nothing every time). Set lensEmptyFallback=1 to bring it back.
-            if (lens != null && engineDetail.contains("http=200") &&
+            if (lens != null && engineDetail?.contains("http=200") == true &&
                 appContext?.let { Prefs.get(it, "lensEmptyFallback", "0") } != "1") {
                 report("lens(empty)", false)
                 lensThread.set(true)
