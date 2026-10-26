@@ -414,9 +414,12 @@ internal object BubbleDetector {
                     longArrayOf(1, 3, MangaBubbleSegCore.SIZE.toLong(), MangaBubbleSegCore.SIZE.toLong())
                 )
                 result = ses.run(mapOf(imageName to input))
-                val pred = result.get(predictionName) as? OnnxTensor
+                // Result.get(name) returns Optional<OnnxValue>; casting the Optional itself always fails.
+                val predValue = result.get(predictionName).orElse(null)
+                val pred = predValue as? OnnxTensor
                     ?: throw IllegalStateException("prediction output is not a tensor")
-                val proto = result.get(prototypeName) as? OnnxTensor
+                val protoValue = result.get(prototypeName).orElse(null)
+                val proto = protoValue as? OnnxTensor
                     ?: throw IllegalStateException("prototype output is not a tensor")
                 return MangaBubbleSegCore.decode(toFloats(pred), toFloats(proto), tile, letterbox)
             } finally {
