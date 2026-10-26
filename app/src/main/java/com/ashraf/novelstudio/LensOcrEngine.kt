@@ -89,11 +89,29 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         if (bitmap.isRecycled) throw OcrUnavailableException("Google Lens: bitmap was recycled")
         if (bitmap.width < MIN_SIDE || bitmap.height < MIN_SIDE) return OcrResult(emptyList())
 
+        // Skip crops that are never dialogue: tiny UI/logo tiles and near-square boxes. Speech bubbles are
+        // wide, tall, or at least sizable; the logs showed 220x202, 96x54, 111x63 … being uploaded 8 times
+        // each and always coming back empty. This runs before prepare()/upload, so it is free.
+        if (looksLikeNonBubble(bitmap.width, bitmap.height)) {
+            Log.i(TAG, "PRE_FILTER skip ${bitmap.width}x${bitmap.height} (not a text bubble)")
+            return OcrResult(emptyList())
+        }
+
         val t0 = SystemClock.elapsedRealtime()
         val prepared = prepare(bitmap)
         val prepareMs = SystemClock.elapsedRealtime() - t0
         val keyStart = SystemClock.elapsedRealtime()
         val key = fnv64(prepared.jpeg) xor (prepared.w.toLong() shl 32) xor prepared.h.toLong()
+        // Region-stable key: the JPEG hash changes with compression noise between identical repeat crops,
+        // so a short negative cache on (size + coarse pixel signature) stops the same empty region being
+        // re-uploaded on every scroll frame even when the encoder output differs by a byte.
+        val regionKey = fnv64("${bitmap.width}x${bitmap.height}:${coarseSignature(bitmap)}".toByteArray())
+
+        val negative = if (bypassCache) false else recentlyEmpty(regionKey)
+        if (negative) {
+            Log.i(TAG, "NEG_CACHE skip region=${bitmap.width}x${bitmap.height} (empty within ${EMPTY_CACHE_TTL_MS}ms)")
+            return OcrResult(emptyList())
+        }
 
         // Lens detects the image language itself. This cache is mainly for external callers that repeat one bitmap.
         val cachedLines = if (bypassCache) null else cached(key)
@@ -204,6 +222,8 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         if (lines.isEmpty()) Log.w(TAG, "NO_TEXT $diagnostic") else Log.i(TAG, "PARSED $diagnostic")
         Breaker.success()
         remember(key, lines)
+        // Remember the empty region so the same crop is not re-uploaded on the next scroll frame.
+        if (lines.isEmpty()) rememberEmptyRegion(regionKey) else forgetEmptyRegion(regionKey)
         Log.i(TAG, "ok lines=${lines.size} sent=${prepared.w}x${prepared.h} bytes=${prepared.jpeg.size} ms=$totalMs")
         Log.i(TAG, "TIMING imageId=${java.lang.Long.toHexString(key)} cacheHit=false prepareMs=$prepareMs keyCacheMs=$keyCacheMs " +
             "payloadBuildMs=$payloadBuildMs networkMs=$networkMs parseMs=$parseMs mapMs=$mapMs totalMs=$totalMs")
@@ -363,6 +383,50 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
 
     private fun remember(key: Long, lines: List<OcrBlock>) {
         synchronized(cache) { cache[key] = Cached(SystemClock.elapsedRealtime(), lines) }
+    }
+
+    // ---- non-bubble pre-filter + region negative cache -----------------------------------------
+
+    /** A crop smaller/squarer than this can never be a speech bubble per the observed UI/logo tiles. */
+    private fun looksLikeNonBubble(w: Int, h: Int): Boolean {
+        val area = w.toLong() * h.toLong()
+        if (area < MIN_BUBBLE_AREA) return true
+        val longSide = maxOf(w, h).toFloat()
+        val shortSide = minOf(w, h).toFloat().coerceAtLeast(1f)
+        return longSide / shortSide < MIN_BUBBLE_ASPECT
+    }
+
+    /** Cheap, compression-stable fingerprint: 8x8 binary luma sampled on a coarse grid. */
+    private fun coarseSignature(bmp: Bitmap): Long {
+        val px = IntArray(8 * 8)
+        val stepX = (bmp.width / 8).coerceAtLeast(1)
+        val stepY = (bmp.height / 8).coerceAtLeast(1)
+        for (gy in 0 until 8) for (gx in 0 until 8) {
+            val x = (gx * stepX).coerceAtMost(bmp.width - 1)
+            val y = (gy * stepY).coerceAtMost(bmp.height - 1)
+            val c = bmp.getPixel(x, y)
+            val luma = ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 151 + (c and 0xFF) * 28) shr 8
+            // One bit per cell (above/below mid-grey) keeps it stable against tiny colour/JPEG shifts.
+            px[gy * 8 + gx] = if (luma >= 128) 1 else 0
+        }
+        return fnv64(px.joinToString("").toByteArray())
+    }
+
+    private val emptyRegions = object : LinkedHashMap<Long, Long>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Long>?): Boolean = size > NEG_CACHE_SIZE
+    }
+
+    private fun recentlyEmpty(regionKey: Long): Boolean = synchronized(emptyRegions) {
+        val at = emptyRegions[regionKey] ?: return@synchronized false
+        if (SystemClock.elapsedRealtime() - at > EMPTY_CACHE_TTL_MS) { emptyRegions.remove(regionKey); false } else true
+    }
+
+    private fun rememberEmptyRegion(regionKey: Long) {
+        synchronized(emptyRegions) { emptyRegions[regionKey] = SystemClock.elapsedRealtime() }
+    }
+
+    private fun forgetEmptyRegion(regionKey: Long) {
+        synchronized(emptyRegions) { emptyRegions.remove(regionKey) }
     }
 
     // ---- transport -----------------------------------------------------------------------------
@@ -768,5 +832,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private const val CACHE_SIZE = 32
         private const val CACHE_TTL_MS = 3 * 60_000L
         private const val EMPTY_CACHE_TTL_MS = 20_000L
+        // Non-bubble pre-filter + region negative cache (see read()).
+        private const val MIN_BUBBLE_AREA = 300L * 300L   // ~90k px: below this it is a UI/logo tile, not a bubble
+        private const val MIN_BUBBLE_ASPECT = 1.2f        // bubbles are never ~1:1 square
+        private const val NEG_CACHE_SIZE = 64
     }
 }
