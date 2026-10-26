@@ -2664,15 +2664,18 @@ return t.length>=40?'TXT:'+t:'';
      */
     private fun updateActivityChip(statuses: List<ActivityDotStatus>) {
         val chip = activityChip ?: return
-        CrashLog.context = novelWv.url.orEmpty().take(160) + " | mode=" + mode + " | webMode=" + webModeOn() +
-            " | realtime=" + DeepSeekRealtimeTranslation.isEnabled(this) + " | forceLoad=" + forceLoadOn()
+        // This method is invoked by scanIndicatorRunnable every 450 ms on the UI thread.
+        // Never query Prefs, hash/check model files, or inspect inpainting readiness here.
+        refreshChipRuntimeSnapshot()
+        val snapshot = chipRuntimeSnapshot
+        CrashLog.context = novelWv.url.orEmpty().take(160) + " | mode=" + mode + " | " + snapshot.contextFlags
         reOcrBtn?.let { b ->
-            val show = webModeOn() && mode == Mode.NOVEL
+            val show = snapshot.webModeEnabled && mode == Mode.NOVEL
             val want = if (show) View.VISIBLE else View.GONE
             if (b.visibility != want) b.visibility = want
         }
         glossaryFab?.let { b ->
-            val want = if (webModeOn() && mode == Mode.NOVEL) View.VISIBLE else View.GONE
+            val want = if (snapshot.webModeEnabled && mode == Mode.NOVEL) View.VISIBLE else View.GONE
             if (b.visibility != want) b.visibility = want
         }
         val sending = chatSendingAtMs > 0L && System.currentTimeMillis() - chatSendingAtMs < 15_000L
@@ -2686,11 +2689,11 @@ return t.length>=40?'TXT:'+t:'';
             // Say WHICH reading is running and with WHICH engine. One merged "Reading the page" label (and one
             // timer) hid whether the 56 s were spent on the screen in front of the reader or on panels ahead.
             keys.contains("visible-ocr") ->
-                { text = "Reading this screen · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
+                { text = "Reading this screen · " + snapshot.ocrEngine; color = 0xFFB388FF.toInt() }
             keys.contains("next-chapter-ocr") ->
-                { text = "Reading next chapter · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
+                { text = "Reading next chapter · " + snapshot.ocrEngine; color = 0xFFB388FF.toInt() }
             keys.contains("read-ahead-ocr") ->
-                { text = "Reading ahead · " + shortOcrEngineName(); color = 0xFF7E57C2.toInt() }
+                { text = "Reading ahead · " + snapshot.ocrEngine; color = 0xFF7E57C2.toInt() }
             keys.contains("placement") -> { text = "Adding the translation"; color = 0xFF64FFDA.toInt() }
             keys.any { it == "chatbot-translation" || it == "ahead-translation" || it == "prefetch-translation" } -> {
                 val fresh = android.os.SystemClock.elapsedRealtime() - chatPhaseAtMs < 2_500L
@@ -2710,7 +2713,7 @@ return t.length>=40?'TXT:'+t:'';
             val nowMs = android.os.SystemClock.elapsedRealtime()
             if (text != chipStageText) { chipStageText = text; chipStageSinceMs = nowMs }
             val secs = ((nowMs - chipStageSinceMs) / 1000L).toInt()
-            chip.update((if (secs >= 3) "$text · ${secs}s" else text) + "\n" + chipDetailLine(), color)
+            chip.update((if (secs >= 3) "$text · ${secs}s" else text) + "\n" + snapshot.detail, color)
         } else if (++chipIdleTicks >= 2) {
             chipStageText = ""
             chip.update(null, 0)
@@ -2720,7 +2723,66 @@ return t.length>=40?'TXT:'+t:'';
     private var chipStageText = ""
     private var chipStageSinceMs = 0L
 
-    /** Second line of the status pill: which OCR engine, and whether the bubble detector and the AI painter really work. */
+    private data class ChipRuntimeSnapshot(
+        val detail: String,
+        val ocrEngine: String,
+        val webModeEnabled: Boolean,
+        val contextFlags: String
+    )
+
+    // Disk/model status can take hundreds or thousands of milliseconds on low-memory phones. Refresh
+    // it on a single background worker and let the 450 ms UI ticker read only this immutable snapshot.
+    private val chipStatusExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ns-chip-status").apply { isDaemon = true }
+    }
+    private val chipStatusRefreshPending = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var chipStatusUpdatedAtMs = 0L
+    @Volatile private var chipRuntimeSnapshot = ChipRuntimeSnapshot(
+        detail = "OCR ML Kit · Detector checking · AI painter checking",
+        ocrEngine = "ML Kit",
+        webModeEnabled = false,
+        contextFlags = "runtime status loading"
+    )
+
+    private fun refreshChipRuntimeSnapshot(force: Boolean = false) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - chipStatusUpdatedAtMs < 2_000L) return
+        if (!chipStatusRefreshPending.compareAndSet(false, true)) return
+        try {
+            chipStatusExecutor.execute {
+                try {
+                    val web = webModeOn()
+                    val realtime = DeepSeekRealtimeTranslation.isEnabled(this@MainActivity)
+                    val forceLoad = forceLoadOn()
+                    val ocr = shortOcrEngineName()
+                    val detail = chipDetailLine()
+                    chipRuntimeSnapshot = ChipRuntimeSnapshot(
+                        detail = detail,
+                        ocrEngine = ocr,
+                        webModeEnabled = web,
+                        contextFlags = "webMode=$web | realtime=$realtime | forceLoad=$forceLoad"
+                    )
+                    chipStatusUpdatedAtMs = android.os.SystemClock.elapsedRealtime()
+                } catch (t: Throwable) {
+                    // A status read must never block or break the visible OCR loop.
+                    chipRuntimeSnapshot = ChipRuntimeSnapshot(
+                        detail = "OCR status unavailable",
+                        ocrEngine = "OCR",
+                        webModeEnabled = chipRuntimeSnapshot.webModeEnabled,
+                        contextFlags = "runtime status unavailable"
+                    )
+                    chipStatusUpdatedAtMs = android.os.SystemClock.elapsedRealtime()
+                    Log.w("NsChip", "background status refresh failed", t)
+                } finally {
+                    chipStatusRefreshPending.set(false)
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            chipStatusRefreshPending.set(false)
+        }
+    }
+
+    /** Called only by chipStatusExecutor, never by updateActivityChip on the UI thread. */
     private fun chipDetailLine(): String {
         val det = when {
             BubbleDetector.isDownloading() -> "downloading"
