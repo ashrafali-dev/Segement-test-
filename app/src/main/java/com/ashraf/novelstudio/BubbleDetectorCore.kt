@@ -191,6 +191,167 @@ internal object BubbleDetectorCore {
         )
     }
 
+    /** The model mask, expressed in page pixels: a safe text rectangle plus interior cover bands. */
+    class MaskGeometry(val detection: Det, val safe: IntArray, val bands: List<IntArray>)
+
+    /** Fraction of a pixel-space OCR box that the model's instance mask actually contains. */
+    fun maskCoverage(d: Det, l: Int, t: Int, r: Int, b: Int, grid: Int = 7): Float {
+        if (d.mask == null || r <= l || b <= t) return 0f
+        var inside = 0
+        var total = 0
+        for (gy in 0 until grid) for (gx in 0 until grid) {
+            val x = l + (gx + 0.5f) * (r - l) / grid
+            val y = t + (gy + 0.5f) * (b - t) / grid
+            total++
+            if (d.contains(x, y)) inside++
+        }
+        return if (total == 0) 0f else inside.toFloat() / total
+    }
+
+    /**
+     * Reuse the segmentation model's existing mask for translation placement and cover geometry.
+     * This does not generate a second mask: it extracts the largest inscribed rectangle and safe
+     * horizontal bands from the model's binary instance mask.
+     */
+    fun maskGeometryFor(dets: List<Det>?, l: Int, t: Int, r: Int, b: Int): MaskGeometry? {
+        if (dets.isNullOrEmpty() || r <= l || b <= t) return null
+        val cx = (l + r) / 2f
+        val cy = (t + b) / 2f
+        val d = dets.asSequence()
+            .filter { it.label == CLS_BUBBLE && it.mask != null && it.contains(cx, cy) }
+            .minByOrNull { it.area } ?: return null
+        // Refuse a mask that only happens to contain the centre of a neighbouring OCR box.
+        if (maskCoverage(d, l, t, r, b) < 0.52f) return null
+        val mask = d.mask ?: return null
+        val mw = mask.width
+        val mh = mask.height
+        if (mw < 8 || mh < 8 || mask.pixels.size < mw * mh || d.w < 16 || d.h < 16) return null
+
+        // Maximal all-foreground rectangle, in O(mask.width * mask.height), with a monotonic histogram stack.
+        val heights = IntArray(mw)
+        var bestArea = 0
+        var bestL = 0
+        var bestR = 0
+        var bestT = 0
+        var bestB = 0
+        val stack = IntArray(mw + 1)
+        for (y in 0 until mh) {
+            for (x in 0 until mw) {
+                heights[x] = if (mask.pixels[y * mw + x].toInt() != 0) heights[x] + 1 else 0
+            }
+            var top = 0
+            for (x in 0..mw) {
+                val cur = if (x == mw) 0 else heights[x]
+                while (top > 0 && heights[stack[top - 1]] > cur) {
+                    val bar = stack[--top]
+                    val hRect = heights[bar]
+                    val left = if (top == 0) 0 else stack[top - 1] + 1
+                    val width = x - left
+                    val area = width * hRect
+                    if (area > bestArea) {
+                        bestArea = area
+                        bestL = left; bestR = x
+                        bestT = y - hRect + 1; bestB = y + 1
+                    }
+                }
+                stack[top++] = x
+            }
+        }
+        if (bestArea <= 0) return null
+        // Inset one low-resolution mask cell so antialiasing/quantisation cannot include the outline.
+        val sl = bestL + 1
+        val sr = bestR - 1
+        val st = bestT + 1
+        val sb = bestB - 1
+        if (sr - sl < mw * 0.18f || sb - st < mh * 0.12f) return null
+        val safe = intArrayOf(
+            d.l + kotlin.math.ceil(sl * d.w.toDouble() / mw).toInt(),
+            d.t + kotlin.math.ceil(st * d.h.toDouble() / mh).toInt(),
+            d.l + kotlin.math.floor(sr * d.w.toDouble() / mw).toInt(),
+            d.t + kotlin.math.floor(sb * d.h.toDouble() / mh).toInt()
+        )
+        if (safe[2] - safe[0] < 12 || safe[3] - safe[1] < 12) return null
+        val bands = maskBands(d, maxBands = 28)
+        if (bands.isEmpty()) return null
+        return MaskGeometry(d, safe, bands)
+    }
+
+    /** Compress the model's binary mask into horizontal rectangles which stay inside each row-run. */
+    private fun maskBands(d: Det, maxBands: Int): List<IntArray> {
+        val mask = d.mask ?: return emptyList()
+        val mw = mask.width
+        val mh = mask.height
+        if (mw < 2 || mh < 2 || mask.pixels.size < mw * mh) return emptyList()
+        val rows = ArrayList<IntArray>(mh)
+        for (y in 0 until mh) {
+            val runs = ArrayList<Int>()
+            var x = 0
+            while (x < mw) {
+                if (mask.pixels[y * mw + x].toInt() == 0) { x++; continue }
+                val start = x
+                while (x < mw && mask.pixels[y * mw + x].toInt() != 0) x++
+                if (x - start >= 2) { runs.add(start); runs.add(x) }
+            }
+            rows.add(runs.toIntArray())
+        }
+        for (tol in 1..10) {
+            val out = ArrayList<IntArray>()
+            var groupStart = -1
+            var active: IntArray? = null
+            fun flush(endY: Int) {
+                val cur = active ?: return
+                var i = 0
+                while (i + 1 < cur.size) {
+                    val pxL = d.l + kotlin.math.ceil(cur[i] * d.w.toDouble() / mw).toInt()
+                    val pxR = d.l + kotlin.math.floor(cur[i + 1] * d.w.toDouble() / mw).toInt()
+                    val pxT = d.t + kotlin.math.ceil(groupStart * d.h.toDouble() / mh).toInt()
+                    val pxB = d.t + kotlin.math.floor(endY * d.h.toDouble() / mh).toInt()
+                    if (pxR - pxL >= 2 && pxB - pxT >= 2) out.add(intArrayOf(pxL, pxT, pxR, pxB))
+                    i += 2
+                }
+                active = null
+            }
+            for (y in 0 until mh) {
+                val row = rows[y]
+                val cur = active
+                var compatible = cur != null && cur.size == row.size && row.isNotEmpty()
+                if (compatible && cur != null) {
+                    var i = 0
+                    while (i + 1 < row.size) {
+                        if (kotlin.math.abs(row[i] - cur[i]) > tol ||
+                            kotlin.math.abs(row[i + 1] - cur[i + 1]) > tol) {
+                            compatible = false
+                            break
+                        }
+                        i += 2
+                    }
+                }
+                if (compatible && cur != null) {
+                    var i = 0
+                    while (i + 1 < row.size) {
+                        cur[i] = maxOf(cur[i], row[i])
+                        cur[i + 1] = minOf(cur[i + 1], row[i + 1])
+                        i += 2
+                    }
+                    if ((0 until cur.size step 2).any { cur[it + 1] - cur[it] < 2 }) {
+                        flush(y)
+                        active = if (row.isNotEmpty()) row.copyOf() else null
+                        groupStart = y
+                    }
+                } else {
+                    flush(y)
+                    if (row.isNotEmpty()) {
+                        active = row.copyOf()
+                        groupStart = y
+                    }
+                }
+            }
+            flush(mh)
+            if (out.size in 1..maxBands) return out
+        }
+        return emptyList()
+    }
+
     /** Smallest bubble-like box (bubble / text_bubble) around the point, or null. */
     fun bubbleAt(dets: List<Det>?, x: Float, y: Float): Det? {
         if (dets == null) return null
