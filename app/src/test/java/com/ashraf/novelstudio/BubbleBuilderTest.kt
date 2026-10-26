@@ -22,8 +22,12 @@ class BubbleBuilderTest {
         assertEquals(1, groups.size)
         assertTrue(groups[0].text.contains("first"))
         assertTrue(groups[0].text.contains("second"))
-        assertEquals(100, groups[0].l)
-        assertEquals(400, groups[0].r)
+        // Group bounds intentionally use the detector's inset interior for masking, not its full outline.
+        // The inner bounds must remain inside the detection while still covering both OCR line boxes.
+        assertTrue(groups[0].l >= 100 && groups[0].l <= 200)
+        assertTrue(groups[0].t >= 100 && groups[0].t <= 150)
+        assertTrue(groups[0].r >= 300 && groups[0].r <= 400)
+        assertTrue(groups[0].b >= 210 && groups[0].b <= 300)
     }
 
     @Test fun `lines in different detector bubbles stay separate`() {
