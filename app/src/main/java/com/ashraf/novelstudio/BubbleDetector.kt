@@ -166,67 +166,132 @@ internal object BubbleDetector {
             var conn: HttpURLConnection? = null
             val target = modelFile(app)
             val part = File(target.path + ".part")
+            var keepPartial = true
             try {
                 target.parentFile?.let {
                     if (!it.exists() && !it.mkdirs()) throw IllegalStateException("Could not create the model folder")
                 }
-                                if (part.exists()) part.delete()
-                val freeBytes = android.os.StatFs(target.parentFile?.absolutePath ?: app.filesDir.absolutePath).availableBytes
-                if (freeBytes < MODEL_BYTES + 2L * 1024L * 1024L) {
-                    throw IllegalStateException("Need at least 44 MB free storage to install Koharu (available ${freeBytes / (1024 * 1024)} MB)")
+
+                // Retain partial bytes after a transient interruption. If Android kills the process
+                // while validating a complete file, verify and reuse that file on the next attempt.
+                var existingBytes = if (part.isFile) part.length() else 0L
+                if (existingBytes < 0L || existingBytes > MODEL_BYTES) {
+                    try { part.delete() } catch (_: Throwable) {}
+                    existingBytes = 0L
                 }
-                downloadPct = 0
-                conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 20000
-                    readTimeout = 180000
-                    instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "NovelStudio-BubbleSeg/1")
+                if (existingBytes == MODEL_BYTES &&
+                    !sha256(part).equals(MODEL_SHA256, ignoreCase = true)) {
+                    try { part.delete() } catch (_: Throwable) {}
+                    existingBytes = 0L
                 }
-                val code = conn.responseCode
-                if (code != HttpURLConnection.HTTP_OK) throw IllegalStateException("Server answered HTTP $code")
-                val total = conn.contentLengthLong
-                if (total > MAX_MODEL_BYTES) throw IllegalStateException("Koharu ONNX exceeds the 64 MB download safety ceiling ($total bytes)")
-                if (total > 0 && total != MODEL_BYTES) throw IllegalStateException("Unexpected Koharu file size: $total bytes; expected $MODEL_BYTES")
-                val digest = MessageDigest.getInstance("SHA-256")
-                var read = 0L
-                BufferedInputStream(conn.inputStream).use { input ->
-                    FileOutputStream(part).use { output ->
-                        val buf = ByteArray(64 * 1024)
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            read += n
-                            if (read > MAX_MODEL_BYTES) throw IllegalStateException("Koharu model download exceeded 64 MB safety ceiling")
-                            output.write(buf, 0, n)
-                            digest.update(buf, 0, n)
-                            val pct = if (total > 0) (read * 100 / total).toInt().coerceIn(0, 99)
-                                else (read * 100 / MODEL_BYTES).toInt().coerceIn(0, 99)
-                            if (pct != downloadPct) {
-                                downloadPct = pct
-                                onProgress(pct)
+
+                if (existingBytes < MODEL_BYTES) {
+                    val remainingBytes = MODEL_BYTES - existingBytes
+                    val freeBytes = android.os.StatFs(
+                        target.parentFile?.absolutePath ?: app.filesDir.absolutePath
+                    ).availableBytes
+                    if (freeBytes < remainingBytes + 2L * 1024L * 1024L) {
+                        throw IllegalStateException(
+                            "Need ${(remainingBytes + 2L * 1024L * 1024L) / (1024 * 1024)} MB free to resume Koharu; " +
+                                "available ${freeBytes / (1024 * 1024)} MB"
+                        )
+                    }
+
+                    downloadPct = ((existingBytes * 100L) / MODEL_BYTES).toInt().coerceIn(0, 99)
+                    onProgress(downloadPct)
+                    conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 20000
+                        readTimeout = 180000
+                        instanceFollowRedirects = true
+                        setRequestProperty("User-Agent", "NovelStudio-Koharu/1")
+                        if (existingBytes > 0L) setRequestProperty("Range", "bytes=$existingBytes-")
+                    }
+                    val code = conn.responseCode
+                    var append = existingBytes > 0L && code == HttpURLConnection.HTTP_PARTIAL
+                    if (existingBytes == 0L && code != HttpURLConnection.HTTP_OK) {
+                        throw IllegalStateException("Server answered HTTP $code")
+                    }
+                    if (existingBytes > 0L && code != HttpURLConnection.HTTP_PARTIAL &&
+                        code != HttpURLConnection.HTTP_OK) {
+                        throw IllegalStateException("Resume server answered HTTP $code")
+                    }
+                    // If a CDN ignores Range and responds 200, restart at byte zero, not append.
+                    if (existingBytes > 0L && code == HttpURLConnection.HTTP_OK) {
+                        append = false
+                        existingBytes = 0L
+                    }
+                    val expectedResponseBytes = MODEL_BYTES - existingBytes
+                    val responseBytes = conn.contentLengthLong
+                    if (responseBytes > 0L && responseBytes != expectedResponseBytes) {
+                        keepPartial = false
+                        throw IllegalStateException(
+                            "Unexpected Koharu response size: $responseBytes bytes; expected $expectedResponseBytes"
+                        )
+                    }
+
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    if (append && existingBytes > 0L) {
+                        BufferedInputStream(FileInputStream(part)).use { old ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                val n = old.read(buf)
+                                if (n < 0) break
+                                digest.update(buf, 0, n)
                             }
                         }
-                        output.fd.sync()
+                    }
+                    var receivedThisRequest = 0L
+                    BufferedInputStream(conn.inputStream).use { input ->
+                        FileOutputStream(part, append).use { output ->
+                            val buf = ByteArray(64 * 1024)
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                receivedThisRequest += n
+                                val absoluteRead = existingBytes + receivedThisRequest
+                                if (absoluteRead > MODEL_BYTES || absoluteRead > MAX_MODEL_BYTES) {
+                                    keepPartial = false
+                                    throw IllegalStateException("Koharu download exceeded the expected 41.6 MB size")
+                                }
+                                output.write(buf, 0, n)
+                                digest.update(buf, 0, n)
+                                val pct = (absoluteRead * 100L / MODEL_BYTES).toInt().coerceIn(0, 99)
+                                if (pct != downloadPct) {
+                                    downloadPct = pct
+                                    onProgress(pct)
+                                }
+                            }
+                            output.fd.sync()
+                        }
+                    }
+                    if (part.length() != MODEL_BYTES) {
+                        throw IllegalStateException(
+                            "Download interrupted at ${part.length()} / $MODEL_BYTES bytes. Retry to resume."
+                        )
+                    }
+                    val hex = digest.digest().joinToString("") { "%02x".format(it) }
+                    if (!hex.equals(MODEL_SHA256, ignoreCase = true)) {
+                        keepPartial = false
+                        throw IllegalStateException("Koharu SHA-256 mismatch — refusing to activate this file")
                     }
                 }
-                if (read != MODEL_BYTES) throw IllegalStateException("Incomplete Koharu model: downloaded $read of $MODEL_BYTES bytes")
-                val hex = digest.digest().joinToString("") { "%02x".format(it) }
-                if (!hex.equals(MODEL_SHA256, ignoreCase = true)) {
-                    throw IllegalStateException("Koharu SHA-256 mismatch — refusing to activate an unexpected model file")
-                }
+
+                // Previously 75% was the last visible toast: inference/validation ran after the last
+                // downloaded byte without any visible state. Now the UI can show that validation starts.
+                downloadPct = 100
+                onProgress(100)
                 selfTest(part)?.let { throw IllegalStateException(it) }
 
                 release()
                 if (target.exists() && !target.delete()) throw IllegalStateException("Could not replace previous detector model")
                 if (!part.renameTo(target)) {
-                    part.copyTo(target, overwrite = true)
-                    if (!sha256(target).equals(MODEL_SHA256, ignoreCase = true)) {
-                        throw IllegalStateException("Could not save the verified model")
+                    if (part.length() != MODEL_BYTES ||
+                        !sha256(part).equals(MODEL_SHA256, ignoreCase = true)) {
+                        throw IllegalStateException("Verified Koharu file was lost before installation")
                     }
-                    part.delete()
+                    throw IllegalStateException("Could not atomically install Koharu; verified download kept for retry")
                 }
-                // The old one-class model is no longer active. Remove it only AFTER Koharu has passed
-                // checksum and inference self-tests and has been committed to the new model path.
+                keepPartial = false
                 try { legacyModelFile(app).delete() } catch (_: Throwable) {}
                 try { File(legacyModelFile(app).path + ".part").delete() } catch (_: Throwable) {}
                 verifiedStamp = target.lastModified()
@@ -238,14 +303,16 @@ internal object BubbleDetector {
             } catch (e: Throwable) {
                 error = (e.message ?: e.javaClass.simpleName).take(200)
                 lastError = error
-                Log.w(TAG, "download failed: $error")
+                Log.w(TAG, "Koharu download/install failed: $error", e)
             } finally {
                 try { conn?.disconnect() } catch (_: Throwable) {}
-                try { if (part.exists()) part.delete() } catch (_: Throwable) {}
+                if (!keepPartial) try { if (part.exists()) part.delete() } catch (_: Throwable) {}
                 downloading.set(false)
-                onDone(error)
+                try { onDone(error) } catch (callbackError: Throwable) {
+                    Log.w(TAG, "Koharu completion callback failed", callbackError)
+                }
             }
-        }.apply { isDaemon = true; name = "ns-bubble-seg-download" }.start()
+        }.apply { isDaemon = true; name = "ns-koharu-download" }.start()
     }
 
     private fun sha256(file: File): String {
@@ -264,8 +331,10 @@ internal object BubbleDetector {
     private fun selfTest(file: File): String? {
         var loaded: Loaded? = null
         return try {
-            loaded = Loaded(file)
-            val size = KoharuSegCore.DEFAULT_SIZE
+            // Validate the graph at the lowest supported dynamic input. Reader WebViews are still
+            // resident during download, so 512px inference can spike native RAM on 4 GB devices.
+            val size = EMERGENCY_INPUT_SIZE
+            loaded = Loaded(file, lowMemorySession = true)
             val blank = IntArray(size * size) { 0xFF727272.toInt() }
             loaded.run(
                 blank, intArrayOf(0, 0, size, size),
@@ -273,7 +342,7 @@ internal object BubbleDetector {
             )
             null
         } catch (e: Throwable) {
-            "Model did not run on this phone: ${(e.message ?: e.javaClass.simpleName).take(140)}"
+            "Koharu validation failed: ${(e.message ?: e.javaClass.simpleName).take(140)}"
         } finally {
             try { loaded?.close() } catch (_: Throwable) {}
         }
@@ -427,7 +496,7 @@ internal object BubbleDetector {
         }
     }
 
-    private class Loaded(file: File) : AutoCloseable {
+    private class Loaded(file: File, lowMemorySession: Boolean = false) : AutoCloseable {
         private val env = OrtEnvironment.getEnvironment()
         private val ses: OrtSession
         private val imageName: String
@@ -437,7 +506,7 @@ internal object BubbleDetector {
         private var chw = FloatArray(0)
 
         init {
-            ses = createSession(file)
+            ses = createSession(file, lowMemorySession)
             try {
                 var img: String? = null
                 for ((name, info) in ses.inputInfo) {
@@ -473,7 +542,13 @@ internal object BubbleDetector {
             }
         }
 
-        private fun createSession(file: File): OrtSession {
+        private fun createSession(file: File, lowMemory: Boolean): OrtSession {
+            if (lowMemory) {
+                val options = OrtSession.SessionOptions()
+                options.setIntraOpNumThreads(1)
+                options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT)
+                return env.createSession(file.absolutePath, options)
+            }
             try {
                 val options = OrtSession.SessionOptions()
                 options.setIntraOpNumThreads(2)
