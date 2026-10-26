@@ -301,10 +301,14 @@ internal object WebModeWriter {
      * size because the reader has not finished sizing them. Only the first pass consults this.
      */
     function unsizedImages(nodes){
+      // Read only what the DOM already holds. Calling findImg() here built a full image index on every
+      // animation frame and poisoned the miss-cache, which then made the real placement pass pick the
+      // wrong <img> — text landed on the wrong panel and masking followed it there.
       var n=0;
       for(var i=0;i<nodes.length;i++){
-        var im=findImg(nodes[i].getAttribute('data-s'),null);
-        if(!im||!im.complete||!im.naturalWidth)continue;
+        var s=nodes[i].getAttribute('data-s'),im=cache[s];
+        if(!im||!document.contains(im))continue;
+        if(!im.complete||!im.naturalWidth)continue;
         var r=im.getBoundingClientRect();
         if(r.width<2||r.height<2)n++;
       }
@@ -699,8 +703,11 @@ internal object WebModeWriter {
       // once layout settled. Wait (briefly) for every referenced image to be decoded and sized before the
       // first placement; after that the normal scroll/resize re-layout handles everything.
       if(!window.__nsSettled){
+        // Only a picture that is laid out at zero size is a real "not ready yet" signal. readyState was
+        // also required, and canvas readers can stay interactive for the whole session, so every overlay
+        // waited the full grace period and then drew with stale geometry.
         var un=unsizedImages(bs),waited=Date.now()-(window.__nsWaitFrom||(window.__nsWaitFrom=Date.now()));
-        if((un>0||document.readyState!=='complete')&&waited<1200){
+        if(un>0&&waited<800){
           for(var qi=0;qi<bs.length;qi++)bs[qi].style.display='none';
           sched();return;
         }

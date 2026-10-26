@@ -472,6 +472,31 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
 
     private fun publish(a: Attempt) { lastHttpStatus.set(a.status); lastHttpMeta.set(a.meta) }
 
+    /**
+     * Serialises the *start* of requests so a burst is not mistaken for abuse.
+     *
+     * Kept separate from [REQUEST_SLOTS] on purpose: sleeping inside a permit wasted a third of the
+     * concurrency, which is exactly why a full scan got slower after the slot cap was introduced.
+     * Returns false when the wait would exceed the caller's remaining deadline.
+     */
+    private fun awaitStartTurn(maxWaitMs: Long): Boolean {
+        val sleeper = object : Any() {}
+        synchronized(sleeper) {
+            val now = SystemClock.elapsedRealtime()
+            val wait = (lastStartAt + START_GAP_MS) - now
+            if (wait <= 0L) { lastStartAt = now; return true }
+            if (wait >= maxWaitMs) return false
+            try {
+                Thread.sleep(wait)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+            lastStartAt = SystemClock.elapsedRealtime()
+            return true
+        }
+    }
+
     /** One logical request: bounded retries inside one overall deadline. Throws [OcrUnavailableException] only. */
     private fun post(payload: ByteArray, fastMode: Boolean): ByteArray {
         lastHttpStatus.set(0)
@@ -494,22 +519,15 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                 throw OcrUnavailableException("Google Lens: no internet connection")
             }
             var waitMs = BACKOFF_MS shl attempt
-            // Cap concurrent requests and space their starts: a scan firing many panels at once is exactly
-            // what earns an HTTP 429, and one 429 then costs more time than the parallelism ever saved.
+            // Space request starts BEFORE taking a slot. Holding a slot while sleeping for the gap wasted
+            // one of the three concurrency permits on every panel, which is what made a full scan slow.
+            if (!awaitStartTurn(remaining)) throw OcrUnavailableException("Google Lens: cancelled")
+            // Cap concurrent requests: a scan firing many panels at once is exactly what earns an HTTP 429,
+            // and one 429 then costs more time than the parallelism ever saved.
             if (!REQUEST_SLOTS.tryAcquire(remaining, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                 throw OcrUnavailableException("Google Lens: request slot timeout")
             }
             try {
-                val sinceStart = SystemClock.elapsedRealtime() - lastStartAt
-                if (sinceStart in 0 until START_GAP_MS) {
-                    val pause = START_GAP_MS - sinceStart
-                    val left = deadlineMs - (SystemClock.elapsedRealtime() - started)
-                    if (pause < left) try { Thread.sleep(pause) } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        throw OcrUnavailableException("Google Lens: cancelled")
-                    }
-                }
-                lastStartAt = SystemClock.elapsedRealtime()
                 return race(payload, info, remaining, connectMs, hedgeAfterMs, minimumAttemptMs, firstBound = attempt % 2 == 0)
             } catch (e: HttpStatus) {
                 last = e

@@ -678,6 +678,7 @@ internal class WebModeExtractor(
         // ---- phase 2 (worker thread): fetch -> decode -> OCR, bounded memory and network concurrency
         private var fetchPool: ExecutorService? = null
         private var lensOcrPool: ExecutorService? = null
+        private var prefilterPoolRef: ExecutorService? = null
 
         private fun process(panels: List<PanelRef>, meta: PageMeta) {
             try { processInner(panels, meta) } finally {
@@ -685,6 +686,8 @@ internal class WebModeExtractor(
                 fetchPool = null
                 try { lensOcrPool?.shutdownNow() } catch (_: Throwable) {}
                 lensOcrPool = null
+                try { prefilterPoolRef?.shutdownNow() } catch (_: Throwable) {}
+                prefilterPoolRef = null
             }
         }
 
@@ -736,6 +739,15 @@ internal class WebModeExtractor(
                 Executors.newFixedThreadPool(minOf(SCAN_LENS_THREADS, total)) { r -> Thread(r, "ns-webmode-lens-ocr") }
             } else null
             lensOcrPool = ocrPool
+            // Separate pool for the local ML Kit pre-filter (see prefilterPool use below).
+            val prefilterPool: ExecutorService = if (lensParallel) {
+                Executors.newFixedThreadPool(2) { r -> Thread(r, "ns-webmode-prefilter").apply { isDaemon = true } }
+                    .also { prefilterPoolRef = it }
+            } else {
+                // Never runs in this mode; a no-op executor keeps the call site simple and allocation-free.
+                Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-prefilter-idle").apply { isDaemon = true } }
+                    .also { prefilterPoolRef = it }
+            }
             val futures = arrayOfNulls<java.util.concurrent.Future<ByteArray?>>(total)
             val lensOcrFutures = arrayOfNulls<java.util.concurrent.Future<LensPanelOcrAttempt>>(total)
             val panelFetchStartedAt = LongArray(total)
@@ -848,9 +860,13 @@ internal class WebModeExtractor(
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
-                            // Local pre-filter: ML Kit on the same bytes first. A silent panel (art only) then
-                            // costs no network round trip at all, which is most of the scan's wasted time.
-                            if (!req.forceFreshOcr && req.forceOcrSrc.isNullOrBlank() && scanPrefilterSaysEmpty(bytes, panelScript)) {
+                            // Local pre-filter on ITS OWN thread, so ML Kit inference never holds one of the
+                            // Lens worker threads (and therefore never delays a network request).
+                            val silent = if (req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false
+                                else prefilterPool.submit(java.util.concurrent.Callable {
+                                    scanPrefilterSaysEmpty(bytes, panelScript)
+                                }).get()
+                            if (silent) {
                                 LensPanelOcrAttempt(PanelOcr("", emptyList()), null)
                             } else {
                                 LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
