@@ -83,21 +83,54 @@ internal object BubbleDetector {
      * Koharu's activation memory scales with the square of the input size. Keep 4 GB phones on 512,
      * scale up only when both total and currently available RAM give it room.
      */
-    private fun recommendedInputSize(c: Context): Int {
+    private data class RamSnapshot(
+        val totalMb: Long,
+        val availableBytes: Long,
+        val thresholdBytes: Long,
+        val lowMemory: Boolean,
+        val lowRamDevice: Boolean
+    )
+
+    private fun ramSnapshot(c: Context): RamSnapshot {
         val totalMb = DeviceTier.totalRamMb(c)
-        val availableBytes = try {
+        return try {
             val manager = c.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
             val info = android.app.ActivityManager.MemoryInfo()
             manager.getMemoryInfo(info)
-            info.availMem
-        } catch (_: Throwable) { 0L }
+            RamSnapshot(totalMb, info.availMem, info.threshold, info.lowMemory, manager.isLowRamDevice)
+        } catch (_: Throwable) {
+            RamSnapshot(totalMb, 0L, 0L, true, totalMb in 1..4600L)
+        }
+    }
+
+    /**
+     * The A13-class phone keeps the browser/WebView and OCR alive beside ONNX. On low-RAM devices,
+     * smaller inputs and an unoptimised single-thread CPU session avoid a second activation-memory spike.
+     */
+    private fun recommendedInputSize(c: Context): Int {
+        val ram = ramSnapshot(c)
+        val lowHardware = ram.lowRamDevice || ram.totalMb in 1..4600L
+        if (lowHardware) {
+            return when {
+                ram.lowMemory || ram.availableBytes < 192L * 1024L * 1024L -> SELF_TEST_INPUT_SIZE
+                ram.availableBytes < 384L * 1024L * 1024L -> EMERGENCY_INPUT_SIZE
+                else -> LOW_MEMORY_INPUT_SIZE.coerceAtMost(384)
+            }
+        }
         return when {
-            totalMb >= 8192L && availableBytes >= 800L * 1024L * 1024L -> HIGH_MEMORY_INPUT_SIZE
-            totalMb >= 6144L && availableBytes >= 512L * 1024L * 1024L -> MID_MEMORY_INPUT_SIZE
-            totalMb >= 4096L && availableBytes >= 320L * 1024L * 1024L -> LOW_MEMORY_INPUT_SIZE
-            availableBytes >= 192L * 1024L * 1024L -> 384
+            ram.lowMemory || ram.availableBytes < 256L * 1024L * 1024L -> EMERGENCY_INPUT_SIZE
+            ram.totalMb >= 8192L && ram.availableBytes >= 800L * 1024L * 1024L -> HIGH_MEMORY_INPUT_SIZE
+            ram.totalMb >= 6144L && ram.availableBytes >= 512L * 1024L * 1024L -> MID_MEMORY_INPUT_SIZE
+            ram.availableBytes >= 320L * 1024L * 1024L -> LOW_MEMORY_INPUT_SIZE
+            ram.availableBytes >= 192L * 1024L * 1024L -> 384
             else -> SELF_TEST_INPUT_SIZE
         }
+    }
+
+    private fun shouldUseLowMemorySession(c: Context): Boolean {
+        val ram = ramSnapshot(c)
+        return ram.lowRamDevice || ram.totalMb in 1..4600L || ram.lowMemory ||
+            ram.availableBytes < 512L * 1024L * 1024L
     }
     fun mode(c: Context): String = Prefs.get(c, "wmDetectorMode", "auto")
 
@@ -381,7 +414,7 @@ internal object BubbleDetector {
             var loaded = session
             if (loaded == null || sessionStamp != file.lastModified()) {
                 try { loaded?.close() } catch (_: Throwable) {}
-                loaded = Loaded(file)
+                loaded = Loaded(file, lowMemorySession = shouldUseLowMemorySession(c))
                 session = loaded
                 sessionStamp = file.lastModified()
             }
@@ -404,7 +437,7 @@ internal object BubbleDetector {
                 session = null
                 sessionStamp = 0L
                 System.gc()
-                val retryLoaded = Loaded(file)
+                val retryLoaded = Loaded(file, lowMemorySession = true)
                 session = retryLoaded
                 sessionStamp = file.lastModified()
                 inputSize = retrySize
