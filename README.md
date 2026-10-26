@@ -107,6 +107,10 @@ These are implementation details, not a claim that every optional model is insta
 
 This project is still being improved, and broad real-world validation is not complete. If you try it, reports that include the phone model, website, mode, source language, and a short description of what went wrong are especially helpful. Please avoid sharing private account information or session details in bug reports.
 
+## License
+
+The original project source code is licensed under the [MIT License](LICENSE). Third-party libraries, SDKs, models, fonts, and online services retain their own licenses and terms. The MIT License does not grant rights to third-party content or material the project does not own.
+
 ## Credits
 
 Built by Ashraf Ali 🇧🇩
