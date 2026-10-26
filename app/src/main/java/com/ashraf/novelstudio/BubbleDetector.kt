@@ -188,6 +188,7 @@ internal object BubbleDetector {
                     try { part.delete() } catch (_: Throwable) {}
                     existingBytes = 0L
                 }
+                Log.i(TAG, "Koharu download start: resumableBytes=$existingBytes of $MODEL_BYTES")
 
                 if (existingBytes < MODEL_BYTES) {
                     val remainingBytes = MODEL_BYTES - existingBytes
@@ -280,11 +281,13 @@ internal object BubbleDetector {
                     }
                 }
 
+                Log.i(TAG, "Koharu bytes/checksum verified: ${part.length()} bytes; starting low-memory self-test")
                 // Previously 75% was the last visible toast: inference/validation ran after the last
                 // downloaded byte without any visible state. Now the UI can show that validation starts.
                 downloadPct = 100
                 onProgress(100)
                 selfTest(part)?.let { throw IllegalStateException(it) }
+                Log.i(TAG, "Koharu low-memory self-test passed")
 
                 release()
                 if (target.exists() && !target.delete()) throw IllegalStateException("Could not replace previous detector model")
