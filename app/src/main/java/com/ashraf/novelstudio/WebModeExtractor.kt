@@ -144,6 +144,11 @@ internal class WebModeExtractor(
     // keep occupying the look-ahead window, otherwise art-only panels would stop it from moving forward.
     private val aheadBlank: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val aheadFails = ConcurrentHashMap<String, Int>()
+    // Cross-job dedupe: the same panel keeps scrolling into view across consecutive realtime jobs, and the
+    // URL can differ between passes (lazy data-src, canvas export) although it is the same picture. Remember
+    // panel-top -> image hash + cache key for a short TTL so a panel read in job N is not re-read in job N+1.
+    private data class PanelHash(val hash: String, val urlKey: String, val atMs: Long)
+    private val recentPanelHash = ConcurrentHashMap<Int, PanelHash>()
     private val jobIds = AtomicInteger(0)
     private val bridge = PageBridge()
     private val bridged = java.util.Collections.newSetFromMap(java.util.WeakHashMap<WebView, Boolean>())
@@ -798,7 +803,26 @@ internal class WebModeExtractor(
                     }
                     continue
                 }
-                if (!seen.add(md5(bytes))) { diag.duplicates++; continue }
+                val imgHash = md5(bytes)
+                if (!seen.add(imgHash)) { diag.duplicates++; continue }
+                // Cross-job dedupe: if a recent job already read this exact panel (same document offset AND same
+                // image hash), reuse the cached OCR instead of reading it again. "afterDedupe" only covers one
+                // job; consecutive realtime jobs re-processed the same visible panel.
+                val priorUrlKey = recentPanelHash[p.top]?.takeIf { it.hash == imgHash &&
+                    SystemClock.elapsedRealtime() - it.atMs < PANEL_HASH_TTL_MS }?.urlKey
+                if (priorUrlKey != null) {
+                    val prior = synchronized(aheadCache) { aheadCache[priorUrlKey] }
+                    if (prior != null) {
+                        diag.downloaded++
+                        if (prior.text.isBlank()) diag.ocrEmpty++ else { diag.ocrOk++; diag.chars += prior.text.length }
+                        OcrDiag.log("DEDUPE_HIT", "panel ${i + 1}/$total top=${p.top} reused another job's read")
+                        texts[i] = prior.text
+                        layouts[i] = prior.bubbles
+                        continue
+                    }
+                }
+                val panelUrlKey = WebModeLogic.normalizeUrl(p.src)
+                recentPanelHash[p.top] = PanelHash(imgHash, panelUrlKey, SystemClock.elapsedRealtime())
                 diag.downloaded++
                 panelFetchStartedAt[i] = tFetch
                 if (lensParallel) {
@@ -2598,6 +2622,8 @@ internal class WebModeExtractor(
         private const val AHEAD_WAIT_MS = 5000L
         // A panel read without text is not read again within this time.
         private const val BLANK_MEMO_MS = 90_000L
+        // Cross-job dedupe memory: a panel read at this offset with this image hash is reused within this window.
+        private const val PANEL_HASH_TTL_MS = 45_000L
         private const val EARLY_ABORT_FAILS = 4
         private const val DISCOVERY_MAX_MS = 120_000L
         private const val EMPTY_GRACE_MS = 8_000L
