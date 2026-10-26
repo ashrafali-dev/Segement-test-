@@ -57,10 +57,21 @@ versionName '1.7.1'
 
     buildTypes {
         release {
-            if (!releaseKeystore || !releaseStorePassword || !releaseKeyAlias || !releaseKeyPassword) {
-                throw new GradleException("Release signing is not configured. Add KEYSTORE_FILE, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD.")
+            if (releaseKeystore && releaseStorePassword && releaseKeyAlias && releaseKeyPassword) {
+                signingConfig signingConfigs.release
+            } else {
+                // Debug builds must still configure: throwing here (as this used to) fails `assemble*Debug`
+                // with "Release signing is not configured" before a single task runs. Fail only when a
+                // release APK is actually requested, and fail it clearly.
+                tasks.configureEach { task ->
+                    def n = task.name.toLowerCase()
+                    if (n.startsWith('assemble') && n.contains('release') || n.startsWith('bundle') && n.contains('release')) {
+                        task.doFirst {
+                            throw new GradleException("Release signing is not configured. Add KEYSTORE_FILE, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD.")
+                        }
+                    }
+                }
             }
-            signingConfig signingConfigs.release
             minifyEnabled false
         }
     }
