@@ -2168,7 +2168,7 @@ internal class WebModeExtractor(
             val dets: List<BubbleDetectorCore.Det>? =
                 if (earlyDet != null) {
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
-                    if (fastMode && !earlyDet.isDone) { earlyDet.cancel(true); null }
+                    if (fastMode && !earlyDet.isDone) null
                     else try { earlyDet.get() } catch (_: Exception) { null }
                 } else if (Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     // Realtime used to skip the detector entirely, so mask colour, bubble geometry and placement
@@ -2458,12 +2458,14 @@ internal class WebModeExtractor(
                 out.add(nb)
             }
             } finally {
-                // The detector reads [bmp]; the caller recycles it right after this function, so never leave it running.
+                // The detector owns a bitmap snapshot, so the caller may recycle [bmp] even if this wait times out.
+                // Do not cancel the FutureTask: cancellation before the callable starts could skip its finally block
+                // and retain both the snapshot and the single-flight gate indefinitely.
                 val pendingDet = detFuture
                 if (pendingDet != null) {
                     try { pendingDet.get(20, java.util.concurrent.TimeUnit.SECONDS) }
-                    catch (_: InterruptedException) { Thread.currentThread().interrupt(); try { pendingDet.cancel(true) } catch (_: Throwable) {} }
-                    catch (_: Throwable) { try { pendingDet.cancel(true) } catch (_: Throwable) {} }
+                    catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                    catch (_: Throwable) { /* timeout or inference failure; the worker owns its cleanup */ }
                 }
                 // Structured diagnostics: counts and timings only, never recognised text.
                 Log.i(TAG, "slice job=$id mode=${if (fastMode) "fast" else "full"} ocrMs=$ocrMs groupingMs=$groupMs bubbleFitMs=$fitMs " +
