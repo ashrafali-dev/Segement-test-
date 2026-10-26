@@ -86,24 +86,65 @@ internal object WebModeTextRemover {
                     .filter { it.contains(cx, cy) }
                     .minByOrNull { it.area } ?: continue
 
-                val rawL = (cx - line.w / 2f).toInt()
-                val rawT = (cy - line.h / 2f).toInt()
-                val rawR = (cx + line.w / 2f).toInt()
-                val rawB = (cy + line.h / 2f).toInt()
+                // Expand tight OCR boxes just enough to catch anti-aliased glyph edges. The model mask
+                // below clips the fill to the actual balloon silhouette, so this margin cannot paint outside it.
+                val px = (line.fontPx * 0.08f).toInt().coerceIn(1, 4)
+                val py = (line.fontPx * 0.12f).toInt().coerceIn(1, 5)
+                val rawL = (cx - line.w / 2f).toInt() - px
+                val rawT = (cy - line.h / 2f).toInt() - py
+                val rawR = (cx + line.w / 2f).toInt() + px
+                val rawB = (cy + line.h / 2f).toInt() + py
                 val l = max(rawL, outer.l).coerceIn(0, width - 1)
                 val t = max(rawT, outer.t).coerceIn(0, height - 1)
                 val r = min(rawR, outer.r).coerceIn(l + 1, width)
                 val b = min(rawB, outer.b).coerceIn(t + 1, height)
-                if (r - l < 2 || b - t < 2) continue
+                if (r - l < 2 || b - t < 2 || (r - l).toLong() * (b - t) > 1_250_000L) continue
 
                 val inner = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
-                if (maskCoverage(outer, inner) < 0.72f) continue
+                // A line centre is already inside this instance mask. Curved balloons can leave rounded
+                // OCR-box corners outside the mask; allow those because pixels are clipped to the mask below.
+                if (maskCoverage(outer, inner) < 0.36f) continue
                 val fill = medianRingColour(bitmap, outer, inner, width, height) ?: continue
-                val regionChanged = fillRect(bitmap, l, t, r, b, fill, width, height)
+                val regionChanged = fillMaskedRect(bitmap, outer, l, t, r, b, fill, width, height)
                 changed += regionChanged
                 if (regionChanged >= 4) onOcrRegionErased?.invoke(line)
             }
         }
+        return changed
+    }
+
+    /**
+     * Fill an OCR region, but write pixels ONLY where the model's balloon instance mask says the
+     * pixel belongs to that balloon. This is the key distinction from drawing a rectangular cover:
+     * curved edges and overlapping artwork/whisper text outside the mask are left untouched.
+     */
+    private fun fillMaskedRect(
+        bitmap: Bitmap,
+        balloon: BubbleDetectorCore.Det,
+        l: Int, t: Int, r: Int, b: Int,
+        colour: Int,
+        width: Int, height: Int
+    ): Int {
+        if (balloon.mask == null || r <= l || b <= t) return 0
+        val x0 = l.coerceIn(0, width - 1)
+        val y0 = t.coerceIn(0, height - 1)
+        val x1 = r.coerceIn(x0 + 1, width)
+        val y1 = b.coerceIn(y0 + 1, height)
+        val w = x1 - x0
+        val h = y1 - y0
+        if (w <= 0 || h <= 0 || w.toLong() * h > 1_250_000L) return 0
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, x0, y0, w, h)
+        var changed = 0
+        for (yy in 0 until h) for (xx in 0 until w) {
+            if (!balloon.contains(x0 + xx + 0.5f, y0 + yy + 0.5f)) continue
+            val at = yy * w + xx
+            if (pixels[at] != colour) {
+                pixels[at] = colour
+                changed++
+            }
+        }
+        if (changed > 0) bitmap.setPixels(pixels, 0, w, x0, y0, w, h)
         return changed
     }
 
