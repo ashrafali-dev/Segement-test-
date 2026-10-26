@@ -10737,6 +10737,7 @@ ${rows.take(220).joinToString("\n")}
 
     private fun detectorRowLabel(): String {
         val state = when {
+            BubbleDetector.isDownloading() && BubbleDetector.downloadPercent() >= 100 -> "download complete · validating…"
             BubbleDetector.isDownloading() -> "downloading… " + BubbleDetector.downloadPercent() + "%"
             BubbleDetector.enabled(this) -> "ACTIVE"
             BubbleDetector.isInstalled(this) -> "installed (mode: " + BubbleDetector.mode(this) + ")"
@@ -10796,7 +10797,7 @@ ${rows.take(220).joinToString("\n")}
                 BubbleDetector.download(this, { pct ->
                     if (pct == 100) {
                         runOnUiThread { toast("✅ Download complete · checking model safely…") }
-                    } else if (pct % 25 == 0) {
+                    } else if (pct > 0 && pct % 25 == 0) {
                         runOnUiThread { toast("⬇️ Detector download $pct%") }
                     }
                 }, { err ->
