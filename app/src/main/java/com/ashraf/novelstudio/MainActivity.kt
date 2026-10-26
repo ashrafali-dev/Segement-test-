@@ -243,6 +243,108 @@ class MainActivity : Activity() {
         else -> WebModeLogic.pickScript("auto", novelWv.url.orEmpty())
     }
 
+    /**
+     * Crop [x,y,w,h] (fractions of the source image) out of [full] as an independent bitmap.
+     * Always a copy: createBitmap(src,...) shares pixels with src, and recycling src then killed the crop.
+     */
+    private fun cropFraction(full: android.graphics.Bitmap, x: Float, y: Float, w: Float, h: Float): android.graphics.Bitmap {
+        val l = (x.coerceIn(0f, 1f) * full.width).toInt().coerceIn(0, full.width - 1)
+        val t = (y.coerceIn(0f, 1f) * full.height).toInt().coerceIn(0, full.height - 1)
+        val r = ((x + w).coerceIn(0f, 1f) * full.width).toInt().coerceIn(l + 1, full.width)
+        val b = ((y + h).coerceIn(0f, 1f) * full.height).toInt().coerceIn(t + 1, full.height)
+        return android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t)
+            .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+    }
+
+    /**
+     * Last-resort capture for manual extract: draw the WebView and crop the region that covers the tapped
+     * image. Used when the page's image was never intercepted (memory cache, lazy loader, blocked host), which
+     * is exactly the case where the bytes cache is empty and manual mode used to fail with nothing on screen.
+     *
+     * Deliberately its own path: it never starts a WebMode job, never scrolls, and returns null rather than
+     * widening to a whole-panel OCR when the image is not on screen.
+     */
+    private fun captureManualRegionLive(
+        src: String, x: Float, y: Float, w: Float, h: Float
+    ): android.graphics.Bitmap? {
+        // Ask the page where this image sits on screen (CSS px), so the drawn viewport can be cropped exactly.
+        val js = "(function(){var t=${JSONObject.quote(WebModeLogic.normalizeUrl(src))};" +
+            "var ims=document.images;for(var i=0;i<ims.length;i++){var im=ims[i];" +
+            "var s=im.currentSrc||im.src||'';if(s!==t)continue;var r=im.getBoundingClientRect();" +
+            "return JSON.stringify({l:r.left,t:r.top,w:r.width,h:r.height,vw:window.innerWidth||0,vh:window.innerHeight||0});}" +
+            "return 'null';})()"
+        var rect: JSONObject? = null
+        try {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            handler.post {
+                try {
+                    novelWv.evaluateJavascript(js) { raw ->
+                        rect = try { JSONObject(decode(raw)) } catch (_: Exception) { null }
+                        latch.countDown()
+                    }
+                } catch (_: Throwable) { latch.countDown() }
+            }
+            if (!latch.await(1200, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                OcrDiag.log("MANUAL", "live capture: page did not answer the image-rect probe")
+                return null
+            }
+        } catch (e: Throwable) {
+            OcrDiag.log("MANUAL", "live capture: probe failed ${e.javaClass.simpleName}")
+            return null
+        }
+        val r = rect
+        if (r == null || r.optDouble("w", 0.0) < 8.0 || r.optDouble("vw", 0.0) <= 0.0) {
+            OcrDiag.log("MANUAL", "live capture: tapped image is not on screen (scrolled away or not loaded)")
+            return null
+        }
+        val vw = r.optDouble("vw").toFloat()
+        val vh = r.optDouble("vh").toFloat()
+        // Draw the WebView on the main thread; draw() keeps the page's own pixels, no window chrome.
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var shot: android.graphics.Bitmap? = null
+        handler.post {
+            try {
+                val cw = novelWv.width; val ch = novelWv.height
+                if (cw > 0 && ch > 0) {
+                    val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+                    b.eraseColor(android.graphics.Color.WHITE)
+                    novelWv.draw(android.graphics.Canvas(b))
+                    shot = b
+                }
+            } catch (_: Throwable) {
+            } finally { latch.countDown() }
+        }
+        try { latch.await(1800, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
+        val view = shot ?: run {
+            OcrDiag.log("MANUAL", "live capture: WebView draw returned nothing")
+            return null
+        }
+        try {
+            val k = if (vw > 0f) view.width / vw else 1f
+            val il = r.optDouble("l").toFloat() * k
+            val it = r.optDouble("t").toFloat() * k
+            val iw = r.optDouble("w").toFloat() * k
+            val ih = r.optDouble("h").toFloat() * k
+            // The requested crop is a fraction OF THE IMAGE; convert to a fraction of the drawn viewport.
+            val cx = il + x.coerceIn(0f, 1f) * iw
+            val cy = it + y.coerceIn(0f, 1f) * ih
+            val cw = (w.coerceAtLeast(0.01f) * iw)
+            val chh = (h.coerceAtLeast(0.01f) * ih)
+            val l = cx.coerceIn(0f, view.width - 2f).toInt()
+            val t = cy.coerceIn(0f, view.height - 2f).toInt()
+            val rr = (cx + cw).coerceIn(l + 2f, view.width.toFloat()).toInt()
+            val bb = (cy + chh).coerceIn(t + 2f, view.height.toFloat()).toInt()
+            OcrDiag.log("MANUAL", "live capture ok view=${view.width}x${view.height} img=${iw.toInt()}x${ih.toInt()} crop=${rr - l}x${bb - t}")
+            return android.graphics.Bitmap.createBitmap(view, l, t, rr - l, bb - t)
+                .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        } catch (e: Throwable) {
+            OcrDiag.log("MANUAL", "live capture: crop failed ${e.javaClass.simpleName}: ${e.message?.take(70)}")
+            return null
+        } finally {
+            view.recycle()
+        }
+    }
+
     /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
     private fun installManualExtractHost() {
         com.ashraf.novelstudio.manualextract.ManualExtractHost.install(
@@ -255,26 +357,22 @@ class MainActivity : Activity() {
                 }
                 val bytes = ImageTap.get(key)
                 if (bytes == null) {
-                    OcrDiag.log("MANUAL", "capture: no cached bytes for ${key.take(110)} — image was never intercepted (lazy/JS-loaded or blocked)")
-                    return@install null
+                    // Expected in manual-only reading: nothing guarantees this page's images were intercepted.
+                    // Read the pixels the user is looking at instead of giving up.
+                    OcrDiag.log("MANUAL", "capture: no cached bytes for ${key.take(110)} -> live WebView capture")
+                    return@install captureManualRegionLive(src, x, y, w, h)
                 }
                 val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 if (full == null) {
-                    OcrDiag.log("MANUAL", "capture: decode failed ${bytes.size}B for ${key.take(90)}")
-                    return@install null
+                    OcrDiag.log("MANUAL", "capture: decode failed ${bytes.size}B -> live WebView capture")
+                    return@install captureManualRegionLive(src, x, y, w, h)
                 }
                 try {
-                    val l = (x.coerceIn(0f, 1f) * full.width).toInt().coerceIn(0, full.width - 1)
-                    val t = (y.coerceIn(0f, 1f) * full.height).toInt().coerceIn(0, full.height - 1)
-                    val r = ((x + w).coerceIn(0f, 1f) * full.width).toInt().coerceIn(l + 1, full.width)
-                    val b = ((y + h).coerceIn(0f, 1f) * full.height).toInt().coerceIn(t + 1, full.height)
-                    OcrDiag.log("MANUAL", "capture ok image=${full.width}x${full.height} crop=${r - l}x${b - t}")
-                    // copy() = an independent bitmap. createBitmap(src,...) keeps its pixels tied to `src`, and
-                    // recycling `src` below turned this crop into "cannot use a recycled source" on the OCR thread.
-                    android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t).copy(
-                        android.graphics.Bitmap.Config.ARGB_8888, false)
+                    val out = cropFraction(full, x, y, w, h)
+                    OcrDiag.log("MANUAL", "capture ok image=${full.width}x${full.height} crop=${out.width}x${out.height}")
+                    out
                 } catch (e: Throwable) {
-                    OcrDiag.log("MANUAL", "capture: createBitmap failed ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+                    OcrDiag.log("MANUAL", "capture: crop failed ${e.javaClass.simpleName}: ${e.message?.take(80)}")
                     null
                 } finally { full.recycle() }
             },
@@ -294,7 +392,8 @@ class MainActivity : Activity() {
                     handleChapter(chapter, useSavedTranslation = false)
                     onDone("")
                 }
-            }
+            },
+            onFailure = { reason -> handler.post { toast(reason) } }
         )
     }
 

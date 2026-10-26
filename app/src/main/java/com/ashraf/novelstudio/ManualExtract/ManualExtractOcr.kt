@@ -56,6 +56,45 @@ internal class ManualExtractOcr(context: Context) {
     }
 }
 
+/**
+ * Keep the text the user actually pointed at.
+ *
+ * The crop is taken around a tap, so it usually contains the target bubble plus part of its neighbour. Picking
+ * the block nearest the tap keeps the translation on the tapped bubble. The block already carries the engine's
+ * own line box (top/left/w/h), which is the only geometry needed — no detector model, no extra inference.
+ *
+ * If nothing lies within one block-height of the tap, everything is kept: a wide area selection should still
+ * translate all of it rather than nothing.
+ */
+internal fun ManualExtractOcr.Outcome.narrowToTap(bmp: Bitmap, x: Float, y: Float): ManualExtractOcr.Outcome {
+    if (blocks.size <= 1) return this
+    val px = x.coerceIn(0f, 1f) * bmp.width
+    val py = y.coerceIn(0f, 1f) * bmp.height
+    var best: OcrBlock? = null
+    var bestD = Float.MAX_VALUE
+    for (b in blocks) {
+        val bw = if (b.w > 0f) b.w else 1f
+        val bh = if (b.h > 0f) b.h else 1f
+        val dx = (px - b.cx).coerceIn(-bw / 2f, bw / 2f)
+        val dy = (py - b.cy).coerceIn(-bh / 2f, bh / 2f)
+        val d = kotlin.math.hypot(px - (b.cx + dx), py - (b.cy + dy))
+        if (d < bestD) { bestD = d; best = b }
+    }
+    val target = best ?: return this
+    val reach = (if (target.h > 0f) target.h else bmp.height * 0.1f) * 2.2f
+    if (bestD > reach) return this
+    // Take the nearest block plus any block that vertically overlaps it (multi-line bubble, vertical CJK column).
+    val t = target
+    val tTop = t.cy - t.h / 2f
+    val tBot = t.cy + t.h / 2f
+    val keep = blocks.filter { b ->
+        val bTop = b.cy - b.h / 2f
+        val bBot = b.cy + b.h / 2f
+        b === t || (bTop < tBot && bBot > tTop && kotlin.math.abs(b.cx - t.cx) <= bmp.width * 0.45f)
+    }
+    return if (keep.isEmpty()) this else ManualExtractOcr.Outcome(keep, engine)
+}
+
 /** Merge OCR blocks in reading order (top-left first) for one crop. */
 internal fun List<OcrBlock>.inReadingOrder(): List<OcrBlock> =
     sortedWith(compareBy({ it.top }, { it.left }))

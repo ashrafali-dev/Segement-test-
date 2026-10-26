@@ -34,6 +34,25 @@ internal object ManualExtractController {
     fun attach(host: ManualExtractPipeline.Host) { this.host = host }
 
     /**
+     * Main-thread reporting of unsuccessful runs, wired by the host. Failure reasons are short and concrete
+     * ("Capture failed", "No text in that area", "No translation") so the tap never looks like a dead control.
+     */
+    @Volatile
+    var onFailure: (String) -> Unit = {}
+
+    private fun notifyFailure(reason: String) {
+        val shown = when {
+            reason.startsWith("capture") -> "Capture failed — scroll so the bubble is on screen"
+            reason.startsWith("no text") -> "No text found in that area"
+            reason.startsWith("crop out of bounds") -> "That area is too small — tap the bubble again"
+            reason.startsWith("translate") -> "Translation failed — check the chatbot"
+            reason.startsWith("cancelled") -> return
+            else -> "Extract failed: $reason"
+        }
+        try { onFailure(shown) } catch (_: Throwable) {}
+    }
+
+    /**
      * Starts one extract for the tapped region. Safe to call from the main thread. If a run is already in
      * flight it is cancelled first.
      */
@@ -44,6 +63,13 @@ internal object ManualExtractController {
         }
         val attached = host ?: run {
             OcrDiag.log("MANUAL", "skip: host not attached (installManualExtractHost never ran)")
+            return
+        }
+        // Single flight: a tap that arrives while a run is in progress is dropped, not queued. Touches arrive
+        // several times per second on some readers and each one used to cancel the previous run, so nothing
+        // ever finished and the log filled with 1 ms "capture failed" runs.
+        if (state == State.RUNNING) {
+            OcrDiag.log("MANUAL", "skip: a run is already in flight")
             return
         }
         cancel()
@@ -57,11 +83,14 @@ internal object ManualExtractController {
         val t = Thread({
             try {
                 if (token != runSeq.get()) return@Thread   // a newer tap owns the screen
-                pipeline.run(src, x, y, w, h, script) { token != runSeq.get() }
+                val result = pipeline.run(src, x, y, w, h, script) { token != runSeq.get() }
+                // Tell the user why nothing appeared. Silent failure was the whole complaint.
+                if (!result.ok && token == runSeq.get()) notifyFailure(result.reason)
             } catch (e: Throwable) {
                 // never let one extract crash the reader, but never swallow the reason either
                 OcrDiag.log("MANUAL", "crashed ${e.javaClass.simpleName}: ${e.message?.take(140)}")
                 Log.w(ManualExtractConfig.TAG, "manual extract crashed", e)
+                if (token == runSeq.get()) notifyFailure("Extract failed")
             } finally {
                 if (token == runSeq.get()) state = State.IDLE
             }

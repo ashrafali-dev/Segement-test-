@@ -38,6 +38,9 @@ internal class ManualExtractPipeline(
         val m = ManualExtractMetrics()
         val tStart = SystemClock.elapsedRealtime()
         if (cancelled()) return fail(m, "cancelled")
+        // A crop that is only part of the source image means the user pointed somewhere; a full-panel crop
+        // (0,0,1,1 from the Extract button) means "read everything visible".
+        val hasTapPoint = !(x <= 0.001f && y <= 0.001f && w >= 0.999f && h >= 0.999f)
 
         // 1) capture region only
         val raw = host.captureCrop(src, x, y, w, h) ?: return fail(m, "capture failed")
@@ -63,6 +66,10 @@ internal class ManualExtractPipeline(
 
             // 4) OCR crop only
             var outcome = ocr.read(ocrBmp, script, ManualExtractConfig.OCR_CAP_MS)
+            // A crop can take in a neighbour bubble or a wide area selection. Without a tap position (Extract
+            // reads the whole visible panel) all blocks are correct; with one, keep only the text the user
+            // pointed at so the translation lands on the bubble they tapped.
+            if (hasTapPoint) outcome = outcome.narrowToTap(ocrBmp, x, y)
             m.mark("ocr")
             if (outcome.blocks.isEmpty() && SystemClock.elapsedRealtime() - tStart < ManualExtractConfig.TOTAL_CAP_MS / 2) {
                 // one slightly-expanded retry — still a crop, never full-panel
