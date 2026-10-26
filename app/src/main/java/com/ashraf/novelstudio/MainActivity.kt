@@ -269,7 +269,10 @@ class MainActivity : Activity() {
                     val r = ((x + w).coerceIn(0f, 1f) * full.width).toInt().coerceIn(l + 1, full.width)
                     val b = ((y + h).coerceIn(0f, 1f) * full.height).toInt().coerceIn(t + 1, full.height)
                     OcrDiag.log("MANUAL", "capture ok image=${full.width}x${full.height} crop=${r - l}x${b - t}")
-                    android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t)
+                    // copy() = an independent bitmap. createBitmap(src,...) keeps its pixels tied to `src`, and
+                    // recycling `src` below turned this crop into "cannot use a recycled source" on the OCR thread.
+                    android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t).copy(
+                        android.graphics.Bitmap.Config.ARGB_8888, false)
                 } catch (e: Throwable) {
                     OcrDiag.log("MANUAL", "capture: createBitmap failed ${e.javaClass.simpleName}: ${e.message?.take(80)}")
                     null
