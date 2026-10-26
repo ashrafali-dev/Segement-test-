@@ -2262,8 +2262,21 @@ internal class WebModeExtractor(
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })
-            fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
-                dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
+            fun freeAt(i: Int): Boolean {
+                val current = dets ?: return false
+                val x = (rects[i][0] + rects[i][2]) / 2f
+                val y = (rects[i][1] + rects[i][3]) / 2f
+                if (BubbleDetectorCore.isFreeText(current, x, y)) return true
+                // YOLO segmentation exposes balloon masks only; it has no separate text_free class.
+                // OCR text whose centre is outside every predicted balloon must stay free text instead
+                // of being pulled into a nearby bubble by BubbleFit's pixel search.
+                val hasSegmentationMasks = current.any {
+                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
+                }
+                return hasSegmentationMasks && current.none {
+                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.contains(x, y)
+                }
+            }
 
             // A flat speech bubble can contain lettering that the first pass missed.
             // Do this check for LONG blocks too: a long partial read is still partial.
@@ -2285,6 +2298,9 @@ internal class WebModeExtractor(
                 val tg = android.os.SystemClock.elapsedRealtime()
                 val grp = BubbleGrouping.groupContaining(blocks, i, pool.filter { !consumed[it] }) { x, y ->
                     // The detector saw two different bubble outlines around the two lines: never one sentence.
+                    val ix = blocks.indexOf(x)
+                    val iy = blocks.indexOf(y)
+                    (ix >= 0 && iy >= 0 && freeAt(ix) != freeAt(iy)) ||
                     BubbleDetectorCore.inDifferentBubbles(dets, x.cx, x.cy, y.cx, y.cy) ||
                     OcrPost.outlineBetween(bmp, x, y) || run {
                         // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
@@ -2338,7 +2354,10 @@ internal class WebModeExtractor(
                 // every OCR block repeatedly was the dominant freeze on long/mobile Webtoon panels.
                 // Keep this expensive interior/leftover audit only for thorough chapter extraction.
                 var fromDet = false
-                val inter: IntArray? = if (fastMode) {
+                val inter: IntArray? = if (freeAt(i)) {
+                    // Text outside predicted balloon masks is standalone; never grow it into a nearby speech bubble.
+                    null
+                } else if (fastMode) {
                     BubbleDetectorCore.interiorFor(dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]).also { fromDet = it != null }
                 } else try {
                     WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
@@ -2357,6 +2376,7 @@ internal class WebModeExtractor(
                     val cxj = blocks[j].cx
                     val cyj = blocks[j].cy
                     cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3] &&
+                        !freeAt(j) &&
                         (j == i || !BubbleDetectorCore.inDifferentBubbles(dets, b.cx, b.cy, cxj, cyj))
                 }
                 if (i !in inside) continue
