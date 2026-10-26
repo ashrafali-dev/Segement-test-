@@ -3,9 +3,9 @@ package com.ashraf.novelstudio
 /**
  * Pure-Kotlin geometry and compatibility helpers for balloon detections; Android-free so this code is JVM-testable.
  *
- * The active ONNX model is YOLO11-nano instance segmentation, post-processed in MangaBubbleSegCore. It emits one
- * balloon class with an instance mask. The legacy label constants and [decode] helper remain for existing grouping
- * helpers/tests; they do not describe the active model's output classes.
+ * The active ONNX model is Koharu YOLO26s segmentation, decoded in KoharuSegCore. Its frame/dialogue_text/balloon/
+ * onomatopoeia_text outputs are mapped into these stable labels so existing grouping, mask and placement code can
+ * consume them without a second classification heuristic.
  */
 internal object BubbleDetectorCore {
     const val SIZE = 640
@@ -136,7 +136,7 @@ internal object BubbleDetectorCore {
             var dup = false
             for (k in kept) {
                 if (k.label != d.label) continue
-                if (iou(d, k) > 0.5f || containedShare(if (d.area <= k.area) d else k, if (d.area <= k.area) k else d) > 0.85f) {
+                if (iou(d, k) > 0.7f || containedShare(if (d.area <= k.area) d else k, if (d.area <= k.area) k else d) > 0.85f) {
                     dup = true; break
                 }
             }
