@@ -40,6 +40,7 @@ internal object BubbleDetector {
     private const val LOW_MEMORY_INPUT_SIZE = 512
     private const val MID_MEMORY_INPUT_SIZE = 640
     private const val HIGH_MEMORY_INPUT_SIZE = 768
+    private const val EMERGENCY_INPUT_SIZE = 448
 
     @Volatile var lastError: String = ""
         private set
@@ -165,7 +166,7 @@ internal object BubbleDetector {
                 target.parentFile?.let {
                     if (!it.exists() && !it.mkdirs()) throw IllegalStateException("Could not create the model folder")
                 }
-                        if (part.exists()) part.delete()
+                                if (part.exists()) part.delete()
                 val freeBytes = android.os.StatFs(target.parentFile?.absolutePath ?: app.filesDir.absolutePath).availableBytes
                 if (freeBytes < MODEL_BYTES + 2L * 1024L * 1024L) {
                     throw IllegalStateException("Need at least 44 MB free storage to install Koharu (available ${freeBytes / (1024 * 1024)} MB)")
@@ -301,13 +302,29 @@ internal object BubbleDetector {
                 sessionStamp = file.lastModified()
             }
             val t0 = SystemClock.elapsedRealtime()
-            val inputSize = recommendedInputSize(c)
             val tiles = BubbleDetectorCore.capTiles(BubbleDetectorCore.planTiles(bmp.width, bmp.height))
-            val all = ArrayList<BubbleDetectorCore.Det>()
-            for (tile in tiles) {
-                if (bmp.isRecycled) throw IllegalStateException("source bitmap was recycled during detection")
-                val prepared = prepareTile(bmp, tile, inputSize)
-                all.addAll(loaded.run(prepared.pixels, tile, prepared.letterbox, inputSize))
+            var inputSize = recommendedInputSize(c)
+            val all: List<BubbleDetectorCore.Det> = try {
+                inferTiles(loaded, bmp, tiles, inputSize)
+            } catch (oom: OutOfMemoryError) {
+                // Dynamic Koharu supports smaller stride-aligned inputs. Retry the full page at a lower
+                // resolution after releasing the first session instead of permanently failing this scan.
+                val retrySize = when {
+                    inputSize > LOW_MEMORY_INPUT_SIZE -> LOW_MEMORY_INPUT_SIZE
+                    inputSize > EMERGENCY_INPUT_SIZE -> EMERGENCY_INPUT_SIZE
+                    else -> throw oom
+                }
+                lastInfo = "retrying at ${retrySize}px after memory pressure"
+                Log.w(TAG, "Koharu OOM at ${inputSize}px; retrying at ${retrySize}px")
+                release()
+                session = null
+                sessionStamp = 0L
+                System.gc()
+                val retryLoaded = Loaded(file)
+                session = retryLoaded
+                sessionStamp = file.lastModified()
+                inputSize = retrySize
+                inferTiles(retryLoaded, bmp, tiles, inputSize)
             }
             val out = BubbleDetectorCore.merge(all)
             val elapsed = SystemClock.elapsedRealtime() - t0
@@ -333,6 +350,21 @@ internal object BubbleDetector {
             release()
             null
         }
+    }
+
+    private fun inferTiles(
+        loaded: Loaded,
+        bmp: Bitmap,
+        tiles: List<IntArray>,
+        inputSize: Int
+    ): List<BubbleDetectorCore.Det> {
+        val all = ArrayList<BubbleDetectorCore.Det>()
+        for (tile in tiles) {
+            if (bmp.isRecycled) throw IllegalStateException("source bitmap was recycled during detection")
+            val prepared = prepareTile(bmp, tile, inputSize)
+            all.addAll(loaded.run(prepared.pixels, tile, prepared.letterbox, inputSize))
+        }
+        return all
     }
 
     private data class PreparedTile(val pixels: IntArray, val letterbox: KoharuSegCore.Letterbox)
