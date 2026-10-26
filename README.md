@@ -38,6 +38,22 @@ Novel Studio uses a chatbot's web interface rather than shipping its own general
 
 The results and available controls depend on the website, the selected mode, and the configured chatbot. Compatibility is not guaranteed for every website.
 
+## The four main modes
+
+### 1. Novel
+Made for text-based web novels, including Chinese, Korean, and Japanese novels. Novel Studio extracts chapter text from the reader page and sends it to the chatbot you choose so you can read the story in your target language. **Auto Ahead** can prepare the next **7 chapters** in advance, where the site and settings support it.
+
+### 2. Scanning
+Scans a chapter's image panels in one pass and prepares the chapter for translated reading, rather than making you handle each panel separately. In the developer's tests, a Fast Scan run processed **64 panels in 52 seconds**; chapter size, phone resources, and other conditions affect the time.
+
+### 3. Real-Time
+Provides fast, automatic translation while you read. It detects text regions and their positions, uses bubble/layout analysis to help associate text with the right area, and places translated text over the original page. Detection and placement can still be affected by difficult lettering or page layouts.
+
+### 4. Manual Lite
+Designed for phones with limited RAM. Like Real-Time, it works with the visible screen, but **does not automatically start translating every time a new screen appears**. Instead, tap the button to send the bubble text currently visible on screen—whether there is one bubble or several. Avoiding continuous automatic work can reduce memory and battery pressure; the actual benefit depends on the device and usage.
+
+
+
 ## How it works
 
 **For a web novel:** Novel Studio reads the chapter text available from the reader page, sends it to the selected chatbot, and then places or saves the translated result.
@@ -53,6 +69,20 @@ The current code supports ML Kit OCR recognizers for **Latin, Chinese, Japanese,
 From my experience as an everyday reader, ordinary Korean text and ordinary text in Japanese manga often work at **around 90% or better**. This is a personal, informal estimate—not a measured benchmark, a controlled study, or a guarantee for every page. It describes regular text, not every kind of lettering. Small or blurry text, unusual fonts, stylized sound effects, complex image layouts, and other difficult cases can reduce results.
 
 The remaining mistakes are not all the same kind of problem. Some begin with OCR missing or misreading the source text; translation quality can also depend on the selected chatbot, target language, prompt, and surrounding story context. A stronger prompt and better context can help the translation, but they cannot recover source text that OCR never read correctly.
+
+## My personal AI chatbot ratings
+
+These are my own reader-side impressions of translation quality and speed, not a controlled benchmark. Results depend on the chapter, language pair, prompt, model version, and service conditions.
+
+| Chatbot / model | My rating | Speed in my use | Notes |
+|---|---:|---|---|
+| ChatGPT | 7/10 | Fast | A useful general option. |
+| Gemini | 6/10 | Fast to medium | Speed varies in my experience. |
+| Claude Haiku 5.5 | 9.5/10 | Fast | My first choice to try for a balance of translation quality and speed. [Official model page](https://www.anthropic.com/claude-haiku-5-5). |
+| DeepSeek | 8.5/10 | Fast | A strong prompt and enough story context matter; otherwise, it can lose context. |
+| Grok | 10/10 for adult/NSFW material | Medium to slow | In my experience, it handles this material well, but it sometimes appears to spend time thinking even on simple messages. |
+
+**My recommendation:** sign in to Claude and try **Haiku 5.5** first. These ratings are subjective, can change as chatbot models change, and should not be treated as a guarantee for every reader or chapter.
 
 ## Performance and testing
 
