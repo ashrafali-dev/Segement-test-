@@ -9985,11 +9985,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     val on = !Prefs.bool(this, "wmTextRemoval2", true)
                     Prefs.putBool(this, "wmTextRemoval2", on)
                     if (on) {
-                        toast("🧽 Text Remover ON — next Web Mode/Japanese Manga OCR scan will clean only safe text pixels.")
+                        toast("🧽 Text Remover ON — next OCR pass uses the full safe pixel-cleaner path.")
                     } else {
                         WebModeTextRemovalCache.clear(this)
                         novelWv.evaluateJavascript("(function(){var l=document.getElementById('__ns_wm_clean_layer');if(l&&l.parentNode)l.parentNode.removeChild(l);var w=document.getElementById('__ns_wm_overlay');if(w){var bs=w.querySelectorAll('.__ns_b[data-cl]');for(var i=0;i<bs.length;i++){var b=bs[i],bg=b.getAttribute('data-bg')||'#FFFFFF',sf=b.getAttribute('data-sf')==='1';b.style.background=bg;b.style.borderRadius=sf?'12px':'4px';b.style.boxShadow=sf?'0 0 7px 5px '+bg:'0 0 0 3px '+bg;b.removeAttribute('data-cl');}}})()", null)
-                        toast("🧽 Text Remover OFF — active cleaned overlay removed; original page remains intact.")
+                        toast("🫧 Mask-only mode ON — next OCR pass uses detected balloon masks with OCR text regions; unmatched text keeps the safe cover overlay.")
                     }
                     refresh(i, menuTextRemovalLabel())
                 }
@@ -10736,7 +10736,8 @@ ${rows.take(220).joinToString("\n")}
     }
 
     private fun menuTextRemovalLabel(): String =
-        (if (Prefs.bool(this, "wmTextRemoval2", true)) "✅" else "⬜") + " 🧽 Text Remover (Webtoon + Manga)"
+        if (Prefs.bool(this, "wmTextRemoval2", true)) "✅ 🧽 Text Remover (Webtoon + Manga)"
+        else "🫧 Balloon Mask Mode (Webtoon + Manga)"
 
     /** Glass bottom sheet with one tappable row per label (long-press optional). */
     /** A sheet with a search box on top; used for the long language lists. */
