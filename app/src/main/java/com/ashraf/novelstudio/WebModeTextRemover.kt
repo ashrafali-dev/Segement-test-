@@ -224,7 +224,10 @@ internal object WebModeTextRemover {
         allowAi: Boolean = true,
         dets: List<BubbleDetectorCore.Det>? = null
     ): Boolean {
-        if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
+        // When the menu toggle is OFF, keep the legacy pixel/AI remover disabled, but still allow
+        // a dedicated segmentation-mask pass for OCR regions that the balloon model can actually
+        // validate. The model mask is a BALLOON mask, not a glyph mask.
+        val maskOnly = !Prefs.bool(context, "wmTextRemoval2", true)
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
         if (isAnimatedOrUnsupported(encoded)) return false
 
@@ -243,6 +246,24 @@ internal object WebModeTextRemover {
                 ?: run { decoded.recycle(); return false }
 
         try {
+            if (maskOnly) {
+                val balloonMasks = dets.orEmpty().filter {
+                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
+                }
+                if (balloonMasks.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: no balloon instance masks")
+                    return false
+                }
+                val erasedByMask = eraseOcrRegionsInsideBalloonMasks(bitmap, balloonMasks, bubbles)
+                if (erasedByMask.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: no safe OCR regions inside balloon masks")
+                    return false
+                }
+                val stored = storeCleanedBitmap(context, sourceUrl, bitmap, erasedByMask)
+                OcrDiag.log("MASK_CLEAN", "ocrRegions=${bubbles.size} masks=${balloonMasks.size} erased=${erasedByMask.size} stored=$stored")
+                return stored
+            }
+
             var totalRemoved = 0
             // AI inpainting (optional, downloaded on request; used automatically once installed) is slow on a phone:
             // only a few artwork bubbles / free-text boxes per image.
@@ -596,30 +617,7 @@ internal object WebModeTextRemover {
             }
             if (totalRemoved < 8) return false
 
-            val bytesOut = ByteArrayOutputStream()
-            // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
-            // of re-encoding the whole comic page with lossy WebP.
-            val modern = Build.VERSION.SDK_INT >= 30
-            val format = if (modern) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.PNG
-            if (!bitmap.compress(format, 100, bytesOut)) return false
-            val cleaned = bytesOut.toByteArray()
-            if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
-            val mime = if (modern) "image/webp" else "image/png"
-            // A canvas panel has no image URL: its picture is drawn by page JS, so the overlay had nothing to
-            // swap in and the old lettering stayed visible under the translation. Hand the cleaned pixels to the
-            // overlay as a data: URL. Canvas entries stay in memory only (a new multi-MB file per scroll
-            // position would grow the disk cache without bound) and are keyed by the stable canvas slot.
-            if (sourceUrl.startsWith("ns-canvas:", true)) {
-                WebModeTextRemovalCache.storeCanvasCleaned(
-                    sourceUrl,
-                    "data:$mime;base64," + android.util.Base64.encodeToString(cleaned, android.util.Base64.NO_WRAP)
-                )
-                WebModeTextRemovalCache.setErased(sourceUrl, erased)
-                return true
-            }
-            val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned, mime)
-            if (stored) WebModeTextRemovalCache.setErased(sourceUrl, erased)
-            return stored
+            return storeCleanedBitmap(context, sourceUrl, bitmap, erased)
         } catch (_: OutOfMemoryError) {
             return false
         } catch (_: Exception) {
@@ -627,6 +625,85 @@ internal object WebModeTextRemover {
         } finally {
             bitmap.recycle()
         }
+    }
+
+    /**
+     * Mask-only path used while the menu's full Text Remover is OFF.
+     *
+     * The detector returns a balloon instance mask. OCR supplies the actual text region. We only
+     * erase that OCR region when it lies inside the balloon mask and the surrounding masked balloon
+     * has a stable paper colour. If the test is uncertain, the caller keeps the normal cover-box
+     * overlay so original lettering is never silently exposed under a transparent translation.
+     */
+    private fun eraseOcrRegionsInsideBalloonMasks(
+        bitmap: Bitmap,
+        balloonMasks: List<BubbleDetectorCore.Det>,
+        bubbles: List<WmBubble>
+    ): Set<String> {
+        val width = bitmap.width
+        val height = bitmap.height
+        val erased = LinkedHashSet<String>()
+        for (bubble in bubbles.asSequence().take(500)) {
+            if (bubble.sourceText.isBlank()) continue
+            // tcx/tcy/tbw/tbh are the precise OCR text-region geometry when available. cx/cy/w/h
+            // are the safe cover geometry and are only a fallback for older saved layouts.
+            val useTextRegion = bubble.tbw > 0f && bubble.tbh > 0f &&
+                bubble.tcx.isFinite() && bubble.tcy.isFinite()
+            val cxN = if (useTextRegion) bubble.tcx else bubble.cx
+            val cyN = if (useTextRegion) bubble.tcy else bubble.cy
+            val wN = if (useTextRegion) bubble.tbw else bubble.w
+            val hN = if (useTextRegion) bubble.tbh else bubble.h
+            if (!cxN.isFinite() || !cyN.isFinite() || !wN.isFinite() || !hN.isFinite() ||
+                wN <= 0f || hN <= 0f) continue
+
+            val l = kotlin.math.floor((cxN - wN / 2f) * width).toInt().coerceIn(0, width - 1)
+            val t = kotlin.math.floor((cyN - hN / 2f) * height).toInt().coerceIn(0, height - 1)
+            val r = ceil((cxN + wN / 2f) * width).toInt().coerceIn(l + 1, width)
+            val b = ceil((cyN + hN / 2f) * height).toInt().coerceIn(t + 1, height)
+            if (r - l < 2 || b - t < 2 || (r - l).toLong() * (b - t) > 1_250_000L) continue
+
+            val textRegion = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
+            val cx = (l + r) / 2f
+            val cy = (t + b) / 2f
+            val outer = balloonMasks.asSequence()
+                .filter { it.contains(cx, cy) }
+                .minByOrNull { it.area } ?: continue
+            // Require strong support from the instance mask so a neighbouring panel or background
+            // lettering cannot be erased by mistake.
+            if (maskCoverage(outer, textRegion) < 0.80f) continue
+            val fill = medianRingColour(bitmap, outer, textRegion, width, height) ?: continue
+            val changed = fillRect(bitmap, l, t, r, b, fill, width, height)
+            if (changed >= 4) erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+        }
+        return erased
+    }
+
+    /** Save one cleaned bitmap through the same cache path used by the full remover. */
+    private fun storeCleanedBitmap(
+        context: Context,
+        sourceUrl: String,
+        bitmap: Bitmap,
+        erased: Set<String>
+    ): Boolean {
+        val bytesOut = ByteArrayOutputStream()
+        // API 30+ supports lossless WebP. Older Android versions use lossless PNG rather than lossy WebP.
+        val modern = Build.VERSION.SDK_INT >= 30
+        val format = if (modern) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.PNG
+        if (!bitmap.compress(format, 100, bytesOut)) return false
+        val cleaned = bytesOut.toByteArray()
+        if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
+        val mime = if (modern) "image/webp" else "image/png"
+        if (sourceUrl.startsWith("ns-canvas:", true)) {
+            WebModeTextRemovalCache.storeCanvasCleaned(
+                sourceUrl,
+                "data:$mime;base64," + android.util.Base64.encodeToString(cleaned, android.util.Base64.NO_WRAP)
+            )
+            WebModeTextRemovalCache.setErased(sourceUrl, erased)
+            return true
+        }
+        val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned, mime)
+        if (stored) WebModeTextRemovalCache.setErased(sourceUrl, erased)
+        return stored
     }
 
     /**
