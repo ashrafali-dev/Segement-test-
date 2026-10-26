@@ -163,6 +163,31 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val found = out.count { !it.isNullOrBlank() }
             return if (found > 0 && (found * 100 >= n * 70 || layout.titleOffset == 0)) out else null
         }
+
+        /**
+         * Marker alignment, then a safe fallback when it fails.
+         *
+         * A single-bubble layout (every manual tap, and most realtime bubbles) has exactly one text box, so the
+         * reply belongs there no matter what the model did with the marker: renumbered it, dropped it, wrapped
+         * it, or answered in prose. Refusing to place it was the "marker not found, so nothing appears" bug.
+         *
+         * Multi-bubble layouts keep the strict rule: with several boxes, guessing the order can print the wrong
+         * line in the wrong place, and the reader view is the honest result.
+         */
+        fun alignWithFallback(text: String, layout: WebModeLayout): List<String?>? {
+            align(text, layout)?.let { return it }
+            if (layout.bubbles.size != 1) return null
+            val answer = stripMarkers(text)
+            if (answer.isBlank()) return null
+            return listOf(answer)
+        }
+
+        /** Any bracketed or bare numeric marker, however many digits the model used ([1], [001], [P1_L1]). */
+        private val ANY_MARK = Regex("\\[\\s*(?:P\\d+[_\\-])?\\d+\\s*\\]|^\\s*\\d+[\\.\\)]\\s*")
+
+        /** The reply with its markers removed, keeping the prose. Used only for the single-bubble fallback. */
+        fun stripMarkers(text: String): String =
+            ANY_MARK.replace(text, " ").replace(NL, " ").trim()
     }
 }
 

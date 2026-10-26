@@ -476,8 +476,10 @@ class MainActivity : Activity() {
                     )
                     val layout = WebModeLayout(0, listOf(bubble))
                     WebModeLayoutStore.setScan(url, layout)
-                    val hashes = setOf(WebModeLayout.fingerprint(bubble))
-                    registerRealtimeBatch(chapter, hashes, layout)
+                    // One tap = one translation. Deliberately NOT registerRealtimeBatch here: that marks the
+                    // chapter as a realtime batch, and the realtime loop then keeps re-reading panels as the
+                    // user scrolls. Manual mode is supposed to stay idle until the next tap — the auto-scan it
+                    // started was what pushed memory over the edge (WebView renderer killed at 11/192 MB).
                     handleChapter(chapter, useSavedTranslation = false)
                     onDone("")
                 }
@@ -2098,7 +2100,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     }
 
     private fun finishRealtimeAheadTranslation(jobKey: String, task: RtAheadTranslationTask, raw: String) {
-        val aligned = WebModeLayout.align(cleanReply(raw), task.layout)
+        val aligned = WebModeLayout.alignWithFallback(cleanReply(raw), task.layout)
         if (aligned == null) {
             val nums = Regex("\\[(\\d{3,})\\]").findAll(raw).map { it.groupValues[1] }.take(30).joinToString(",")
             OcrDiag.log("ALIGN_FAIL", "ahead reply not matched to its bubbles: bubbles=${task.layout.bubbles.size} replyChars=${raw.length} markers=[$nums]")
@@ -8750,7 +8752,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
                 val lay = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (lay != null) {
-                    val placed = WebModeLayout.align(rawTranslation, lay)
+                    val placed = WebModeLayout.alignWithFallback(rawTranslation, lay)
                     if (placed == null || placed.none { !it.isNullOrBlank() }) {
                         failJob(tok, ch, "The chatbot answer could not be matched to the page.", fallback = true)
                         return@evaluateJavascript
@@ -8985,6 +8987,10 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
 
     private fun isDeepSeekLivePanel(ch: Chapter): Boolean =
         webModeOn() && ch.contentSel.isBlank() &&
+            // Manual lite is a single-shot read of one tapped crop. Treating it as a live panel let the
+            // realtime machinery adopt the chapter and keep scanning after the tap, which is exactly the
+            // memory pressure the mode exists to avoid.
+            !manualExtractOn() &&
             (DeepSeekRealtimeTranslation.isEnabled(this) || isScanRegionBatch(ch))
 
     /**
@@ -9147,7 +9153,9 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // use the layout captured with its own request; if absent, fail closed rather than guess.
             val wmLayout = if (livePanelBatch) realtimeBatchLayout(ch)
                 else WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
-            val wmPlaced = wmLayout?.let { WebModeLayout.align(text, it) }
+            // Strict marker alignment first; a single-bubble layout falls back to its one box instead of
+            // dropping the answer ("marker not found" used to leave the bubble untranslated).
+            val wmPlaced = wmLayout?.let { WebModeLayout.alignWithFallback(text, it) }
             val wmScript: String
             if (livePanelBatch) {
                 if (wmLayout == null || wmPlaced == null) {
