@@ -494,7 +494,22 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                 throw OcrUnavailableException("Google Lens: no internet connection")
             }
             var waitMs = BACKOFF_MS shl attempt
+            // Cap concurrent requests and space their starts: a scan firing many panels at once is exactly
+            // what earns an HTTP 429, and one 429 then costs more time than the parallelism ever saved.
+            if (!REQUEST_SLOTS.tryAcquire(remaining, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                throw OcrUnavailableException("Google Lens: request slot timeout")
+            }
             try {
+                val sinceStart = SystemClock.elapsedRealtime() - lastStartAt
+                if (sinceStart in 0 until START_GAP_MS) {
+                    val pause = START_GAP_MS - sinceStart
+                    val left = deadlineMs - (SystemClock.elapsedRealtime() - started)
+                    if (pause < left) try { Thread.sleep(pause) } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw OcrUnavailableException("Google Lens: cancelled")
+                    }
+                }
+                lastStartAt = SystemClock.elapsedRealtime()
                 return race(payload, info, remaining, connectMs, hedgeAfterMs, minimumAttemptMs, firstBound = attempt % 2 == 0)
             } catch (e: HttpStatus) {
                 last = e
@@ -524,6 +539,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                     throw OcrUnavailableException("Google Lens: DNS resolution failed ($why)", e)
                 }
                 last = e    // ConnectException, SocketException ("Socket closed"), EOF, ...
+            } finally {
+                // Always hand the wire back, whatever happened above (thrown or not).
+                REQUEST_SLOTS.release()
             }
             val jitter = (random.nextInt(120)).toLong()
             val elapsed = SystemClock.elapsedRealtime() - started
@@ -828,6 +846,17 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private const val MAX_ATTEMPTS = 3
         private const val BACKOFF_MS = 400L
         private val RETRYABLE_STATUS = setOf(429, 500, 502, 503, 504)
+
+        /**
+         * Requests actually on the wire at once, across every caller.
+         *
+         * A full scan overlaps panels for speed; without this cap that burst is what produces HTTP 429 in the
+         * first place. Three is the value that has kept Lens answering on the test device.
+         */
+        private val REQUEST_SLOTS = java.util.concurrent.Semaphore(3)
+        /** Spacing between request starts so a burst is not mistaken for abuse. Waits for a slot first. */
+        private val START_GAP_MS = 200L
+        @Volatile private var lastStartAt = 0L
 
         // Two timeouts in a row used to switch Lens off for 45 s, which looked like whole panels being skipped.
         private const val TRANSIENT_TRIP = 3

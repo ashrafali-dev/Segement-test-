@@ -11,6 +11,40 @@ import android.util.Log
  */
 
 /** Short, user-visible name of the engine that produced the LAST OCR result (shown in the activity chip). */
+/**
+ * How Lens failed, so only real connectivity/rate-limit trouble triggers a fallback.
+ *
+ * ML Kit must stay a last resort: when a coding bug was treated as an outage, a whole scan silently ran on
+ * ML Kit and looked "finished" with worse text. Only the categories below are genuine Lens-side failures.
+ */
+internal object LensFailure {
+    private const val PAUSE_AFTER = 5
+
+    /** Consecutive panels that could not reach Lens at all, across the whole scan. */
+    @Volatile private var consecutive = 0
+    @Volatile var paused: Boolean = false
+        private set
+
+    fun isConnectivityOrLimit(message: String): Boolean {
+        val m = message.lowercase()
+        return m.contains("http 429") || m.contains("http 403") ||
+            m.contains("timeout") || m.contains("timed out") ||
+            m.contains("no internet") || m.contains("dns") || m.contains("unknownhost") ||
+            m.contains("connection") || m.contains("socket") || m.contains("paused after")
+    }
+
+    /** One panel could not reach Lens. Returns true when the session should pause. */
+    fun recordUnreachable(): Boolean {
+        val n = ++consecutive
+        if (n >= PAUSE_AFTER) { paused = true; return true }
+        return false
+    }
+
+    fun recordReachable() { consecutive = 0 }
+
+    fun resetSession() { consecutive = 0; paused = false }
+}
+
 internal object OcrEngineStatus {
     @Volatile var label: String = ""
     /** Safe diagnostic from the latest FOREGROUND Lens scan; read-ahead results must not overwrite it. */
@@ -289,8 +323,14 @@ internal class RoutingOcrEngine : OcrEngine {
                 report("lens(cancelled)", false)
                 return OcrResult(emptyList())
             } catch (e: Exception) {
+                // A bug in our own code (NPE, parse error, index out of bounds) is NOT a Lens outage. Falling
+                // back to ML Kit here silently turned every panel of a scan into an ML Kit read, which looked
+                // like "scan finished but everything is worse". Record it, fail this panel, keep Lens selected.
                 failure = (e.javaClass.simpleName + ": " + (e.message ?: "")).take(160)
-                Log.w("NovelStudioOCR", "lens failed unexpectedly", e)
+                Log.w("NovelStudioOCR", "lens failed unexpectedly (not a Lens fault, no ML Kit fallback)", e)
+                OcrEngineStatus.lastError = "lens ${script.name}: internal error $failure"
+                report("lens(internal-error)", false)
+                return OcrResult(emptyList())
             } catch (e: OutOfMemoryError) {
                 failure = "out of memory"
             }
@@ -302,7 +342,25 @@ internal class RoutingOcrEngine : OcrEngine {
                     report("lens(cancelled)", false)
                     return OcrResult(emptyList())
                 }
-                // Lens is an unofficial online endpoint; keep the reading flow alive with on-device OCR.
+                // Only a genuine connectivity / rate-limit failure may spend the ML Kit fallback. Anything else
+                // (a bug, a rejected key, a parse error) fails this panel and leaves Lens selected.
+                val retryable = LensFailure.isConnectivityOrLimit(failure)
+                if (!retryable) {
+                    OcrDiag.log("FALLBACK", "panel left unread: Lens error '$failure' is not a connectivity/limit fault; ML Kit NOT used")
+                    report("lens(error)", false)
+                    return OcrResult(emptyList())
+                }
+                // 5 panels in a row that never reached Lens means the connection (or the IP) is really down.
+                // Pausing is honest; silently reading the rest of the chapter with ML Kit is not.
+                if (LensFailure.recordUnreachable()) {
+                    OcrDiag.log("FALLBACK", "session paused: $failure after 5 consecutive unreachable panels")
+                    OcrEngineStatus.toastOnce(appContext,
+                        "Lens limit reached. Please wait a few minutes or check your connection.")
+                    report("lens(paused)", false)
+                    return OcrResult(emptyList())
+                }
+                OcrDiag.log("FALLBACK", "panel used ML Kit: Lens failed with '$failure' (panel-only, next panel retries Lens)")
+                // This panel only: the next panel calls route() again and tries Lens first.
                 report("mlkit(lens-error-fallback)", true)
                 return try { run(mlKit) } catch (fallback: InterruptedException) {
                     Thread.currentThread().interrupt()
@@ -327,6 +385,7 @@ internal class RoutingOcrEngine : OcrEngine {
                 )
                 Log.i("NovelStudioOCR", OcrEngineStatus.currentLensDiagnostic().take(1000))
                 lensThread.set(true)
+                LensFailure.recordReachable()   // Lens answered: the session is healthy again
                 report("lens", false)
                 return lens
             }
@@ -391,6 +450,13 @@ internal class RoutingOcrEngine : OcrEngine {
 
     override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult =
         route(bitmap, script) { it.recognizeRegion(bitmap, script) }
+
+    /**
+     * Local-only fast read, never routed: used as a pre-filter so a silent panel costs no network round trip.
+     * The result is only ever used to decide "definitely no text"; nothing it returns is placed on the page.
+     */
+    fun recognizeLocalFast(bitmap: Bitmap, script: OcrScript): OcrResult =
+        OcrGate.run { mlKit.recognizeFast(bitmap, script) }
 
     /** Never frees an engine while it is reading: the release runs on its own thread, behind OcrGate. */
     override fun close() {

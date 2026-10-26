@@ -713,21 +713,27 @@ internal class WebModeExtractor(
             // Lens is remote/network-bound: visible panels must not wait for the previous panel's
             // Lens response. Warm the engine safely first, then fetch and OCR a small viewport
             // concurrently. All local-model scans remain serial exactly as before.
-            val lensParallel = liveView && req.ahead <= 0 && total >= 1 &&
+            // Lens is a network round trip, so a scan of N panels used to cost N x (fetch + Lens) one after the
+            // other — over five minutes for a 150-panel chapter. Full scans now overlap their Lens requests too,
+            // bounded by LENS_SLICE_SLOTS so the phone and the endpoint are not flooded.
+            val lensParallel = req.ahead <= 0 && total >= 1 &&
                 Prefs.get(wv.context, "ocrEngine", "mlkit") == "lens"
             if (lensParallel) {
                 (engine as? RoutingOcrEngine)?.let {
                     it.configure(wv.context)
                     it.prepareForConcurrentLens(script.current)
                 }
+                // A new scan starts with a clean slate: a pause carried over from a previous chapter would
+                // otherwise leave Lens closed for no reason.
+                if (!req.visibleOnly) LensFailure.resetSession()
             }
             val pool: ExecutorService? = if (lensParallel || (total > 1 && !req.visibleOnly)) {
-                val threads = if (lensParallel) minOf(3, total) else FETCH_THREADS
+                val threads = if (lensParallel) minOf(SCAN_FETCH_THREADS, total) else FETCH_THREADS
                 Executors.newFixedThreadPool(threads) { r -> Thread(r, "ns-webmode-fetch") }
             } else null
             fetchPool = pool
             val ocrPool: ExecutorService? = if (lensParallel) {
-                Executors.newFixedThreadPool(minOf(3, total)) { r -> Thread(r, "ns-webmode-lens-ocr") }
+                Executors.newFixedThreadPool(minOf(SCAN_LENS_THREADS, total)) { r -> Thread(r, "ns-webmode-lens-ocr") }
             } else null
             lensOcrPool = ocrPool
             val futures = arrayOfNulls<java.util.concurrent.Future<ByteArray?>>(total)
@@ -835,14 +841,20 @@ internal class WebModeExtractor(
                 diag.downloaded++
                 panelFetchStartedAt[i] = tFetch
                 if (lensParallel) {
-                    // Lens is a remote OCR request; submit each visible panel now and collect in source
-                    // order below. Up to three requests overlap, so their network time is shared rather
-                    // than added serially. The downstream chapter/chatbot batch remains unchanged.
+                    // Lens is a remote OCR request; submit each panel now and collect in source order below.
+                    // Requests overlap (bounded by LENS_SLICE_SLOTS inside the engine), so a full chapter's
+                    // network time is shared instead of added up. The downstream chat batch is unchanged.
                     progress("Google Lens OCR ${i + 1}/$total", 10 + i * 89 / total)
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
-                            LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
+                            // Local pre-filter: ML Kit on the same bytes first. A silent panel (art only) then
+                            // costs no network round trip at all, which is most of the scan's wasted time.
+                            if (!req.forceFreshOcr && req.forceOcrSrc.isNullOrBlank() && scanPrefilterSaysEmpty(bytes, panelScript)) {
+                                LensPanelOcrAttempt(PanelOcr("", emptyList()), null)
+                            } else {
+                                LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
+                            }
                         } catch (e: OcrUnavailableException) {
                             LensPanelOcrAttempt(null, e)
                         } catch (e: DecodeException) {
@@ -909,8 +921,11 @@ internal class WebModeExtractor(
                     }
                     // The Lens request itself has a 6.5 s deadline. Bound the caller too:
                     // a stuck worker/engine setup must not inherit the chapter's 12-minute timeout.
+                    // A full scan has many panels queued behind the slot semaphore, so it waits longer per
+                    // panel than a 1-3 panel realtime viewport; the chapter deadline is still enforced above.
+                    val waitMs = if (liveView) SCREEN_LENS_DEADLINE_MS else SCAN_LENS_DEADLINE_MS
                     val attempt = try {
-                        future.get(SCREEN_LENS_DEADLINE_MS, TimeUnit.MILLISECONDS)
+                        future.get(waitMs, TimeUnit.MILLISECONDS)
                     } catch (e: Exception) {
                         future.cancel(true)
                         LensPanelOcrAttempt(null, e)
@@ -1889,6 +1904,37 @@ internal class WebModeExtractor(
         }
 
         // ---- decode + OCR. Returns null for images too small to be a panel; no bubbles for a panel without text.
+        /**
+         * Cheap local gate for a full scan: ML Kit in fast mode on the panel's own pixels.
+         *
+         * Returns true only when a bounded decode succeeded and found no text at all. Anything uncertain
+         * (decode failure, exception, too few pixels) returns false so the panel still goes to Lens — the gate
+         * must never lose text, only skip panels that are certainly empty.
+         */
+        private fun scanPrefilterSaysEmpty(bytes: ByteArray, st: ScriptState): Boolean {
+            if (!Prefs.bool(wv.context, "scanLocalPrefilter", true)) return false
+            var bmp: Bitmap? = null
+            return try {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val w = bounds.outWidth; val h = bounds.outHeight
+                if (w < MIN_W || h < MIN_H) return false
+                // Small on purpose: this only answers "is there any ink-shaped text?", never the final read.
+                val sample = when { w > 1200 -> 4; w > 600 -> 2; else -> 1 }
+                bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+                    BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 })
+                    ?: return false
+                val r = (engine as? RoutingOcrEngine)?.recognizeLocalFast(bmp, st.current) ?: return false
+                val empty = r.blocks.none { it.text.count { c -> c.isLetterOrDigit() } >= 2 }
+                if (empty) OcrDiag.log("PREFILTER", "skip Lens: ML Kit found no text on this panel")
+                empty
+            } catch (_: Throwable) {
+                false
+            } finally {
+                try { bmp?.recycle() } catch (_: Throwable) {}
+            }
+        }
+
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
@@ -2656,6 +2702,15 @@ internal class WebModeExtractor(
         private const val LENS_IMAGE_FETCH_WAIT_MS = 900L
         private const val VISIBLE_FETCH_WAIT_MS = 7_000L
         private const val SCREEN_LENS_DEADLINE_MS = 12_000L
+        /**
+         * Full-chapter scans queue many panels behind the Lens slot semaphore, so one panel can legitimately
+         * wait for several requests ahead of it. Bounded well under the 12-minute chapter cap.
+         */
+        private const val SCAN_LENS_DEADLINE_MS = 45_000L
+        /** Panels fetched concurrently during a full scan (network-bound, cheap). */
+        private const val SCAN_FETCH_THREADS = 6
+        /** Lens requests in flight during a full scan; the engine's own slot semaphore bounds the real work. */
+        private const val SCAN_LENS_THREADS = 5
         // At most this many Lens requests of tall-panel slices in flight at once (all panels together).
         private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(4)
         private val DETECT_POOL: java.util.concurrent.ExecutorService =
