@@ -151,7 +151,7 @@ internal class ManualExtractPipeline(
      * [WmBubble] per group, in reading order. Each bubble keeps its own cover box, write rectangle, colours and font.
      */
     private fun buildBubbles(bmp: Bitmap, blocks: List<com.ashraf.novelstudio.OcrBlock>, src: String): List<WmBubble> {
-        val live = blocks.filter { it.text.isNotBlank() }
+        val live = blocks.filter { it.text.isNotBlank() && !com.ashraf.novelstudio.UiChromeFilter.isChrome(it.text) }
         if (live.isEmpty()) return emptyList()
         val allRects = live.map { com.ashraf.novelstudio.WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
         val groups = com.ashraf.novelstudio.BubbleGrouping.groups(live, live.indices.toList()) { a, b ->
