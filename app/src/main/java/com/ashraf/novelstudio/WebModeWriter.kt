@@ -387,6 +387,19 @@ internal object WebModeWriter {
       var boxW=b.clientWidth,boxH=b.clientHeight;
       if(boxW<8||boxH<8)return boxH;
       var availW=Math.max(8,boxW*0.88),availH=Math.max(8,boxH*0.86),hasTb=false,cW=boxW,cH=boxH;
+      var maskLock=b.getAttribute('data-mf')==='1';
+      function fitInsideMask(startPx){
+        t.style.overflowWrap='break-word';t.style.wordBreak='break-word';
+        var px=Math.max(1.5,Number(startPx)||1.5);
+        for(var mi=0;mi<70;mi++){
+          t.style.fontSize=px+'px';
+          if(fits())break;
+          if(px<=1.5)break;
+          px=Math.max(1.5,px*0.9);
+        }
+        t.style.fontSize=px+'px';
+        t.style.overflow='hidden';
+      }
       var tbs=b.getAttribute('data-tb');
       if(tbs){
         var q=tbs.split(','),pl=q[0]*boxW,pt=q[1]*boxH,pr=q[2]*boxW,pb=q[3]*boxH;
@@ -406,7 +419,7 @@ internal object WebModeWriter {
       var cap=Number(maxPx);if(!isFinite(cap)||cap<2)cap=4;
       var lo=0.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
       // A readable floor: below it the box grows (sideways first, then taller) instead of the font shrinking further.
-      var floorPx=Math.max(6,Math.min(cap*0.62,hi));
+      var floorPx=maskLock?Math.max(3,Math.min(cap*0.5,hi)):Math.max(6,Math.min(cap*0.62,hi));
       function fits(){
         var r=t.getBoundingClientRect();
         return r.height<=availH+0.5&&t.scrollHeight<=availH+1&&
@@ -417,6 +430,7 @@ internal object WebModeWriter {
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
       }
       if(best<floorPx){
+        if(maskLock){fitInsideMask(best);return boxH;}
         // Even the smallest readable size does not fit: take the free space at the sides.
         // Font size AND the full text length are kept; the box simply becomes wider (bounded by the picture).
         // Prefer ~85% of the original size and widen only as far as that needs; fall back to the floor when even
@@ -464,6 +478,9 @@ internal object WebModeWriter {
       }
       t.style.overflow='visible';
       if(fits())return boxH;
+      // A mask-derived safe rectangle is the hard boundary. Shrink/wrap inside it rather than requesting
+      // a larger box whose new dimensions would push translated text outside the detected balloon.
+      if(maskLock){fitInsideMask(parseFloat(t.style.fontSize)||best);return boxH;}
       // A single long word or very long translation may need more room even at minimum size.
       // Shrink further (words stay whole); if height still does not fit, expand the box and
       // let collision resolution move it sideways on the next frame. The text itself is never cut.
@@ -655,8 +672,15 @@ internal object WebModeWriter {
         var bh=R.y1-R.y0,bw=R.x1-R.x0;
         if(!R.rot&&(th>bh+1.5||tw>bw+1.5)){
           overflow++;
-          var ratio=Math.min(1.8,(th/0.86+4)/Math.max(1,R.oh));
-          if(th>bh+1.5&&ratio>(Number(R.b.__nsReqHRatio)||0)+0.005){R.b.__nsReqHRatio=ratio;need=true;}
+          if(R.b.getAttribute('data-mf')==='1'){
+            // If browser metrics differ slightly after shaping, reduce font in place. Never resize a model-mask box.
+            var lockedFs=parseFloat(t.style.fontSize)||6;
+            var lockedScale=Math.min(0.92,(bw-2)/Math.max(1,tw),(bh-2)/Math.max(1,th));
+            if(lockedFs>2.5&&lockedScale<0.995)t.style.fontSize=Math.max(2.5,lockedFs*lockedScale*0.96)+'px';
+          }else{
+            var ratio=Math.min(1.8,(th/0.86+4)/Math.max(1,R.oh));
+            if(th>bh+1.5&&ratio>(Number(R.b.__nsReqHRatio)||0)+0.005){R.b.__nsReqHRatio=ratio;need=true;}
+          }
         }
         // the real ink area of the lines (the text block itself can be wider than its last line)
         var ink=tr;try{var rg=document.createRange();rg.selectNodeContents(t);var ib=rg.getBoundingClientRect();if(ib&&ib.width>0&&ib.height>0)ink=ib;}catch(e){}
