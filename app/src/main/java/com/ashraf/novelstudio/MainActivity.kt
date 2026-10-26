@@ -231,7 +231,10 @@ class MainActivity : Activity() {
         requestForceOcrArea(src, x, y, rw, rh)
     }
 
-    // ---- Manual extract (manualLite build): thin hook into ManualExtract/ ------------------------------------
+    // ---- Manual extract: active while Auto Real-time OCR is off (menu ⚡ row) -------------------------------
+    // Turning "Auto Real-time OCR" off does not disable real-time mode; it switches one-tap crop extracts on.
+    private fun manualExtractOn(): Boolean = !Prefs.bool(this, "rtAutoOcrEnabled", true)
+
     private fun manualExtractScript(): OcrScript = when (Prefs.get(this, "ocrLang", "auto")) {
         "ko" -> OcrScript.KOREAN
         "ja" -> OcrScript.JAPANESE
@@ -242,7 +245,6 @@ class MainActivity : Activity() {
 
     /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
     private fun installManualExtractHost() {
-        if (!com.ashraf.novelstudio.BuildConfig.MANUAL_LITE) return
         com.ashraf.novelstudio.manualextract.ManualExtractHost.install(
             capture = { src, x, y, w, h ->
                 val bytes = ImageTap.get(WebModeLogic.normalizeUrl(src)) ?: return@install null
@@ -279,8 +281,8 @@ class MainActivity : Activity() {
         src: String, x: Float, y: Float, w: Float, h: Float,
         fromReOcr: Boolean = false, expanded: Boolean = false, onFinished: (() -> Unit)? = null
     ) {
-        // manualLite build: one tap = one lean crop-only run (no realtime pipeline). See ManualExtract/.
-        if (com.ashraf.novelstudio.BuildConfig.MANUAL_LITE) {
+        // Manual mode (Auto Real-time OCR off): one tap = one lean crop-only run, no realtime pipeline.
+        if (manualExtractOn()) {
             com.ashraf.novelstudio.manualextract.ManualExtractHost.start(this, src, x, y, w, h, manualExtractScript())
             return
         }
@@ -5159,7 +5161,7 @@ return t.length>=40?'TXT:'+t:'';
     private fun setRealtimeAutoOcrEnabled(enabled: Boolean) {
         Prefs.putBool(this, "rtAutoOcrEnabled", enabled)
         if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) {
-            toast("Auto Real-time OCR " + (if (enabled) "ON" else "OFF") + " — applies when Real-time mode is enabled")
+            toast("Auto Real-time OCR " + (if (enabled) "ON" else "OFF (manual)") + " — applies when Real-time mode is enabled")
             return
         }
         if (enabled) {
@@ -5188,7 +5190,7 @@ return t.length>=40?'TXT:'+t:'';
             rtAheadHoldFlushRunnable?.let { handler.removeCallbacks(it) }
             rtAheadHoldFlushRunnable = null
             rtAheadHoldSince = 0L
-            toast("⚡ Auto Real-time OCR OFF — tap Extract to read and translate visible panels")
+            toast("⚡ Auto Real-time OCR OFF — manual mode: tap any bubble to read and translate it")
         }
         updateProgressUi()
     }
@@ -5456,7 +5458,8 @@ return t.length>=40?'TXT:'+t:'';
         }
 
     private fun menuRealtimeAutoOcrLabel(): String =
-        (if (Prefs.bool(this, "rtAutoOcrEnabled", true)) "✅" else "⬜") + " ⚡ Auto Real-time OCR"
+        if (Prefs.bool(this, "rtAutoOcrEnabled", true)) "✅ ⚡ Auto Real-time OCR"
+        else "⬜ ⚡ Auto Real-time OCR — off (manual tap mode)"
 
     private fun menuOcrRescanLabel(): String =
         (if (Prefs.bool(this, "ocrRescan", true)) "✅" else "⬜") + " 🩹 OCR rescan (find missed lines)"
