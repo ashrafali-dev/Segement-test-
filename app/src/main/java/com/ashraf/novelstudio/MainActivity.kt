@@ -2352,6 +2352,7 @@ return t.length>=40?'TXT:'+t:'';
             !WebModeInpainter.isReady(this) -> "not installed"
             !Prefs.bool(this, "wmAiInpaint", true) -> "off"
             Prefs.get(this, "wmAiInpaintCrashed", "") == "1" -> "OFF (crashed before)"
+            !android.os.Process.is64Bit() && Prefs.get(this, "wmAiForce32", "") != "1" -> "OFF (32-bit phone)"
             WebModeInpainter.tooSlow -> "paused (slow)"
             WebModeInpainter.isLoaded() -> "ON" + (WebModeInpainter.lastNote.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
             else -> "loading"

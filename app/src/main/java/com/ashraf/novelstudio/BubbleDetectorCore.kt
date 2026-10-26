@@ -198,9 +198,23 @@ internal object BubbleDetectorCore {
     fun inDifferentBubbles(dets: List<Det>?, ax: Float, ay: Float, bx: Float, by: Float): Boolean {
         if (dets == null) return false
         // Use the real "bubble" (outline) boxes only: text_bubble boxes can legitimately be split per text column.
-        val a = containerAt(dets, ax, ay) ?: return false
-        val b = containerAt(dets, bx, by) ?: return false
-        return a !== b
+        val a = containerAt(dets, ax, ay)
+        val b = containerAt(dets, bx, by)
+        if (a != null && b != null) return a !== b
+        if (a != null || b != null) return false
+        // Neither piece is inside a speech bubble: free lettering (captions, labels, notes on artwork). If each one
+        // sits in a text_free box and no single box holds both, they are separate texts.
+        var inA = false
+        var inB = false
+        for (d in dets) {
+            if (d.label != CLS_TEXT_FREE) continue
+            val ca = d.contains(ax, ay)
+            val cb = d.contains(bx, by)
+            if (ca && cb) return false
+            if (ca) inA = true
+            if (cb) inB = true
+        }
+        return inA && inB
     }
 
     private fun containerAt(dets: List<Det>, x: Float, y: Float): Det? {

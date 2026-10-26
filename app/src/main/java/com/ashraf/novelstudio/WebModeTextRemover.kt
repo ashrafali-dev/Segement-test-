@@ -341,7 +341,7 @@ internal object WebModeTextRemover {
                 }
                 // Free lettering (sound effects on artwork) is only erased when the AI inpainter really did it: the
                 // onion-peel fill smears artwork, and an untouched original under the overlay is the safer result.
-                if (bubble.free && aiFill == null) continue
+                if (bubble.free && aiFill == null && !smoothSurround(region, mask, rw, rh)) continue
                 // Artwork without AI: onion-peel (Telea-style) fill, outside in, layer by layer.
                 val tele = if (soft && aiFill == null)
                     onionFill(region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg) else null
@@ -449,6 +449,50 @@ internal object WebModeTextRemover {
      * bottom image fractions) that differs from it. Returns the number of pixels changed. If more than ~45 % of the
      * interior is dark/coloured it is not an empty bubble with lettering but artwork: nothing is touched.
      */
+    /**
+     * True when the pixels just around the masked lettering are plain (flat colour or a soft gradient). Free lettering
+     * on such a background can be erased with the onion fill without smearing any artwork; before, free lettering was
+     * erased only by the AI painter, so on a phone without it the old Korean stayed under the translation.
+     */
+    private fun smoothSurround(region: IntArray, mask: ByteArray, rw: Int, rh: Int): Boolean {
+        var n = 0
+        var sum = 0L
+        var sum2 = 0L
+        var y = 0
+        while (y < rh) {
+            var x = 0
+            while (x < rw) {
+                if (mask[y * rw + x].toInt() == 0) {
+                    var near = false
+                    var dy = -6
+                    while (dy <= 6 && !near) {
+                        val ny = y + dy
+                        if (ny in 0 until rh) {
+                            var dx = -6
+                            while (dx <= 6) {
+                                val nx = x + dx
+                                if (nx in 0 until rw && mask[ny * rw + nx].toInt() != 0) { near = true; break }
+                                dx += 3
+                            }
+                        }
+                        dy += 3
+                    }
+                    if (near) {
+                        val p = region[y * rw + x]
+                        val l = (299 * red(p) + 587 * green(p) + 114 * blue(p)) / 1000
+                        n++; sum += l; sum2 += l.toLong() * l
+                    }
+                }
+                x += 2
+            }
+            y += 2
+        }
+        if (n < 20) return false
+        val mean = sum.toDouble() / n
+        val variance = sum2.toDouble() / n - mean * mean
+        return variance <= 20.0 * 20.0
+    }
+
     private fun wipeInterior(bitmap: Bitmap, cv: List<Float>, width: Int, height: Int, bg: Int): Int {
         val rects = ArrayList<IntArray>()
         var q = 0

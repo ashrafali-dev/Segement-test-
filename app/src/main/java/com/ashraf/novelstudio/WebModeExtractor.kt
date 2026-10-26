@@ -2043,6 +2043,9 @@ internal class WebModeExtractor(
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
                 "lines=${blocks.size} last=${BubbleDetector.lastInfo.ifBlank { "-" }} parallel=${earlyDet != null}")
+            OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
+                "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
+            })
             fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
                 dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 

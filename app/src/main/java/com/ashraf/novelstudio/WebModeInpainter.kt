@@ -61,6 +61,12 @@ internal object WebModeInpainter {
             OcrDiag.log("AI_PAINT", "previous AI painter run crashed the app; painter switched off until the model is re-downloaded")
         }
         if (Prefs.get(app, "wmAiInpaintCrashed", "") == "1") { lastNote = "off (crashed before)"; return false }
+        // LaMa needs far more memory than a 32-bit process can address. The latest report shows it killing the app on a
+        // 3.5 GB phone with 520 MB free. Set wmAiForce32=1 to try anyway.
+        if (!android.os.Process.is64Bit() && Prefs.get(app, "wmAiForce32", "") != "1") {
+            lastNote = "off (32-bit phone)"
+            return false
+        }
         val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return true
         val mi = android.app.ActivityManager.MemoryInfo()
         am.getMemoryInfo(mi)

@@ -340,6 +340,14 @@ internal object OcrPost {
         val bot = if (top === a) b else a
         val gap = (bot.cy - bot.h / 2) - (top.cy + top.h / 2)
         if (gap > f * 1.7f || gap < -f * 0.6f) return false
+        // A big title above a small side note is NOT one sentence. (The report: the title and two side notes of a
+        // recipe panel became ONE paragraph - one marker - and the Bengali was written at the title's place.)
+        // Very different sizes are only one bubble when they are tightly stacked and share the same middle,
+        // like an emphasised word inside a speech bubble.
+        if (ratio < 0.62f || ratio > 1.6f) {
+            if (gap > f * 0.8f) return false
+            if (Math.abs(a.cx - b.cx) > Math.max(a.w, b.w) * 0.2f) return false
+        }
         val ox = Math.min(a.cx + a.w / 2, b.cx + b.w / 2) - Math.max(a.cx - a.w / 2, b.cx - b.w / 2)
         val narrow = Math.min(a.w, b.w)
         if (narrow <= 0f || ox < narrow * 0.3f) return false
