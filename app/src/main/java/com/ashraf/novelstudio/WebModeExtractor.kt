@@ -2759,6 +2759,10 @@ internal class WebModeExtractor(
         private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(5)
         private val DETECT_POOL: java.util.concurrent.ExecutorService =
             java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-detect").apply { isDaemon = true } }
+        // The detector runs for seconds on some phones. Do not queue a bitmap snapshot for every scroll tick:
+        // only one detector snapshot may be queued/running, otherwise the executor's unbounded queue can retain
+        // multiple full-size bitmaps while the previous 1024x1024 inference is still using memory.
+        private val detectorInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
         /** Short realtime budget for the detector: it is geometry, not the answer, so it may arrive late. */
         private const val DETECT_FAST_WAIT_MS = 450L
@@ -2806,10 +2810,15 @@ internal class WebModeExtractor(
             source: Bitmap,
             cacheKey: String?
         ): java.util.concurrent.Future<List<BubbleDetectorCore.Det>?>? {
+            // Executor is single-threaded and otherwise has an unbounded queue. Skipping a new scan while one
+            // is queued/running is safer than retaining another full-page bitmap on a memory-limited phone.
+            if (!detectorInFlight.compareAndSet(false, true)) return null
             val snapshot = try {
-                if (source.isRecycled) return null
-                source.copy(Bitmap.Config.ARGB_8888, false) ?: return null
+                if (source.isRecycled) throw IllegalStateException("source already recycled")
+                source.copy(Bitmap.Config.ARGB_8888, false)
+                    ?: throw IllegalStateException("could not copy detector source")
             } catch (_: Throwable) {
+                detectorInFlight.set(false)
                 return null
             }
             return try {
@@ -2820,10 +2829,12 @@ internal class WebModeExtractor(
                         dets
                     } finally {
                         try { if (!snapshot.isRecycled) snapshot.recycle() } catch (_: Throwable) {}
+                        detectorInFlight.set(false)
                     }
                 })
             } catch (_: Throwable) {
                 try { if (!snapshot.isRecycled) snapshot.recycle() } catch (_: Throwable) {}
+                detectorInFlight.set(false)
                 null
             }
         }
