@@ -1274,11 +1274,12 @@ internal object WebModeWriter {
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
                 .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
                     WebModeTextRemovalCache.urlFor(b.src).orEmpty() else "")
-                // Canvas panels (no image URL) are erased in place by the screen-capture path, so they have no
-                // cleaned image to swap in. `er` tells the overlay to drop the cover box without one; before,
-                // `cl` was the only signal, so every canvas bubble kept an opaque box over the artwork.
-                .put("er", WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)) &&
-                    WebModeTextRemovalCache.urlFor(b.src) == null))
+                // A canvas panel has no image URL, so `er` is its only way to drop the cover box. It must stay
+                // limited to canvas sources: an ordinary panel whose cleaned image is not cached (evicted, or a
+                // different job's erased marks) would otherwise lose its cover box with the original lettering
+                // still on the page — the translation then sits on top of the untranslated text.
+                .put("er", b.src.startsWith("ns-canvas:", true) &&
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()

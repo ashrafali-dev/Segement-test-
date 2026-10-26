@@ -64,8 +64,11 @@ internal object ManualExtractController {
      * Runs on pixels the Activity already captured (the 6-dot frame). The bitmap is owned by this run and is
      * recycled when the pipeline finishes; the caller must not touch it afterwards.
      */
-    fun startExtractWithBitmap(context: Context, bitmap: android.graphics.Bitmap, script: OcrScript) {
-        startExtractInternal(context, "", 0f, 0f, 1f, 1f, script, preset = bitmap)
+    fun startExtractWithBitmap(context: Context, src: String, bitmap: android.graphics.Bitmap, script: OcrScript) {
+        // `src` identifies the on-screen image the overlay must anchor to. It used to be blank, so the
+        // writer could not find any <img> for this bubble and simply hid it: the translation never
+        // appeared at all in the 6-dot frame path.
+        startExtractInternal(context, src, 0f, 0f, 1f, 1f, script, preset = bitmap)
     }
 
     private fun startExtractInternal(
@@ -108,7 +111,7 @@ internal object ManualExtractController {
                     preset?.recycle()
                     return@Thread   // a newer tap owns the screen
                 }
-                val result = if (preset != null) pipeline.runOnBitmap(preset, script) { token != runSeq.get() }
+                val result = if (preset != null) pipeline.runOnBitmap(preset, src, script) { token != runSeq.get() }
                     else pipeline.run(src, x, y, w, h, script) { token != runSeq.get() }
                 // Tell the user why nothing appeared. Silent failure was the whole complaint.
                 if (!result.ok && token == runSeq.get()) notifyFailure(result.reason)

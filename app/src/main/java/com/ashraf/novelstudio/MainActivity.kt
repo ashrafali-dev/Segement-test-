@@ -428,10 +428,39 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Run the manual pipeline on an already-captured bitmap (no second screenshot, no image lookup). */
-    private fun startManualExtractOnBitmap(bmp: android.graphics.Bitmap) {
+    /**
+     * Best-effort image URL for the overlay anchor under a frame: the largest image overlapping it, else the
+     * first one in the document. Returns null when the page has no <img> there at all.
+     */
+    private fun nearbyImageSource(fx0: Float, fy0: Float, fx1: Float, fy1: Float): String? {
+        val js = "(function(a,b,c,d){var vw=window.innerWidth||0,vh=window.innerHeight||0," +
+            "L=a*vw,T=b*vh,R=c*vw,B=d*vh,best='',ba=0,first='',ims=document.images;" +
+            "for(var i=0;i<ims.length;i++){var im=ims[i],s=im.currentSrc||im.src||'';if(!s)continue;" +
+            "if(!first)first=s;var r=im.getBoundingClientRect();" +
+            "var il=Math.max(L,r.left),it=Math.max(T,r.top),ir=Math.min(R,r.right),ib=Math.min(B,r.bottom);" +
+            "if(ir<=il||ib<=it)continue;var ar=(ir-il)*(ib-it);if(ar>ba){ba=ar;best=s;}}" +
+            "return best||first;})($fx0,$fy0,$fx1,$fy1)"
+        var out: String? = null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        handler.post {
+            try {
+                novelWv.evaluateJavascript(js) { raw ->
+                    out = decode(raw).takeIf { it.isNotBlank() }
+                    latch.countDown()
+                }
+            } catch (_: Throwable) { latch.countDown() }
+        }
+        try { latch.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
+        return out
+    }
+
+    /**
+     * Run the manual pipeline on an already-captured bitmap (no second screenshot, no image lookup).
+     * [src] is the image the ovelay anchors to; without it the writer hides the bubble entirely.
+     */
+    private fun startManualExtractOnBitmap(src: String, bmp: android.graphics.Bitmap) {
         OcrDiag.setMode("manual")
-        com.ashraf.novelstudio.manualextract.ManualExtractHost.startOnBitmap(this, bmp, manualExtractScript())
+        com.ashraf.novelstudio.manualextract.ManualExtractHost.startOnBitmap(this, src, bmp, manualExtractScript())
     }
 
     /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
@@ -832,7 +861,15 @@ class MainActivity : Activity() {
                 if (manual) {
                     val hit = captureManualRegionFromView(fx0, fy0, fx1, fy1)
                     if (hit == null) { finish("⚠️ Nothing under the frame — try again"); return@evaluateJavascript }
-                    startManualExtractOnBitmap(hit)
+                    // Anchor for the overlay. The frame may cover no <img> at all (background artwork, CSS
+                    // layers), so fall back to a canvas-style identity describing the whole WebView, which the
+                    // writer already knows how to position against.
+                    val anchor = nearbyImageSource(fx0, fy0, fx1, fy1) ?: run {
+                        val vw = novelWv.width.coerceAtLeast(1)
+                        val vh = novelWv.height.coerceAtLeast(1)
+                        "ns-canvas:0,0,${vw}x${vh}"
+                    }
+                    startManualExtractOnBitmap(anchor, hit)
                     finish(null)
                     return@evaluateJavascript
                 }

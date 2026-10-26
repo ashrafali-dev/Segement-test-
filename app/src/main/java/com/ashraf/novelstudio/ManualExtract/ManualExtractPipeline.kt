@@ -52,13 +52,13 @@ internal class ManualExtractPipeline(
      * Same pipeline, on pixels the caller already captured (the 6-dot frame drawn by the user).
      * Takes ownership of [bitmap] and recycles it. There is no tap point: the frame IS the selection.
      */
-    fun runOnBitmap(bitmap: Bitmap, script: OcrScript, cancelled: () -> Boolean = { false }): Result {
+    fun runOnBitmap(bitmap: Bitmap, src: String, script: OcrScript, cancelled: () -> Boolean = { false }): Result {
         val m = ManualExtractMetrics()
         val tStart = SystemClock.elapsedRealtime()
         if (cancelled()) { bitmap.recycle(); return fail(m, "cancelled") }
         m.cropW = bitmap.width; m.cropH = bitmap.height
         m.mark("capture")
-        return ocrAndPlace(bitmap, "", 0f, 0f, 1f, 1f, false, m, tStart, script, cancelled)
+        return ocrAndPlace(bitmap, src, 0f, 0f, 1f, 1f, false, m, tStart, script, cancelled)
     }
 
     private fun ocrAndPlace(

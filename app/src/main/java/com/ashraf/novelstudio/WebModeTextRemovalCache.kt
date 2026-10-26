@@ -109,6 +109,8 @@ internal object WebModeTextRemovalCache {
     fun urlFor(sourceUrl: String): String? {
         // A canvas panel is served from the in-memory table, not the on-disk cache.
         canvasUrlFor(sourceUrl)?.let { return it }
+        // has() verifies the file is still there, so the overlay never receives a URL whose bytes are gone
+        // (that left a broken <img>: no cleaned picture AND no cover box, original lettering showing through).
         if (!has(sourceUrl)) return null
         val raw = sourceUrl.substringBefore('#')
         if (Uri.parse(raw).getQueryParameter(MARKER) == "1") return raw
