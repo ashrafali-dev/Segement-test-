@@ -247,14 +247,32 @@ class MainActivity : Activity() {
     private fun installManualExtractHost() {
         com.ashraf.novelstudio.manualextract.ManualExtractHost.install(
             capture = { src, x, y, w, h ->
-                val bytes = ImageTap.get(WebModeLogic.normalizeUrl(src)) ?: return@install null
-                val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@install null
+                // Every early return here used to be silent, which made a failed manual tap look like a dead menu.
+                val key = WebModeLogic.normalizeUrl(src)
+                if (key.isBlank()) {
+                    OcrDiag.log("MANUAL", "capture: blank image url (src=${src.take(80)})")
+                    return@install null
+                }
+                val bytes = ImageTap.get(key)
+                if (bytes == null) {
+                    OcrDiag.log("MANUAL", "capture: no cached bytes for ${key.take(110)} — image was never intercepted (lazy/JS-loaded or blocked)")
+                    return@install null
+                }
+                val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (full == null) {
+                    OcrDiag.log("MANUAL", "capture: decode failed ${bytes.size}B for ${key.take(90)}")
+                    return@install null
+                }
                 try {
                     val l = (x.coerceIn(0f, 1f) * full.width).toInt().coerceIn(0, full.width - 1)
                     val t = (y.coerceIn(0f, 1f) * full.height).toInt().coerceIn(0, full.height - 1)
                     val r = ((x + w).coerceIn(0f, 1f) * full.width).toInt().coerceIn(l + 1, full.width)
                     val b = ((y + h).coerceIn(0f, 1f) * full.height).toInt().coerceIn(t + 1, full.height)
+                    OcrDiag.log("MANUAL", "capture ok image=${full.width}x${full.height} crop=${r - l}x${b - t}")
                     android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t)
+                } catch (e: Throwable) {
+                    OcrDiag.log("MANUAL", "capture: createBitmap failed ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+                    null
                 } finally { full.recycle() }
             },
             translateAndPlace = { bubble, text, _script, onDone ->

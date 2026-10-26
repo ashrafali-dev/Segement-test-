@@ -1,6 +1,7 @@
 package com.ashraf.novelstudio.manualextract
 
 import android.util.Log
+import com.ashraf.novelstudio.OcrDiag
 
 /** Per-step timings for one manual-extract run, emitted under [ManualExtractConfig.TAG]. */
 internal class ManualExtractMetrics {
@@ -27,6 +28,9 @@ internal class ManualExtractMetrics {
         var prev = start
         for ((k, v) in marks) { sb.append(' ').append(k).append('=').append(v - prev); prev = v }
         if (note.isNotBlank()) sb.append(" note=").append(note)
-        Log.i(ManualExtractConfig.TAG, sb.toString())
+        val line = sb.toString()
+        Log.i(ManualExtractConfig.TAG, line)
+        // Also goes into the in-app OCR report: logcat is not reachable on the user's phone.
+        try { OcrDiag.log("MANUAL", line) } catch (_: Throwable) {}
     }
 }

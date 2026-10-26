@@ -66,7 +66,10 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
 
     override fun recognize(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script)
     override fun recognizeFast(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script, fastMode = true)
-    override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script)
+    // A region crop is the user's own selection (manual extract / area select): never second-guess it with the
+    // realtime non-bubble heuristic, which threw away narrow or small Japanese bubbles before they were sent.
+    override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult =
+        read(bitmap, script, skipBubblePrefilter = true)
 
     /** Force a genuine Lens request for manual Extract / Rescan instead of replaying cached OCR. */
     fun recognizeFresh(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult =
@@ -84,7 +87,8 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
     // ---------------------------------------------------------------------------------------------
 
     private fun read(
-        bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false, bypassCache: Boolean = false
+        bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false, bypassCache: Boolean = false,
+        skipBubblePrefilter: Boolean = false
     ): OcrResult {
         if (bitmap.isRecycled) throw OcrUnavailableException("Google Lens: bitmap was recycled")
         if (bitmap.width < MIN_SIDE || bitmap.height < MIN_SIDE) return OcrResult(emptyList())
@@ -92,7 +96,8 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         // Skip crops that are never dialogue: tiny UI/logo tiles and near-square boxes. Speech bubbles are
         // wide, tall, or at least sizable; the logs showed 220x202, 96x54, 111x63 … being uploaded 8 times
         // each and always coming back empty. This runs before prepare()/upload, so it is free.
-        if (looksLikeNonBubble(bitmap.width, bitmap.height)) {
+        // A user-selected region (recognizeRegion) skips this: narrow Japanese bubbles are legitimate.
+        if (!skipBubblePrefilter && looksLikeNonBubble(bitmap.width, bitmap.height)) {
             Log.i(TAG, "PRE_FILTER skip ${bitmap.width}x${bitmap.height} (not a text bubble)")
             return OcrResult(emptyList())
         }

@@ -2,6 +2,8 @@ package com.ashraf.novelstudio.manualextract
 
 import android.content.Context
 import android.os.SystemClock
+import android.util.Log
+import com.ashraf.novelstudio.OcrDiag
 import com.ashraf.novelstudio.OcrScript
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -36,10 +38,17 @@ internal object ManualExtractController {
      * flight it is cancelled first.
      */
     fun startExtract(context: Context, src: String, x: Float, y: Float, w: Float, h: Float, script: OcrScript) {
-        if (!ManualExtractConfig.ENABLED) return
-        val attached = host ?: return
+        if (!ManualExtractConfig.ENABLED) {
+            OcrDiag.log("MANUAL", "skip: mode disabled")
+            return
+        }
+        val attached = host ?: run {
+            OcrDiag.log("MANUAL", "skip: host not attached (installManualExtractHost never ran)")
+            return
+        }
         cancel()
 
+        OcrDiag.log("MANUAL", "start src=${src.take(90)} rect=${"%.3f".format(x)},${"%.3f".format(y)} ${"%.3f".format(w)}x${"%.3f".format(h)} script=${script.name}")
         val token = runSeq.incrementAndGet()
         val o = ocr ?: ManualExtractOcr(context.applicationContext).also { ocr = it }
         val pipeline = ManualExtractPipeline(o, attached)
@@ -48,8 +57,10 @@ internal object ManualExtractController {
             try {
                 if (token != runSeq.get()) return@Thread   // a newer tap owns the screen
                 pipeline.run(src, x, y, w, h, script) { token != runSeq.get() }
-            } catch (_: Throwable) {
-                // never let one extract crash the reader
+            } catch (e: Throwable) {
+                // never let one extract crash the reader, but never swallow the reason either
+                OcrDiag.log("MANUAL", "crashed ${e.javaClass.simpleName}: ${e.message?.take(140)}")
+                Log.w(ManualExtractConfig.TAG, "manual extract crashed", e)
             } finally {
                 if (token == runSeq.get()) state = State.IDLE
             }
