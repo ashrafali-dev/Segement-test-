@@ -2226,7 +2226,16 @@ internal class WebModeExtractor(
                     // all came from the pixel guess. It is now run, but with a short budget: if the model has not
                     // answered yet the pixel path is used for THIS pass and the result is cached for the next
                     // one, so a visible panel is never stalled by it.
-                    val det = if (fastMode) detectWithBudget(wv.context, bmp) else BubbleDetector.detect(wv.context, bmp)
+                    val det = if (fastMode) {
+                        // When Text Remover is OFF, the balloon mask is the selected erasing geometry.
+                        // Let the OCR worker wait for the model (not the UI thread); otherwise a 450 ms
+                        // timeout would return OCR first and permanently skip mask cleaning for this pass.
+                        val maskOnlyMode = !Prefs.bool(wv.context, "wmTextRemoval2", true)
+                        detectWithBudget(
+                            wv.context, bmp,
+                            waitMs = if (maskOnlyMode) DETECT_MASK_ONLY_WAIT_MS else DETECT_FAST_WAIT_MS
+                        )
+                    } else BubbleDetector.detect(wv.context, bmp)
                     det
                 } else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
@@ -2860,6 +2869,9 @@ internal class WebModeExtractor(
 
         /** Short realtime budget for the detector: it is geometry, not the answer, so it may arrive late. */
         private const val DETECT_FAST_WAIT_MS = 450L
+        // A detector run can take ~3 s on a mid-range phone. This wait is only on the OCR worker and is
+        // used solely for explicit mask-only mode, where a late result would otherwise mean no mask cleaning.
+        private const val DETECT_MASK_ONLY_WAIT_MS = 4_500L
 
         /** Detector results by image hash, so a panel is analysed once and the next pass is free. */
         private val detectCache = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>?>(16, 0.75f, true) {
@@ -2878,14 +2890,18 @@ internal class WebModeExtractor(
          * and waits only [DETECT_FAST_WAIT_MS]; on timeout the caller falls back to pixel geometry for this pass
          * and the cached result serves the next one (a visible panel is re-read on every scroll tick).
          */
-        private fun detectWithBudget(ctx: android.content.Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
+        private fun detectWithBudget(
+            ctx: android.content.Context,
+            bmp: Bitmap,
+            waitMs: Long = DETECT_FAST_WAIT_MS
+        ): List<BubbleDetectorCore.Det>? {
             val key = try { md5Of(bmp) } catch (_: Throwable) { return null }
             synchronized(detectCache) { detectCache[key]?.let { return it } }
             // This job may continue after the 450 ms UI budget expires. It owns a bitmap copy and populates the
             // cache when it completes; the source slice can safely be recycled immediately.
             val f = submitDetectorSnapshot(ctx, bmp, key) ?: return null
             return try {
-                val dets = f.get(DETECT_FAST_WAIT_MS, TimeUnit.MILLISECONDS)
+                val dets = f.get(waitMs, TimeUnit.MILLISECONDS)
                 synchronized(detectCache) { detectCache[key] = dets }
                 dets
             } catch (_: java.util.concurrent.TimeoutException) {
