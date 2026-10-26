@@ -38,7 +38,7 @@ class KoharuSegCoreTest {
         row(pred, 3, floatArrayOf(300f, 50f, 400f, 100f), .88f, 3) // onomatopoeia_text
         row(pred, 4, floatArrayOf(52f, 62f, 248f, 298f), .75f, 2) // duplicate balloon
 
-        val found = KoharuSegCore.decode(pred, proto, protoSize, protoSize, size, tile, letterbox)
+        val found = KoharuSegCore.decode(pred, proto, protoSize, protoSize, size, size, tile, letterbox)
 
         assertEquals(3, found.size)
         assertEquals(
@@ -59,6 +59,8 @@ class KoharuSegCoreTest {
         assertTrue(KoharuSegCore.validInputSize(512))
         assertTrue(KoharuSegCore.validInputSize(640))
         assertTrue(KoharuSegCore.validInputSize(768))
+        assertTrue(KoharuSegCore.validInputShape(288, 512))
+        assertFalse(KoharuSegCore.validInputShape(280, 512))
         assertFalse(KoharuSegCore.validInputSize(500))
         assertFalse(KoharuSegCore.validInputSize(2048))
     }
