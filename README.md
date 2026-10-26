@@ -18,7 +18,7 @@
 
 ## ✨ What is this?
 
-An **extension project of Novel Studio** — a non-destructive, on-the-fly **OCR + translation overlay** for webtoons, manga and web novels.
+The **extended (advanced) version of Novel Studio** — a non-destructive, on-the-fly **OCR + translation overlay** for webtoons, manga and web novels.
 
 It does not download chapters. It does not rewrite a site's database. It does not host pirated content.
 It sits *on top* of the page you are already reading and paints your language over the original lettering, in the exact spot the original text sat.
@@ -167,7 +167,7 @@ ExecutorService + Semaphore · LRU caches · bounded memory
 
 ## 🙏 Credits
 
-This project is an **extension of Novel Studio**.
+This project is the **extended (advanced) version of Novel Studio**.
 
 **Developer:** **Ashraf Ali** — from 🇧🇩 **Bangladesh**
 
