@@ -26,10 +26,11 @@ internal class ManualExtractPipeline(
         fun captureCrop(src: String, x: Float, y: Float, w: Float, h: Float): Bitmap?
 
         /**
-         * Translate [text] and place it over [bubble] using the existing overlay (built-in mask). [onDone] is
-         * called on the main thread with the translated text (blank = nothing placed).
+         * Translate [text] and place it over [bubbles] using the existing overlay (built-in mask). [text] holds one
+         * paragraph per bubble, in the same order as [bubbles] (the paragraph order is what the [001] markers number).
+         * [onDone] is called on the main thread with the translated text (blank = nothing placed).
          */
-        fun translateAndPlace(bubble: WmBubble, text: String, script: OcrScript, onDone: (String) -> Unit)
+        fun translateAndPlace(bubbles: List<WmBubble>, text: String, script: OcrScript, onDone: (String) -> Unit)
     }
 
     data class Result(val ok: Boolean, val translated: String, val reason: String)
@@ -111,21 +112,24 @@ internal class ManualExtractPipeline(
             if (outcome.blocks.isEmpty()) return fail(m, "no text")
 
             // 5) translate (cache first) + place using the built-in mask
-            val paragraph = outcome.blocks.inReadingOrder().toParagraph()
+            // ONE BUBBLE PER SPEECH BUBBLE. Before, every OCR block of the crop was fused into a single giant bubble
+            // (union box + one paragraph): a full-screen Extract produced one huge block of huge letters that
+            // covered the whole panel and had no relation to where the original lettering sat.
+            val bubbles = buildBubbles(ocrBmp, outcome.blocks, src)
+            if (bubbles.isEmpty()) return fail(m, "no text")
+            val paragraph = bubbles.joinToString("\n\n") { it.sourceText }
             val cacheKey = ManualExtractCache.key(paragraph, script.name)
             val cached = ManualExtractCache.get(cacheKey)
             m.mark("build")
-
-            val bubble = buildBubble(ocrBmp, outcome.blocks, src)
             if (cancelled()) return fail(m, "cancelled")
             if (cached != null) {
-                host.translateAndPlace(bubble, cached, script) { }
+                host.translateAndPlace(bubbles, cached, script) { }
                 m.mark("place_cached")
                 m.log(true, "cache hit")
                 return Result(true, cached, "ok")
             }
             // Translation is asynchronous on the Activity side; this call starts it and records the step.
-            host.translateAndPlace(bubble, paragraph, script) { translated ->
+            host.translateAndPlace(bubbles, paragraph, script) { translated ->
                 if (translated.isNotBlank()) ManualExtractCache.put(cacheKey, translated)
             }
             m.mark("translate_started")
@@ -141,20 +145,47 @@ internal class ManualExtractPipeline(
         return Result(false, "", reason)
     }
 
-    /** Build one WmBubble for the whole crop using the existing geometry helpers (built-in mask path). */
-    private fun buildBubble(bmp: Bitmap, blocks: List<com.ashraf.novelstudio.OcrBlock>, src: String): WmBubble {
-        val rects = blocks.map { com.ashraf.novelstudio.WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
-        // Cover box = union of all recognised boxes (a crop is usually one bubble).
+    /**
+     * Splits the recognised lines into speech bubbles (same grouping rules as the scanning pipeline: lines under each
+     * other with a similar font are one sentence, an outline between two lines separates them) and builds ONE
+     * [WmBubble] per group, in reading order. Each bubble keeps its own cover box, write rectangle, colours and font.
+     */
+    private fun buildBubbles(bmp: Bitmap, blocks: List<com.ashraf.novelstudio.OcrBlock>, src: String): List<WmBubble> {
+        val live = blocks.filter { it.text.isNotBlank() }
+        if (live.isEmpty()) return emptyList()
+        val allRects = live.map { com.ashraf.novelstudio.WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
+        val groups = com.ashraf.novelstudio.BubbleGrouping.groups(live, live.indices.toList()) { a, b ->
+            try { com.ashraf.novelstudio.OcrPost.outlineBetween(bmp, a, b) } catch (_: Throwable) { false }
+        }
+        val ordered = groups.map { g -> g.sortedWith(compareBy({ live[it].cy }, { live[it].cx })) }
+            .sortedWith(compareBy({ g -> live[g.first()].cy }, { g -> live[g.first()].cx }))
+        val out = ArrayList<WmBubble>(ordered.size)
+        for (g in ordered) {
+            val b = buildBubble(bmp, live, allRects, g, src)
+            if (b != null) out.add(b)
+        }
+        return out
+    }
+
+    private fun buildBubble(
+        bmp: Bitmap, blocks: List<com.ashraf.novelstudio.OcrBlock>, allRects: List<IntArray>,
+        group: List<Int>, src: String
+    ): WmBubble? {
+        val text = com.ashraf.novelstudio.BubbleGrouping.joinLines(group.map { blocks[it].text.replace('\n', ' ') })
+        if (text.isBlank()) return null
+        val rects = group.map { allRects[it] }
         var l = Int.MAX_VALUE; var t = Int.MAX_VALUE; var r = Int.MIN_VALUE; var btm = Int.MIN_VALUE
         for (rc in rects) { l = minOf(l, rc[0]); t = minOf(t, rc[1]); r = maxOf(r, rc[2]); btm = maxOf(btm, rc[3]) }
-        val style = try { com.ashraf.novelstudio.WmBubbleStyle.analyse(bmp, intArrayOf(l, t, r, btm), rects, expand = true) }
+        // Other bubbles' boxes are obstacles for the colour/shape analysis, this bubble's own lines are not.
+        val others = allRects.filterIndexed { i, _ -> i !in group }
+        val style = try { com.ashraf.novelstudio.WmBubbleStyle.analyse(bmp, intArrayOf(l, t, r, btm), others, expand = true) }
             catch (_: Throwable) { null }
         val sl = style?.l ?: l; val st = style?.t ?: t; val sr = style?.r ?: r; val sb = style?.b ?: btm
         val bw = bmp.width.toFloat(); val bh = bmp.height.toFloat()
         // Built-in mask (BubbleFit): largest write-rectangle inside the bubble, when a shape is found.
         var tcx = 0f; var tcy = 0f; var tbw = 0f; var tbh = 0f
         try {
-            val fit = com.ashraf.novelstudio.BubbleFit.analyse(bmp, intArrayOf(sl, st, sr, sb), rects)
+            val fit = com.ashraf.novelstudio.BubbleFit.analyse(bmp, intArrayOf(l, t, r, btm), others + rects)
             if (fit != null) {
                 val safe = fit.safe
                 tcx = ((safe[0] + safe[2]) / 2f) / bw
@@ -163,16 +194,12 @@ internal class ManualExtractPipeline(
                 tbh = (safe[3] - safe[1]) / bh
             }
         } catch (_: Throwable) { }
-        val text = blocks.inReadingOrder().toParagraph()
-        // Font size comes from the engine's own line height, not from the box. Measuring the bubble height
-        // made every short-bubble translation enormous ("text fills the whole screen"), because a 3-line
-        // crop is far taller than one glyph. Fall back to the median block height only when the engine
-        // reported nothing.
-        val fontPx = blocks.mapNotNull { b -> b.fontPx.takeIf { it > 0f } }
-            .sorted().let { if (it.isEmpty()) 0f else it[it.size / 2] }
-        val fontNorm = (if (fontPx > 0f) fontPx else (sb - st).toFloat() / 3f) / bw
-        // When no bubble shape was found, the text rectangle stays the OCR box itself (never the whole crop),
-        // so the translation is fitted into what was actually read instead of spilling over the panel.
+        // Font size comes from the engine's own line height, never from the box height (a 3-line bubble is far
+        // taller than one glyph and made translations enormous).
+        val fonts = group.mapNotNull { i -> blocks[i].fontPx.takeIf { it > 0f } }.sorted()
+        val fontPx = if (fonts.isEmpty()) 0f else fonts[fonts.size / 2]
+        val lineCount = group.size.coerceAtLeast(1)
+        val fontNorm = (if (fontPx > 0f) fontPx else (btm - t).toFloat() / lineCount) / bw
         val hasFit = tbw > 0f && tbh > 0f
         return WmBubble(
             src = src,
@@ -183,9 +210,8 @@ internal class ManualExtractPipeline(
             fg2 = style?.fg2 ?: 0xFF000000.toInt(),
             soft = style?.soft ?: false, stroke = style?.stroke ?: 0,
             sourceText = text,
-            // No fit rectangle means no bubble shape was found: keep the writer on the OCR box rather than
-            // letting it size text against the full crop.
-            tcx = tcx, tcy = tcy, tbw = if (hasFit) tbw else 0f, tbh = if (hasFit) tbh else 0f
+            tcx = if (hasFit) tcx else 0f, tcy = if (hasFit) tcy else 0f,
+            tbw = if (hasFit) tbw else 0f, tbh = if (hasFit) tbh else 0f
         )
     }
 

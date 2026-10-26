@@ -13,7 +13,7 @@ internal object ManualExtractHost {
 
     fun install(
         capture: (src: String, x: Float, y: Float, w: Float, h: Float) -> Bitmap?,
-        translateAndPlace: (bubble: WmBubble, text: String, script: OcrScript, onDone: (String) -> Unit) -> Unit,
+        translateAndPlace: (bubbles: List<WmBubble>, text: String, script: OcrScript, onDone: (String) -> Unit) -> Unit,
         /** Called on the main thread with a short user-facing reason whenever a run does not place anything. */
         onFailure: (String) -> Unit = {}
     ) {
@@ -22,8 +22,8 @@ internal object ManualExtractHost {
         ManualExtractController.attach(object : ManualExtractPipeline.Host {
             override fun captureCrop(src: String, x: Float, y: Float, w: Float, h: Float): Bitmap? =
                 capture(src, x, y, w, h)
-            override fun translateAndPlace(bubble: WmBubble, text: String, script: OcrScript, onDone: (String) -> Unit) =
-                translateAndPlace(bubble, text, script, onDone)
+            override fun translateAndPlace(bubbles: List<WmBubble>, text: String, script: OcrScript, onDone: (String) -> Unit) =
+                translateAndPlace(bubbles, text, script, onDone)
         })
     }
 
