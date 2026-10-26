@@ -140,13 +140,27 @@ internal object MarkerCodec {
         val out = MutableList<String?>(bubbleCount) { existing.getOrNull(it) }
         if (bubbleCount <= 0) return out
         val matches = MARK.findAll(text).toList()
-        if (matches.isEmpty()) return out
+        val order = (spatialOrder.filter { it in 0 until bubbleCount }.distinct() +
+            (0 until bubbleCount).filter { it !in spatialOrder })
+        if (matches.isEmpty()) {
+            // A marker-less answer is still useful. Map each distinct paragraph to the next available
+            // source region in geometric order; if there are extra paragraphs, ignore only the extras.
+            val paragraphs = text.split(Regex("\\n\\s*\\n"))
+                .map { oneLine(it) }.filter { it.isNotEmpty() }
+                .let { if (titleOffset > 0 && it.size > bubbleCount) it.drop(titleOffset) else it }
+            for (i in 0 until minOf(paragraphs.size, order.size)) {
+                val target = order[i]
+                if (out[target].isNullOrBlank()) {
+                    out[target] = paragraphs[i]
+                    onFallback(-1, target, "markerless spatial fallback")
+                }
+            }
+            return out
+        }
 
         val firstBubbleNo = 1 + titleOffset
         val lastBubbleNo = bubbleCount + titleOffset
         val seen = HashSet<Int>()
-        val order = (spatialOrder.filter { it in 0 until bubbleCount }.distinct() +
-            (0 until bubbleCount).filter { it !in spatialOrder })
         for ((ordinal, match) in matches.withIndex()) {
             val end = if (ordinal + 1 < matches.size) matches[ordinal + 1].range.first else text.length
             val body = oneLine(text.substring(match.range.last + 1, end))
