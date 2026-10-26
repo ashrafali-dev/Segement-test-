@@ -397,15 +397,6 @@ internal object WebModeTextRemover {
             }
             if (totalRemoved < 8) return false
 
-            // A canvas panel is identified by its on-screen position ("ns-canvas:<left>,<top>,WxH"), which changes
-            // on every scroll: caching an image under that key would never hit twice, and storing a new multi-MB
-            // file per scroll would grow the cache without bound. The erased marks are still recorded — the writer
-            // uses them to drop the opaque cover box for these bubbles — but no cleaned image is stored.
-            if (sourceUrl.startsWith("ns-canvas:", true)) {
-                WebModeTextRemovalCache.setErased(sourceUrl, erased)
-                return true
-            }
-
             val bytesOut = ByteArrayOutputStream()
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
             // of re-encoding the whole comic page with lossy WebP.
@@ -414,8 +405,20 @@ internal object WebModeTextRemover {
             if (!bitmap.compress(format, 100, bytesOut)) return false
             val cleaned = bytesOut.toByteArray()
             if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
-            val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned,
-                if (modern) "image/webp" else "image/png")
+            val mime = if (modern) "image/webp" else "image/png"
+            // A canvas panel has no image URL: its picture is drawn by page JS, so the overlay had nothing to
+            // swap in and the old lettering stayed visible under the translation. Hand the cleaned pixels to the
+            // overlay as a data: URL. Canvas entries stay in memory only (a new multi-MB file per scroll
+            // position would grow the disk cache without bound) and are keyed by the stable canvas slot.
+            if (sourceUrl.startsWith("ns-canvas:", true)) {
+                WebModeTextRemovalCache.storeCanvasCleaned(
+                    sourceUrl,
+                    "data:$mime;base64," + android.util.Base64.encodeToString(cleaned, android.util.Base64.NO_WRAP)
+                )
+                WebModeTextRemovalCache.setErased(sourceUrl, erased)
+                return true
+            }
+            val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned, mime)
             if (stored) WebModeTextRemovalCache.setErased(sourceUrl, erased)
             return stored
         } catch (_: OutOfMemoryError) {

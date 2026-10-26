@@ -164,16 +164,28 @@ internal class ManualExtractPipeline(
             }
         } catch (_: Throwable) { }
         val text = blocks.inReadingOrder().toParagraph()
+        // Font size comes from the engine's own line height, not from the box. Measuring the bubble height
+        // made every short-bubble translation enormous ("text fills the whole screen"), because a 3-line
+        // crop is far taller than one glyph. Fall back to the median block height only when the engine
+        // reported nothing.
+        val fontPx = blocks.mapNotNull { b -> b.fontPx.takeIf { it > 0f } }
+            .sorted().let { if (it.isEmpty()) 0f else it[it.size / 2] }
+        val fontNorm = (if (fontPx > 0f) fontPx else (sb - st).toFloat() / 3f) / bw
+        // When no bubble shape was found, the text rectangle stays the OCR box itself (never the whole crop),
+        // so the translation is fitted into what was actually read instead of spilling over the panel.
+        val hasFit = tbw > 0f && tbh > 0f
         return WmBubble(
             src = src,
             cx = ((sl + sr) / 2f) / bw, cy = ((st + sb) / 2f) / bh,
             w = (sr - sl) / bw, h = (sb - st) / bh,
-            angle = 0f, font = ((sb - st).toFloat() * 0.6f) / bw,
+            angle = 0f, font = fontNorm.coerceIn(0.002f, 0.25f),
             bg = style?.bg ?: 0xFFFFFFFF.toInt(), fg = style?.fg ?: 0xFF000000.toInt(),
             fg2 = style?.fg2 ?: 0xFF000000.toInt(),
             soft = style?.soft ?: false, stroke = style?.stroke ?: 0,
             sourceText = text,
-            tcx = tcx, tcy = tcy, tbw = tbw, tbh = tbh
+            // No fit rectangle means no bubble shape was found: keep the writer on the OCR box rather than
+            // letting it size text against the full crop.
+            tcx = tcx, tcy = tcy, tbw = if (hasFit) tbw else 0f, tbh = if (hasFit) tbh else 0f
         )
     }
 

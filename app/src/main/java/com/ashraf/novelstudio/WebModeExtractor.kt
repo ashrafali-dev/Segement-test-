@@ -1433,13 +1433,19 @@ internal class WebModeExtractor(
                 // take the screenshot again instead of placing text from a shifted frame.
                 if (bmp != null && req.visibleOnly && info != null && info.has("sy") && driftRetries < 2) {
                     val probe = evalWait(wrap(LIB + JS_SCROLL_PROBE)) { parseJson(it) }
-                    if (probe != null &&
-                        (Math.abs(probe.optDouble("y") - info.optDouble("sy")) > 1.0 ||
-                            Math.abs(probe.optDouble("h") - info.optDouble("sh")) > 2.0)) {
-                        driftRetries++
-                        OcrDiag.log("FORCE_STEP", "page moved during capture (dy=${probe.optDouble("y") - info.optDouble("sy")}) -> recapture $driftRetries/2")
-                        bmp.recycle()
-                        continue
+                    // optDouble() returns NaN for a missing key, and NaN > x is always false — so a reader that
+                    // does not report scroll data "detected drift" forever and re-captured in a loop (the log
+                    // showed "page moved during capture (dy=0.0)"). Compare real numbers only, and ignore the
+                    // document height: canvas readers grow it as panels render, which is not a scroll.
+                    if (probe != null) {
+                        val before = info.optDouble("sy", Double.NaN)
+                        val after = probe.optDouble("y", Double.NaN)
+                        if (before.isFinite() && after.isFinite() && Math.abs(after - before) > 1.0) {
+                            driftRetries++
+                            OcrDiag.log("FORCE_STEP", "page moved during capture (dy=${after - before}) -> recapture $driftRetries/2")
+                            bmp.recycle()
+                            continue
+                        }
                     }
                 }
                 forceShots++

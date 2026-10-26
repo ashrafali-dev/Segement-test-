@@ -82,8 +82,33 @@ internal object WebModeTextRemovalCache {
         return false
     }
 
+    /**
+     * Cleaned pixels for a canvas panel, as a data: URL, keyed by the canvas slot.
+     *
+     * Canvas panels have no image URL to store a file under and their synthetic source changes with every
+     * scroll position, so these live in memory only and are bounded. Without this the overlay had nothing to
+     * draw and the original Japanese lettering stayed visible under the translation.
+     */
+    private val canvasUrls = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 12
+    }
+
+    @Synchronized
+    fun storeCanvasCleaned(sourceUrl: String, dataUrl: String) {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return
+        canvasUrls[slot] = dataUrl
+    }
+
+    @Synchronized
+    private fun canvasUrlFor(sourceUrl: String): String? {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return null
+        return canvasUrls[slot]
+    }
+
     @Synchronized
     fun urlFor(sourceUrl: String): String? {
+        // A canvas panel is served from the in-memory table, not the on-disk cache.
+        canvasUrlFor(sourceUrl)?.let { return it }
         if (!has(sourceUrl)) return null
         val raw = sourceUrl.substringBefore('#')
         if (Uri.parse(raw).getQueryParameter(MARKER) == "1") return raw
