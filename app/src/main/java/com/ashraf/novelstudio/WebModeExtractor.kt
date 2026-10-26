@@ -2017,8 +2017,14 @@ internal class WebModeExtractor(
             // middle rows from the ink detector. Never discard an edge reading on the assumption that
             // another slice will find it; the fuller overlapping reading can upgrade it below.
             val tOcr = android.os.SystemClock.elapsedRealtime()
-            if (preRecognized == null && (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
-                Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)) {
+            // Realtime (fastMode) is latency-bound: the ONNX bubble detector takes ~1.9 s and is serialized on
+            // the process-wide OnnxHeavyGate lock, so blocking readSlice on it delayed every Lens reply by
+            // seconds (the "DETECT ~3.8 s" cycles). Geometry falls back cleanly to the pixel bubble finder when
+            // the detector is off, so skip it here and let the visible text reach the overlay immediately.
+            val detectWanted = !fastMode && preRecognized == null &&
+                (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
+                Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
+            if (detectWanted) {
                 detFuture = try {
                     DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
                 } catch (_: Throwable) { null }
@@ -2036,10 +2042,14 @@ internal class WebModeExtractor(
             val k = sample.toFloat()
             // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
             // It only adds information: which lines belong to different bubbles and which lettering is free text.
+            // In realtime we never wait on it: an unfinished detection is cancelled so the Lens text is emitted now.
             val earlyDet = detFuture
             val dets: List<BubbleDetectorCore.Det>? =
-                if (earlyDet != null) { try { earlyDet.get() } catch (_: java.util.concurrent.ExecutionException) { null } }
-                else if (Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+                if (earlyDet != null) {
+                    // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
+                    if (fastMode && !earlyDet.isDone) { earlyDet.cancel(true); null }
+                    else try { earlyDet.get() } catch (_: Exception) { null }
+                } else if (!fastMode && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
                 "lines=${blocks.size} last=${BubbleDetector.lastInfo.ifBlank { "-" }} parallel=${earlyDet != null}")
