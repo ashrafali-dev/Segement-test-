@@ -37,10 +37,11 @@ internal object BubbleDetector {
     private const val DISPLAY_MODEL_MB = 41.6
     private const val AUTO_MIN_RAM_MB = 2048L
     private const val MODEL_FILE_NAME = "koharu_yolo26s.onnx"
+    private const val SELF_TEST_INPUT_SIZE = 256
     private const val LOW_MEMORY_INPUT_SIZE = 512
     private const val MID_MEMORY_INPUT_SIZE = 640
     private const val HIGH_MEMORY_INPUT_SIZE = 768
-    private const val EMERGENCY_INPUT_SIZE = 448
+    private const val EMERGENCY_INPUT_SIZE = 320
 
     @Volatile var lastError: String = ""
         private set
@@ -93,7 +94,9 @@ internal object BubbleDetector {
         return when {
             totalMb >= 8192L && availableBytes >= 800L * 1024L * 1024L -> HIGH_MEMORY_INPUT_SIZE
             totalMb >= 6144L && availableBytes >= 512L * 1024L * 1024L -> MID_MEMORY_INPUT_SIZE
-            else -> LOW_MEMORY_INPUT_SIZE
+            totalMb >= 4096L && availableBytes >= 320L * 1024L * 1024L -> LOW_MEMORY_INPUT_SIZE
+            availableBytes >= 192L * 1024L * 1024L -> 384
+            else -> SELF_TEST_INPUT_SIZE
         }
     }
     fun mode(c: Context): String = Prefs.get(c, "wmDetectorMode", "auto")
@@ -333,7 +336,7 @@ internal object BubbleDetector {
         return try {
             // Validate the graph at the lowest supported dynamic input. Reader WebViews are still
             // resident during download, so 512px inference can spike native RAM on 4 GB devices.
-            val size = EMERGENCY_INPUT_SIZE
+            val size = SELF_TEST_INPUT_SIZE
             loaded = Loaded(file, lowMemorySession = true)
             val blank = IntArray(size * size) { 0xFF727272.toInt() }
             loaded.run(
