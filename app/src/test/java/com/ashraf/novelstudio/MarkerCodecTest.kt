@@ -101,7 +101,7 @@ class MarkerCodecTest {
 
     @Test fun `markerless paragraphs use actual spatial order even when counts differ`() {
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
-            "upper whisper\\n\\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
+            "upper whisper\n\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
         )
         assertEquals("main bubble", repaired[0])
         assertNull(repaired[1])
