@@ -23,7 +23,7 @@ internal object BubbleDetectorCore {
     /** One detection in the coordinates of the page that was scanned. */
     class Det(
         val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int,
-        /** Real balloon shape (segmentation model). null = only the box is known (old box-only detector). */
+        /** Real balloon outline from the optional mask model; null = only the box of the main detector is known. */
         val seg: BubbleSegCore.Seg? = null
     ) {
         val w: Int get() = r - l
@@ -31,7 +31,6 @@ internal object BubbleDetectorCore {
         val area: Long get() = w.toLong() * h
         fun contains(x: Float, y: Float): Boolean {
             if (!(x >= l && x < r && y >= t && y < b)) return false
-            // With a mask the point must be inside the balloon's own outline, not just inside its bounding box.
             val s = seg ?: return true
             return s.inside(x.toInt(), y.toInt())
         }
@@ -210,6 +209,10 @@ internal object BubbleDetectorCore {
         val a = containerAt(dets, ax, ay)
         val b = containerAt(dets, bx, by)
         if (a != null && b != null) return a !== b
+        // With a real balloon MASK the outline is exact: lettering inside the balloon and a small whisper / note next to
+        // it OUTSIDE the outline are two texts (they used to be glued under one marker).
+        if (a != null) return a.seg != null
+        if (b != null) return b.seg != null
         if (a != null || b != null) return false
         // Neither piece is inside a speech bubble: free lettering (captions, labels, notes on artwork). If each one
         // sits in a text_free box and no single box holds both, they are separate texts.
@@ -244,5 +247,42 @@ internal object BubbleDetectorCore {
         if (bubbleAt(dets, x, y) != null) return false
         for (d in dets) if (d.label == CLS_TEXT_FREE && d.contains(x, y)) return true
         return false
+    }
+
+    /** How the masks were merged into the main detector's list (for the log). */
+    class MergeStats(val attached: Int, val maskOnly: Int, val boxOnly: Int)
+
+    /**
+     * Gives the main detector's balloon boxes their real outline. A mask whose box matches a main-detector balloon
+     * (IoU >= 0.4, or the mask centre lies in that box) is attached to it; a mask the main detector missed is added as a
+     * balloon of its own. Lettering classes (text_bubble / text_free) are never touched: the mask model only knows balloons.
+     */
+    fun attachMasks(dets: List<Det>, segs: List<BubbleSegCore.Seg>): Pair<List<Det>, MergeStats> {
+        val out = ArrayList<Det>(dets.size + segs.size)
+        val used = BooleanArray(segs.size)
+        var attached = 0
+        for (d in dets) {
+            if (d.label != CLS_BUBBLE) { out.add(d); continue }
+            var best = -1; var bestIou = 0f
+            for ((i, s) in segs.withIndex()) {
+                if (used[i]) continue
+                val iw = Math.min(d.r, s.r) - Math.max(d.l, s.l)
+                val ih = Math.min(d.b, s.b) - Math.max(d.t, s.t)
+                if (iw <= 0 || ih <= 0) continue
+                val inter = iw.toLong() * ih
+                val uni = d.area + s.w.toLong() * s.h - inter
+                val v = if (uni <= 0L) 0f else inter.toFloat() / uni
+                if (v > bestIou) { bestIou = v; best = i }
+            }
+            if (best >= 0 && bestIou >= 0.4f) {
+                used[best] = true; attached++
+                val s = segs[best]
+                out.add(Det(CLS_BUBBLE, d.score, d.l, d.t, d.r, d.b, s))
+            } else out.add(d)
+        }
+        var maskOnly = 0
+        for ((i, s) in segs.withIndex()) if (!used[i]) { maskOnly++; out.add(Det(CLS_BUBBLE, s.score, s.l, s.t, s.r, s.b, s)) }
+        val boxOnly = dets.count { it.label == CLS_BUBBLE } - attached
+        return Pair(out, MergeStats(attached, maskOnly, boxOnly))
     }
 }

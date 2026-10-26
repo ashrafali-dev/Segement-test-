@@ -47,6 +47,20 @@ internal data class WmBubble(
     val free: Boolean = false
 )
 
+/** The app's own status pill / toasts are never comic lettering. Pure function, shared by every reading mode. */
+internal object UiChromeFilter {
+    private val PHRASES = listOf(
+        "reading this screen", "reading ahead", "reading the page", "sending to chatbot", "ai painter",
+        "detector on", "detector off", "detector not installed", "mask only mode", "balloon masks",
+        "এআই পেইন্টার", "ডিটেক্টর", "স্ক্রিনটি পড়া হচ্ছে", "পেইন্টার বন্ধ"
+    )
+    fun isChrome(text: String): Boolean {
+        val n = text.lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
+        if (n.isEmpty()) return false
+        return PHRASES.any { n.contains(it) } || n.startsWith("ocr lens") || n.startsWith("ocr ml kit")
+    }
+}
+
 /**
  * The bubbles of one chapter, in the same order as their text paragraphs in the chapter text that is
  * sent to the chatbot. [titleOffset] is 1 when the chapter text starts with a title paragraph.
@@ -74,6 +88,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val list = ArrayList<WmBubble>(a.length())
             for (i in 0 until a.length()) {
                 val b = a.getJSONObject(i)
+                // A layout saved while the status pill was inside a screenshot still holds the pill's text (and its
+                // translation): drop it when loading so it can never be painted on a page again.
+                if (UiChromeFilter.isChrome(b.optString("srcText", "")) || UiChromeFilter.isChrome(b.optString("tr", ""))) continue
                 list.add(WmBubble(
                     b.getString("s"),
                     b.getDouble("cx").toFloat(), b.getDouble("cy").toFloat(),

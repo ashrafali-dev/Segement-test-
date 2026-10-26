@@ -2701,7 +2701,7 @@ return t.length>=40?'TXT:'+t:'';
     private fun chipDetailLine(): String {
         val det = when {
             BubbleDetector.isDownloading() -> "downloading"
-            BubbleDetector.enabled(this) -> "ON" + (BubbleDetector.lastInfo.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
+            BubbleDetector.enabled(this) -> "ON" + (BubbleDetector.lastInfo.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "") + (if (BubbleSegDetector.enabled(this)) " · masks ON" else "")
             BubbleDetector.isInstalled(this) -> "off"
             else -> "not installed"
         }
@@ -9059,7 +9059,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "view original", "webtoon realtime", "haiku 5 5 low",
             "claude is ai and can make mistakes", "claude is thinking",
             "claude is responding", "message collapsed", "show more", "just now",
-            "deepthink search", "smart search", "স্ক্রিন ক্যাপচার খালি",
+            "deepthink search", "smart search",
+            // The app's own status pill (it was OCR'd and its text was translated onto the page).
+            "reading this screen", "reading ahead", "reading the page", "sending to chatbot", "ai painter",
+            "detector on", "detector off", "detector not installed", "mask only mode", "balloon masks",
+            "স্ক্রিন ক্যাপচার খালি",
             "প্রতিটি স্ক্রিন ক্যাপচার", "জোর করে বের করা হয়েছে",
             "বার্তা লিখুন", "শেয়ার করুন", "শেয়ার করুন"
         )
@@ -10698,6 +10702,40 @@ ${rows.take(220).joinToString("\n")}
             b.setNegativeButton("Remove model") { _, _ -> BubbleDetector.delete(this); toast("Model removed"); onChanged() }
         } else {
             b.setNegativeButton("Close", null)
+        }
+        b.setNeutralButton("Balloon masks…") { _, _ -> segModelDialog(onChanged) }
+        b.show()
+    }
+
+    /** Optional second model: only gives the balloons the main detector found their real outline (mask). */
+    private fun segModelDialog(onChanged: () -> Unit) {
+        val installed = BubbleSegDetector.isInstalled(this)
+        val b = AlertDialog.Builder(this)
+            .setTitle("Balloon mask model")
+            .setMessage(BubbleSegDetector.status(this) +
+                "\n\nThe main detector stays in charge of everything. This model only adds the exact balloon outline so the " +
+                "old lettering is hidden inside the balloon. It runs only while reading ahead, never when memory is low.")
+        if (!installed && !BubbleSegDetector.isDownloading()) {
+            b.setPositiveButton("Download (≈ 12 MB)") { _, _ ->
+                toast("⬇️ Downloading the mask model…")
+                BubbleSegDetector.download(this, { pct ->
+                    if (pct % 25 == 0) runOnUiThread { toast("⬇️ Mask model $pct%") }
+                }, { err ->
+                    runOnUiThread {
+                        toast(if (err == null) "✅ Mask model installed and tested on this phone" else "❌ Mask model: $err")
+                        onChanged()
+                    }
+                })
+            }
+            b.setNegativeButton("Close", null)
+        } else if (installed) {
+            b.setPositiveButton("Mode: " + BubbleSegDetector.mode(this)) { _, _ ->
+                val next = when (BubbleSegDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
+                BubbleSegDetector.setMode(this, next)
+                toast("Mask model mode: $next")
+                onChanged()
+            }
+            b.setNegativeButton("Remove model") { _, _ -> BubbleSegDetector.delete(this); toast("Mask model removed"); onChanged() }
         }
         b.show()
     }

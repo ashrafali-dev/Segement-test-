@@ -55,15 +55,15 @@ internal object BubbleSegCore {
      * when the bitmap is a window of a bigger page.
      */
     fun decode(
-        out0: FloatArray, protos: FloatArray, anchors: Int, lb: Letterbox, pageW: Int, pageH: Int,
+        out0: java.nio.FloatBuffer, protos: java.nio.FloatBuffer, anchors: Int, lb: Letterbox, pageW: Int, pageH: Int,
         originX: Int = 0, originY: Int = 0, scoreMin: Float = SCORE_MIN, maxOut: Int = 40
     ): List<Seg> {
-        if (out0.size < 37 * anchors || protos.size < NC * PROTO * PROTO) return emptyList()
+        if (out0.limit() < 37 * anchors || protos.limit() < NC * PROTO * PROTO) return emptyList()
         val cands = ArrayList<Cand>()
         for (i in 0 until anchors) {
-            val s = out0[4 * anchors + i]
+            val s = out0.get(4 * anchors + i)
             if (!s.isFinite() || s < scoreMin) continue
-            val cx = out0[i]; val cy = out0[anchors + i]; val w = out0[2 * anchors + i]; val h = out0[3 * anchors + i]
+            val cx = out0.get(i); val cy = out0.get(anchors + i); val w = out0.get(2 * anchors + i); val h = out0.get(3 * anchors + i)
             if (!cx.isFinite() || !cy.isFinite() || !w.isFinite() || !h.isFinite() || w < 4f || h < 4f) continue
             cands.add(Cand(s, cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, i))
         }
@@ -87,7 +87,7 @@ internal object BubbleSegCore {
             val b = Math.ceil(((c.y2 - lb.padY) / lb.scale).toDouble()).toInt().coerceIn(0, pageH)
             val bw = r - l; val bh = b - t
             if (bw < 6 || bh < 6) continue
-            for (k in 0 until NC) coef[k] = out0[(5 + k) * anchors + c.idx]
+            for (k in 0 until NC) coef[k] = out0.get((5 + k) * anchors + c.idx)
             val mask = ByteArray(bw * bh)
             for (yy in 0 until bh) {
                 // page pixel -> model pixel -> prototype pixel (nearest)
@@ -99,7 +99,7 @@ internal object BubbleSegCore {
                     val px = mx.toInt().coerceIn(0, PROTO - 1)
                     var sum = 0f
                     val o = py * PROTO + px
-                    for (k in 0 until NC) sum += coef[k] * protos[k * plane + o]
+                    for (k in 0 until NC) sum += coef[k] * protos.get(k * plane + o)
                     if (sum > 0f) mask[yy * bw + xx] = 1   // sigmoid(sum) > 0.5  <=>  sum > 0
                 }
             }
@@ -108,22 +108,25 @@ internal object BubbleSegCore {
         return res
     }
 
-    /** Fills a CHW float tensor (R,G,B planes, 0..1) from [argb] pixels of a bitmap letter-boxed into SIZE x SIZE. */
-    fun fillChw(argbPage: IntArray, pageW: Int, pageH: Int, lb: Letterbox, out: FloatArray) {
+    /**
+     * Fills a CHW float tensor (R,G,B planes, 0..1) with the page letter-boxed into SIZE x SIZE. [argb] holds the page
+     * ALREADY scaled to lb.newW x lb.newH (so no full-size pixel array is ever needed); the rest is grey 114.
+     */
+    fun fillChw(argb: IntArray, lb: Letterbox, out: java.nio.FloatBuffer) {
         val plane = SIZE * SIZE
-        require(out.size >= plane * 3)
+        require(out.capacity() >= plane * 3)
         val grey = 114f / 255f
-        java.util.Arrays.fill(out, 0, plane * 3, grey)
+        for (i in 0 until plane * 3) out.put(i, grey)
         val x0 = Math.round(lb.padX); val y0 = Math.round(lb.padY)
         for (y in 0 until lb.newH) {
-            val sy = Math.min(pageH - 1, (y / lb.scale).toInt())
+            val row = y * lb.newW
+            val dst = (y0 + y) * SIZE + x0
             for (x in 0 until lb.newW) {
-                val sx = Math.min(pageW - 1, (x / lb.scale).toInt())
-                val p = argbPage[sy * pageW + sx]
-                val o = (y0 + y) * SIZE + (x0 + x)
-                out[o] = ((p ushr 16) and 0xff) / 255f
-                out[plane + o] = ((p ushr 8) and 0xff) / 255f
-                out[2 * plane + o] = (p and 0xff) / 255f
+                val p = argb[row + x]
+                val o = dst + x
+                out.put(o, ((p ushr 16) and 0xff) / 255f)
+                out.put(plane + o, ((p ushr 8) and 0xff) / 255f)
+                out.put(2 * plane + o, (p and 0xff) / 255f)
             }
         }
     }

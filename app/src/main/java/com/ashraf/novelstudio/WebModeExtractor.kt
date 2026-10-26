@@ -2138,7 +2138,13 @@ internal class WebModeExtractor(
             // the process-wide OnnxHeavyGate lock, so blocking readSlice on it delayed every Lens reply by
             // seconds (the "DETECT ~3.8 s" cycles). Geometry falls back cleanly to the pixel bubble finder when
             // the detector is off, so skip it here and let the visible text reach the overlay immediately.
-            val detectWanted = preRecognized == null &&
+            // The model needs 1.5-3.5 s on a mid-range phone. Only the READ-AHEAD thread (it works on panels the reader has
+            // not reached yet) may wait for it; the on-screen path just takes a finished result from the cache and never
+            // starts a model run of its own (that run froze the UI and could never finish inside its 150 ms budget).
+            val onAhead = Thread.currentThread().name.startsWith("ns-webmode-ahead")
+            val cachedDets: List<BubbleDetectorCore.Det>? =
+                if (preRecognized == null && Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)) BubbleDetector.cached(bmp) else null
+            val detectWanted = preRecognized == null && cachedDets == null && (!fastMode || onAhead) &&
                 (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
                 Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
             if (detectWanted) {
@@ -2162,15 +2168,17 @@ internal class WebModeExtractor(
             // In realtime we never wait on it: an unfinished detection is cancelled so the Lens text is emitted now.
             val earlyDet = detFuture
             val dets: List<BubbleDetectorCore.Det>? =
-                if (earlyDet != null) {
+                if (cachedDets != null) cachedDets
+                else if (earlyDet != null) {
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
-                    try { if (fastMode) earlyDet.get(350, java.util.concurrent.TimeUnit.MILLISECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
+                    try { if (fastMode) earlyDet.get(9, java.util.concurrent.TimeUnit.SECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
                 } else if (!fastMode && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
-            val detectRan = detectWanted || (earlyDet == null && !fastMode && Prefs.bool(wv.context, "wmBubbleFit", true))
+            val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !fastMode && Prefs.bool(wv.context, "wmBubbleFit", true))
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
+                "masks=${dets?.count { it.seg != null } ?: 0} source=${if (cachedDets != null) "cache" else if (earlyDet != null) "ahead-run" else "none"} " +
                 "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
