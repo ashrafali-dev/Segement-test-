@@ -20,7 +20,7 @@ class MangaBubbleSegCoreTest {
         for (y in 100 until 156) for (x in 110 until 151) {
             proto[y * s.PROTO_SIZE + x] = 2f
         }
-        val lb = s.Letterbox(1f, 1f, 0, 0, s.SIZE, s.SIZE)
+        val lb = MangaBubbleSegCore.Letterbox(1f, 1f, 0, 0, s.SIZE, s.SIZE)
         val detections = s.decode(pred, proto, intArrayOf(0, 0, s.SIZE, s.SIZE), lb)
         assertEquals(1, detections.size)
         val d = detections.single()
@@ -34,7 +34,7 @@ class MangaBubbleSegCoreTest {
         val s = MangaBubbleSegCore
         val pred = FloatArray(s.CHANNELS * s.ANCHORS)
         val proto = FloatArray(s.PROTO_CHANNELS * s.PROTO_SIZE * s.PROTO_SIZE)
-        val lb = s.Letterbox(1f, 1f, 0, 0, s.SIZE, s.SIZE)
+        val lb = MangaBubbleSegCore.Letterbox(1f, 1f, 0, 0, s.SIZE, s.SIZE)
         pred[0] = Float.NaN
         pred[4 * s.ANCHORS] = 0.1f
         assertTrue(s.decode(pred, proto, intArrayOf(0, 0, s.SIZE, s.SIZE), lb).isEmpty())

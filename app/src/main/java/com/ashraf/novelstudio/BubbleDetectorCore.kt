@@ -1,17 +1,11 @@
 package com.ashraf.novelstudio
 
 /**
- * Pure-Kotlin part of the bubble / text detector (no Android types, so it is unit-tested on the JVM).
+ * Pure-Kotlin geometry and compatibility helpers for balloon detections; Android-free so this code is JVM-testable.
  *
- * Model: Sundowner123/comic-text-and-bubble-detector (int8 ONNX copy of ogkalu/comic-text-and-bubble-detector,
- * RT-DETR-v2, Apache-2.0). Contract taken from its model card:
- *   inputs : images [N,3,640,640] float32 RGB 0..1 (the picture is STRETCHED, not letter-boxed),
- *            orig_target_sizes [N,2] int64
- *   outputs: labels [N,300], boxes [N,300,4] (xyxy), scores [N,300]   (no NMS needed, it is a DETR)
- *   classes: 0 bubble (empty outline), 1 text_bubble (lettering inside a bubble), 2 text_free (lettering outside)
- *
- * The app passes orig_target_sizes = (SIZE, SIZE) on purpose: the returned boxes are then in 640x640 model space and
- * [decode] scales them to the tile itself, so the width/height order of that tensor can never matter.
+ * The active ONNX model is YOLO11-nano instance segmentation, post-processed in MangaBubbleSegCore. It emits one
+ * balloon class with an instance mask. The legacy label constants and [decode] helper remain for existing grouping
+ * helpers/tests; they do not describe the active model's output classes.
  */
 internal object BubbleDetectorCore {
     const val SIZE = 640
@@ -183,9 +177,11 @@ internal object BubbleDetectorCore {
         val d = best ?: return null
         // The lettering must sit (almost) completely inside: otherwise this is a neighbouring or cut-off box.
         if (l < d.l - 4 || r > d.r + 4 || t < d.t - 4 || b > d.b + 4) return null
-        // A "bubble" many times larger than its text is a panel-sized false alarm.
+        // Keep the legacy size-ratio guard for box-only detections, where it helps reject panel-sized false
+        // alarms. The new YOLO segmentation model emits a balloon class plus an instance mask, so a large real
+        // balloon around a short text line must not be rejected just because its area/text-area ratio is high.
         val textArea = Math.max(1L, (r - l).toLong() * (b - t).toLong())
-        if ((d.r - d.l).toLong() * (d.b - d.t).toLong() > textArea * 40L) return null
+        if (d.mask == null && (d.r - d.l).toLong() * (d.b - d.t).toLong() > textArea * 40L) return null
         // Pull the box in a little: the outline and the tail are part of the detector box, round bubbles are not boxes.
         val mw = Math.max(2, ((d.r - d.l) * 0.06f).toInt())
         val mh = Math.max(2, ((d.b - d.t) * 0.06f).toInt())
