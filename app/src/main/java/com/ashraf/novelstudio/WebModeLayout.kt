@@ -134,8 +134,19 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val placed = MarkerCodec.align(text, n, layout.titleOffset) { no, reason ->
                 OcrDiag.log("ALIGN_SKIP", "no=$no reason=$reason bubbles=$n titleOffset=${layout.titleOffset}")
             }
-            if (MarkerCodec.hasPlacement(placed)) return placed
-            // No usable markers at all: fall back to paragraphs only when the counts agree exactly.
+            // Use the actual OCR bubble coordinates to recover only failed marker bodies. Valid markers
+            // retain their exact slots; malformed/duplicate markers can fill an empty spatial slot but
+            // never overwrite a good translation. Layout order is top-to-bottom, then left-to-right.
+            val spatialOrder = layout.bubbles.indices.sortedWith(
+                compareBy<Int> { layout.bubbles[it].cy }.thenBy { layout.bubbles[it].cx }
+            )
+            val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
+                text, n, layout.titleOffset, placed, spatialOrder
+            ) { no, targetIndex, reason ->
+                OcrDiag.log("ALIGN_FALLBACK", "no=$no -> bubble=${targetIndex + 1} reason=$reason bubbles=$n")
+            }
+            if (MarkerCodec.hasPlacement(repaired)) return repaired
+            // Markerless replies can still align by paragraphs when the counts match exactly.
             val byParas = MarkerCodec.alignByParagraphs(text, n) { _, reason ->
                 OcrDiag.log("ALIGN_SKIP", "positional fallback refused: $reason")
             }
