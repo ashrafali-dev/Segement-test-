@@ -76,6 +76,36 @@ class MarkerCodecTest {
         assertEquals("two", placed[1])
     }
 
+    @Test fun `out of range marker fills the empty spatial slot without overwriting valid markers`() {
+        val reply = "[001] one\\n[999] two\\n[003] three"
+        val firstPass = MarkerCodec.align(reply, 3)
+        val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
+        assertEquals(listOf("one", "two", "three"), repaired)
+    }
+
+    @Test fun `duplicate marker body is recovered into the next empty spatial slot`() {
+        val reply = "[001] first\\n[001] second\\n[003] third"
+        val firstPass = MarkerCodec.align(reply, 3)
+        val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
+        assertEquals(listOf("first", "second", "third"), repaired)
+    }
+
+    @Test fun `empty body is never recovered as a translation`() {
+        val reply = "[001] ~\\n[999] ~\\n[003] third"
+        val firstPass = MarkerCodec.align(reply, 3)
+        val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
+        assertNull(repaired[0])
+        assertNull(repaired[1])
+        assertEquals("third", repaired[2])
+    }
+
+    @Test fun `trailing extra marker is ignored once all spatial slots are filled`() {
+        val reply = "[001] one\\n[002] two\\n[003] three\\n[999] extra"
+        val firstPass = MarkerCodec.align(reply, 3)
+        val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
+        assertEquals(listOf("one", "two", "three"), repaired)
+    }
+
     @Test fun `garbled marker is skipped without killing the reply`() {
         val placed = MarkerCodec.align("[abc] noise\n[001] one", 1)
         assertEquals("one", placed[0])
