@@ -530,16 +530,25 @@ internal object BubbleDetector {
 
                 var pred: String? = null
                 var proto: String? = null
-                for ((name, info) in ses.outputInfo) {
-                    val ti = info.info as? TensorInfo ?: continue
-                    val shape = ti.shape
-                    if (shape.size == 3 && shape[2] == KoharuSegCore.ROW_SIZE.toLong()) pred = name
-                    if (shape.size == 4 && shape[1] == KoharuSegCore.PROTO_CHANNELS.toLong() &&
+                val outputShapes = ArrayList<String>(ses.outputInfo.size)
+                for ((name, node) in ses.outputInfo) {
+                    val ti = node.info as? TensorInfo
+                    val shape = ti?.shape
+                    outputShapes.add("$name=${shape?.contentToString() ?: node.info.javaClass.simpleName}")
+                    if (shape != null && shape.size == 3 &&
+                        (shape[2] == KoharuSegCore.ROW_SIZE.toLong() || shape[2] <= 0L)) pred = name
+                    if (shape != null && shape.size == 4 &&
+                        (shape[1] == KoharuSegCore.PROTO_CHANNELS.toLong() || shape[1] <= 0L) &&
                         (shape[2] <= 0L || shape[2] % 4L == 0L) &&
                         (shape[3] <= 0L || shape[3] % 4L == 0L)) proto = name
                 }
+                // The pinned Koharu export documents output0=instances and output1=mask prototypes.
+                // Prefer the model's explicit names if ONNX Runtime reports symbolic/unknown dimensions
+                // that prevent shape-based discovery; the low-memory self-test validates actual tensors.
+                if (pred == null && "output0" in ses.outputInfo) pred = "output0"
+                if (proto == null && "output1" in ses.outputInfo) proto = "output1"
                 require(pred != null && proto != null) {
-                    "Koharu outputs must be [1,instances,38] and [1,32,H/4,W/4] (found ${ses.outputInfo.keys})"
+                    "Koharu output contract mismatch (${outputShapes.joinToString()}); expected output0 [1,N,38], output1 [1,32,H/4,W/4]"
                 }
                 predictionName = pred
                 prototypeName = proto
