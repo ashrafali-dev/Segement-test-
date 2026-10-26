@@ -97,7 +97,7 @@ internal class ManualExtractPipeline(
             }
 
             // 3) downscale so max dim ≤ MAX_OCR_DIM (never upscale)
-            val ocrBmp = downscale(crop, ManualExtractConfig.MAX_OCR_DIM)
+            var ocrBmp = downscale(crop, ManualExtractConfig.MAX_OCR_DIM)
             if (ocrBmp !== crop) { crop.recycle(); crop = ocrBmp }
             m.ocrW = ocrBmp.width; m.ocrH = ocrBmp.height
             m.mark("crop")
@@ -128,6 +128,20 @@ internal class ManualExtractPipeline(
             m.blocks = outcome.blocks.size
             m.letters = outcome.blocks.sumOf { b -> b.text.count { it.isLetterOrDigit() } }
             if (outcome.blocks.isEmpty()) return fail(m, "no text")
+
+            // Detector-guided cleanup writes pixels. Captured crops may be immutable, so promote the owned OCR
+            // bitmap to a mutable ARGB copy when possible. Coordinates from OCR remain valid because the copy
+            // has identical dimensions; the finally block still owns and recycles this replacement.
+            if (!ocrBmp.isMutable) {
+                val mutableCopy = try { ocrBmp.copy(Bitmap.Config.ARGB_8888, true) } catch (_: Throwable) { null }
+                if (mutableCopy != null) {
+                    if (mutableCopy !== ocrBmp) {
+                        if (!ocrBmp.isRecycled) ocrBmp.recycle()
+                        crop = mutableCopy
+                        ocrBmp = mutableCopy
+                    }
+                }
+            }
 
             // 5) ONE bubble per detected bubble, each mapped back to source-image coordinates.
             val dets = detsFor(ocrBmp)
