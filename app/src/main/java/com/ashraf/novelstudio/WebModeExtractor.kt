@@ -2138,7 +2138,7 @@ internal class WebModeExtractor(
             // the process-wide OnnxHeavyGate lock, so blocking readSlice on it delayed every Lens reply by
             // seconds (the "DETECT ~3.8 s" cycles). Geometry falls back cleanly to the pixel bubble finder when
             // the detector is off, so skip it here and let the visible text reach the overlay immediately.
-            val detectWanted = !fastMode && preRecognized == null &&
+            val detectWanted = preRecognized == null &&
                 (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
                 Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
             if (detectWanted) {
@@ -2164,8 +2164,7 @@ internal class WebModeExtractor(
             val dets: List<BubbleDetectorCore.Det>? =
                 if (earlyDet != null) {
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
-                    if (fastMode && !earlyDet.isDone) { earlyDet.cancel(true); null }
-                    else try { earlyDet.get() } catch (_: Exception) { null }
+                    try { if (fastMode) earlyDet.get(350, java.util.concurrent.TimeUnit.MILLISECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
                 } else if (!fastMode && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
@@ -2176,6 +2175,7 @@ internal class WebModeExtractor(
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })
+            fun free0(i: Int): Boolean = false
             fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
                 dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
@@ -2388,7 +2388,7 @@ internal class WebModeExtractor(
                         }
                     }
                 }
-                val nb = WmBubble(
+                val nb0 = WmBubble(
                     src = src,
                     cx = (x0 + cx * k) / fullW, cy = (y0 + cy * k) / fullH,
                     w = bw * k / fullW, h = bh * k / fullH,
@@ -2407,6 +2407,25 @@ internal class WebModeExtractor(
                         }
                     } else emptyList()
                 )
+                // Real balloon outline from the segmentation model: hide the old lettering everywhere inside THIS balloon
+                // (paper colour), and make sure the cover reaches the balloon, not just the tight OCR box.
+                val nb = run {
+                    val seg = if (dets == null || free0(i)) null
+                        else BubbleSegCore.balloonAt(dets.mapNotNull { it.seg }, ((rects[i][0] + rects[i][2]) / 2), ((rects[i][1] + rects[i][3]) / 2))
+                    if (seg == null) nb0 else {
+                        val bands = BubbleSegCore.bands(seg)
+                        if (bands.isEmpty()) nb0 else nb0.copy(cv = ArrayList<Float>(bands.size * 4 + 4).also { lst ->
+                            // The old tight cover box stays covered too: when cv is present it replaces the single
+                            // cover rectangle, and lettering that touches the outline must not be left visible.
+                            lst.add(nb0.cx - nb0.w / 2f); lst.add(nb0.cy - nb0.h / 2f)
+                            lst.add(nb0.cx + nb0.w / 2f); lst.add(nb0.cy + nb0.h / 2f)
+                            for (cb in bands) {
+                                lst.add((x0 + cb[0] * k) / fullW); lst.add((y0 + cb[1] * k) / fullH)
+                                lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
+                            }
+                        })
+                    }
+                }
                 // Same text seen by two overlapping slices: keep the bigger box once.
                 var dup = -1
                 for (j in out.indices) {

@@ -21,11 +21,20 @@ internal object BubbleDetectorCore {
     const val SCORE_MIN = 0.30f
 
     /** One detection in the coordinates of the page that was scanned. */
-    class Det(val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int) {
+    class Det(
+        val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int,
+        /** Real balloon shape (segmentation model). null = only the box is known (old box-only detector). */
+        val seg: BubbleSegCore.Seg? = null
+    ) {
         val w: Int get() = r - l
         val h: Int get() = b - t
         val area: Long get() = w.toLong() * h
-        fun contains(x: Float, y: Float): Boolean = x >= l && x < r && y >= t && y < b
+        fun contains(x: Float, y: Float): Boolean {
+            if (!(x >= l && x < r && y >= t && y < b)) return false
+            // With a mask the point must be inside the balloon's own outline, not just inside its bounding box.
+            val s = seg ?: return true
+            return s.inside(x.toInt(), y.toInt())
+        }
         override fun toString(): String = "Det(label=$label score=$score box=[$l,$t,$r,$b])"
     }
 

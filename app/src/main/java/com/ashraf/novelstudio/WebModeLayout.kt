@@ -91,7 +91,7 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             WebModeLayout(o.optInt("to", 1), list)
         } catch (_: Exception) { null }
 
-        private val MARK = Regex("\\[(\\d{3,})\\]")
+        private val MARK = Regex("\\[\\s*(\\d{1,4})\\s*\\]")
         private val HASH_NOISE = Regex("[\\s\\p{P}\\p{S}]+")
 
         /** Canonical OCR text: OCR whitespace, case and punctuation variation must not resend it. */
@@ -133,35 +133,25 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val expectedLast = n + layout.titleOffset
             val byNo = HashMap<Int, String>()
             val seenNumbers = HashSet<Int>()
-            var previousNo = 0
             for ((k, m) in ms.withIndex()) {
-                val no = m.groupValues[1].toIntOrNull() ?: return null
-                // An out-of-range number means the model renumbered, merged or split bubbles: placement cannot be trusted.
-                if (no < 1 || no > expectedLast) return null
-                // Markers are positional IDs that are looked up by number below, so a marker that arrives out of order
-                // moves no text. A number that appears twice is ambiguous: keep the first answer and ignore the repeat.
-                // (Before, ONE such marker threw away the whole reply, although the chatbot had answered.)
-                if (!seenNumbers.add(no)) continue
-                previousNo = no
+                val no = m.groupValues[1].toIntOrNull() ?: continue
+                // PARTIAL PLACEMENT: a marker that is out of range, repeated or empty only loses ITS OWN bubble.
+                // Before, one such marker returned null and the whole reply (every correct bubble too) was thrown
+                // away - that was the "one wrong marker = nothing appears in any panel" bug.
+                if (no < 1 || no > expectedLast) continue
+                if (!seenNumbers.add(no)) continue   // a number that appears twice is ambiguous: keep the first answer
                 val end = if (k + 1 < ms.size) ms[k + 1].range.first else text.length
                 val body = text.substring(m.range.last + 1, end).trim()
                 // Older prompts/models used a tilde as a fake translation for skipped OCR.
                 // Treat it as an empty answer so it is never painted over a comic bubble.
-                if (body.isNotEmpty() && !body.matches(Regex("[~～]+"))) byNo[no] = body
+                if (body.isNotEmpty() && !body.matches(Regex("[~\uFF5E]+"))) byNo[no] = body
             }
+            if (byNo.isEmpty()) return null
 
-            // Full-chapter replies include the title as [001], so a response that starts at [001]
-            // but lacks the final expected marker is ambiguous: it may have renumbered bubbles after
-            // dropping the title, or it may have omitted the final bubble. Do not shift all bubbles.
-            if (layout.titleOffset > 0 && seenNumbers.contains(1) && !seenNumbers.contains(expectedLast)) {
-                return null
-            }
-
-            // Marker numbers are positional IDs. Never select a different offset just because it
-            // happens to produce more matches; missing IDs leave their own bubble blank.
+            // Marker numbers are positional IDs, looked up by number. A missing ID leaves ONLY its own bubble blank
+            // (the original lettering stays untouched there); every correctly marked bubble is still placed.
             val out = List(n) { i -> byNo[i + 1 + layout.titleOffset]?.replace(NL, " ") }
-            val found = out.count { !it.isNullOrBlank() }
-            return if (found > 0 && (found * 100 >= n * 70 || layout.titleOffset == 0)) out else null
+            return if (out.any { !it.isNullOrBlank() }) out else null
         }
 
         /**

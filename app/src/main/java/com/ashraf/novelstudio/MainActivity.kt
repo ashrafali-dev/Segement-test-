@@ -494,7 +494,7 @@ class MainActivity : Activity() {
                     null
                 } finally { full.recycle() }
             },
-            translateAndPlace = { bubble, text, _script, onDone ->
+            translateAndPlace = { bubbles, text, _script, onDone ->
                 handler.post {
                     val url = cleanUrl(novelWv.url.orEmpty())
                     if (url.isBlank()) { onDone(""); return@post }
@@ -503,7 +503,7 @@ class MainActivity : Activity() {
                         novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
                         number = "", contentSel = ""
                     )
-                    val layout = WebModeLayout(0, listOf(bubble))
+                    val layout = WebModeLayout(0, bubbles)
                     WebModeLayoutStore.setScan(url, layout)
                     // One tap = one translation. Deliberately NOT registerRealtimeBatch here: that marks the
                     // chapter as a realtime batch, and the realtime loop then keeps re-reading panels as the
