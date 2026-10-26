@@ -2416,8 +2416,12 @@ internal class WebModeExtractor(
             return try {
                 recognizeInner(bmp, st, fastMode, forceFresh).also { r ->
                     val letters = r.blocks.sumOf { b -> b.text.count { ch -> ch.isLetterOrDigit() } }
+                    // Prefer the label stamped on THIS result by the router; the process-global label may belong
+                    // to a concurrent route and reported "no text found" for frames that did contain text.
+                    val engineLabel = r.engineLabel.ifBlank { OcrEngineStatus.label }
+                        .ifBlank { Prefs.get(wv.context, "ocrEngine", "mlkit") }
                     OcrDiag.log("OCR", "script=${st.current.name} fast=$fastMode img=${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0} " +
-                        "engine=${OcrEngineStatus.label.ifBlank { Prefs.get(wv.context, "ocrEngine", "mlkit") }} blocks=${r.blocks.size} letters=$letters first=[${OcrDiag.snip(r.blocks.firstOrNull()?.text)}]")
+                        "engine=$engineLabel blocks=${r.blocks.size} letters=$letters first=[${OcrDiag.snip(r.blocks.firstOrNull()?.text)}]")
                 }
             } catch (e: Throwable) {
                 OcrDiag.log("OCR_ERR", "script=${st.current.name} ms=${SystemClock.elapsedRealtime() - t0} ${e.javaClass.simpleName}: ${e.message?.take(140)}")
@@ -2563,7 +2567,7 @@ internal class WebModeExtractor(
             if (retry.blocks.isEmpty()) return first
             val all = first.blocks.toMutableList()
             OcrLineFusion.addAll(all, retry.blocks.filterNot { OcrPost.isNoise(it) })
-            return OcrResult(all)
+            return OcrResult(all).also { it.engineLabel = first.engineLabel }
         }
     }
 

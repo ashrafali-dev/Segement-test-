@@ -200,11 +200,16 @@ internal class RoutingOcrEngine : OcrEngine {
             // Do not queue visible Lens OCR behind a remote read-ahead request. Local model engines
             // and the first Lens activation still use the serialized gate for safe lifecycle changes.
             val concurrentLens = !OcrGate.isBackgroundThread() && canRunLensConcurrently()
-            return when {
+            val result = when {
                 OcrGate.isBackgroundThread() -> OcrGate.run(waited, routeBlock)
                 concurrentLens -> OcrGate.runLensForeground(waited, routeBlock)
                 else -> OcrGate.run(waited, routeBlock)
             }
+            // Stamp the label onto the result itself. The global OcrEngineStatus.label is overwritten by any
+            // concurrent route (read-ahead / a later empty frame), which made the "OCR: … engine=" line claim
+            // "no text found" while blocks were actually returned. The per-result label can never be stale.
+            result.engineLabel = OcrEngineStatus.describe(selectedMode, used, fellBack)
+            return result
         } finally {
             val actualLabel = OcrEngineStatus.describe(selectedMode, used, fellBack)
             OcrEngineStatus.finishRoute(statusTicket, foregroundRoute, actualLabel)

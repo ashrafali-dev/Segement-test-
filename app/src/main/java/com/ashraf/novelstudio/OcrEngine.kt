@@ -41,6 +41,12 @@ internal data class OcrBlock(
 
 internal class OcrResult(val blocks: List<OcrBlock>) {
     val text: String get() = blocks.joinToString("\n\n") { it.text.trim() }.trim()
+
+    /**
+     * Label of the engine that actually produced THIS result (e.g. "Google Lens", "ML Kit"). Stored per result so
+     * diagnostics never read the racy process-global [OcrEngineStatus.label]. Set by [RoutingOcrEngine] before return.
+     */
+    @Volatile var engineLabel: String = ""
 }
 
 /** Failure reported by an engine (model missing, init failure, ...). */
