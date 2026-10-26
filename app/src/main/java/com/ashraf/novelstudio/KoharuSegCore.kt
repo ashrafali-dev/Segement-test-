@@ -48,7 +48,7 @@ internal object KoharuSegCore {
         val area: Long get() = (r - l).toLong() * (b - t)
     }
 
-    fun validInputSize(size: Int): Boolean = size in 320..1280 && size % STRIDE == 0
+    fun validInputSize(size: Int): Boolean = size in 256..1280 && size % STRIDE == 0
     fun validInputShape(width: Int, height: Int): Boolean = validInputSize(width) && validInputSize(height)
 
     fun decode(
