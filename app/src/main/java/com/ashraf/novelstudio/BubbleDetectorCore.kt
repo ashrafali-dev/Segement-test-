@@ -271,6 +271,8 @@ internal object BubbleDetectorCore {
             d.t + kotlin.math.floor(sb * d.h.toDouble() / mh).toInt()
         )
         if (safe[2] - safe[0] < 12 || safe[3] - safe[1] < 12) return null
+        val safeArea = (safe[2] - safe[0]).toLong() * (safe[3] - safe[1])
+        if (safeArea * 5L < d.area) return null
         val bands = maskBands(d, maxBands = 28)
         if (bands.isEmpty()) return null
         return MaskGeometry(d, safe, bands)
