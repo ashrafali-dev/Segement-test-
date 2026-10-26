@@ -6600,6 +6600,12 @@ return t.length>=40?'TXT:'+t:'';
             rtAheadHoldFlushRunnable = null
             rtAheadHoldSince = 0L
         }
+        // One word in every OCR log line: which reading path this job is actually using.
+        OcrDiag.setMode(when {
+            realtimeViewport -> "realtime"
+            forceFresh -> "manual"          // Auto Real-time OCR off: one tap, one crop
+            else -> "scanning"
+        })
         val jobSeq = ++webModeJobSerial
         webModeHandle?.cancel()
         webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()

@@ -1429,18 +1429,20 @@ internal class WebModeExtractor(
                 OcrDiag.log("FORCE_STEP", "step=$steps jsInfo=${info != null} domCandidates=${info?.optJSONArray("imgs")?.length() ?: -1} " +
                     "bitmap=${bmp?.let { "${it.width}x${it.height}" } ?: "NULL(blank capture)"} blankSoFar=$forceBlank retries=$blankTry")
                 if (bmp != null) {
-                    // JS discovery can time out on canvas/cross-origin iframe readers even while the
-                    // WebView has perfectly visible pixels. A viewport-only scan can still OCR that bitmap.
-                    val scanInfo = info ?: if (req.visibleOnly) {
-                        Log.w(TAG, "JS_FORCE_INFO returned no data; OCRing the visible WebView bitmap directly")
-                        JSONObject().put("vw", bmp.width.toFloat()).put("imgs", JSONArray())
-                    } else null
-                    if (scanInfo != null) {
-                        try { forceOcr(bmp, scanInfo, script, accs) }
-                        catch (e: OcrUnavailableException) {
-                            forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
-                        } finally { bmp.recycle() }
-                    } else bmp.recycle()
+                    // JS discovery can time out on canvas/cross-origin iframe readers even while the WebView
+                    // has perfectly visible pixels, so EVERY mode falls back to the captured pixels when no
+                    // image URL was found. Before, only realtime (visibleOnly) did: scanning and manual taps
+                    // gave up on exactly those pages — the canvas readers had no download link at all.
+                    val fallbackInfo = JSONObject().put("vw", bmp.width.toFloat()).put("imgs", JSONArray())
+                    val scanInfo = info ?: fallbackInfo.also {
+                        OcrDiag.log("FORCE_PIXEL_FALLBACK", "no DOM image info; OCRing captured WebView pixels " +
+                            "(${bmp.width}x${bmp.height}) mode=${if (req.visibleOnly) "realtime" else "scanning/manual"}")
+                        Log.w(TAG, "JS_FORCE_INFO returned no data; OCRing the captured WebView bitmap directly")
+                    }
+                    try { forceOcr(bmp, scanInfo, script, accs) }
+                    catch (e: OcrUnavailableException) {
+                        forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
+                    } finally { bmp.recycle() }
                 }
                 progress("Reading screen ${steps + 1} (${accs.size} images)", 5 + minOf(90, steps * 3))
                 if (req.visibleOnly) break
@@ -1711,7 +1713,11 @@ internal class WebModeExtractor(
                 OcrDiag.log("CROP_OCR", "canvas page cropped x$canvasCrops but has no new text; whole-screen OCR skipped (would only read page chrome)")
                 return
             }
-            if (noNewText && (req.visibleOnly || screenModeOn || noTextAtAll)) {
+            // Last stop for every mode: crops produced no new text, so read the captured pixels themselves.
+            // This is what makes a page with no usable image URLs (canvas readers, blobs, hotlink-blocked
+            // panels) readable in scanning and manual taps, not only in realtime.
+            if (noNewText) {
+                OcrDiag.log("FORCE_PIXEL_FALLBACK", "no new text from ${pending.size} crops; reading the captured viewport directly")
                 if (!readWholeViewport()) Log.w(TAG, "screen OCR fallback found no readable text after crop OCR")
             }
         }

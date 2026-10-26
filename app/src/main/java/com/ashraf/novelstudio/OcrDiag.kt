@@ -37,9 +37,23 @@ internal object OcrDiag {
     fun snip(s: String?, n: Int = 40): String =
         (s ?: "").replace(Regex("\\s+"), " ").trim().let { if (it.length > n) it.take(n) + "…" else it }
 
+    /**
+     * Which reading mode is actually running, in one word, prefixed to every line.
+     *
+     * Realtime, scanning and manual-lite all call into the same OCR code, so a log full of numbers did not
+     * say which path produced them. Publishing it here (instead of threading a parameter through every call
+     * site) keeps one source of truth: callers set it when the mode changes and every line then carries it.
+     */
+    @Volatile
+    var mode: String = "idle"
+        private set
+
+    fun setMode(value: String) { mode = value }
+
     fun log(tag: String, msg: String) {
-        val line = "${clock.get()!!.format(Date())} [${Thread.currentThread().name.take(18)}] $tag: $msg\n"
-        try { Log.i("NovelStudioOcrDiag", "$tag: $msg") } catch (_: Throwable) {}
+        val line = "${clock.get()!!.format(Date())} [${Thread.currentThread().name.take(18)}] " +
+            "[$mode] $tag: $msg\n"
+        try { Log.i("NovelStudioOcrDiag", "[$mode] $tag: $msg") } catch (_: Throwable) {}
         synchronized(lock) {
             buf.append(line)
             if (buf.length > MAX_CHARS) buf.delete(0, buf.length - (MAX_CHARS * 3 / 4))

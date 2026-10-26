@@ -48,6 +48,7 @@ internal object ManualExtractController {
         }
         cancel()
 
+        OcrDiag.setMode("manual")
         OcrDiag.log("MANUAL", "start src=${src.take(90)} rect=${"%.3f".format(x)},${"%.3f".format(y)} ${"%.3f".format(w)}x${"%.3f".format(h)} script=${script.name}")
         val token = runSeq.incrementAndGet()
         val o = ocr ?: ManualExtractOcr(context.applicationContext).also { ocr = it }
