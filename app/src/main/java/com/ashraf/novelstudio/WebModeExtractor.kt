@@ -2466,6 +2466,7 @@ internal class WebModeExtractor(
                 // tiny) or into an oval's bounding box (its corners lie outside the outline: text left the bubble).
                 var tL = 0; var tT = 0; var tR = 0; var tB = 0
                 var coverBands: List<IntArray> = emptyList()
+                var modelMaskFitUsed = false
                 // Free lettering (sound effects, narration on artwork) has no bubble to fit into.
                 if (!rotated && !freeAt(i) && Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     val seedBox = refinedSeed[i] ?: rects[i]
@@ -2489,6 +2490,7 @@ internal class WebModeExtractor(
                             tL = sf[0]; tT = sf[1]; tR = sf[2]; tB = sf[3]
                             // These are row bands from the MODEL'S mask, not a second image-derived mask.
                             coverBands = modelShape.bands
+                            modelMaskFitUsed = true
                             cx = (cL + cR) / 2f; cy = (cT + cB) / 2f
                             bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
                             OcrDiag.log("MASK_LAYOUT", "safe=${sf[2] - sf[0]}x${sf[3] - sf[1]} cover=${cR - cL}x${cB - cT} bands=${coverBands.size}")
@@ -2547,7 +2549,8 @@ internal class WebModeExtractor(
                             lst.add((x0 + cb[0] * k) / fullW); lst.add((y0 + cb[1] * k) / fullH)
                             lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
                         }
-                    } else emptyList()
+                    } else emptyList(),
+                    modelMaskFit = modelMaskFitUsed
                 )
                 // Same text seen by two overlapping slices: keep the bigger box once.
                 var dup = -1
