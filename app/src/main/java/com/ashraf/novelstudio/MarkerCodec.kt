@@ -18,7 +18,7 @@ internal object MarkerCodec {
     private const val WIDTH = 3
 
     /** A marker in a reply: `[1]`, `[001]`, `[P1_L1]` — the model is not always consistent. */
-    private val MARK = Regex("\\[(?:P\\d+[_\\-])?(\\d{1,6})\\]")
+    private val MARK = Regex("\\[(?:P\\d+[_\\-]L?)?(\\d{1,6})\\]")
 
     /** Collapse every kind of line break to a single space and trim. Never leaves a blank line. */
     fun oneLine(text: String): String =
