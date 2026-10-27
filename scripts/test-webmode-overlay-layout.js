@@ -70,8 +70,10 @@ assert.ok(remover.includes("private fun eraseByBackgroundModel("),
 assert.ok(extractor.includes("val sourceGlyphRect = refinedBox[i] ?: rects[i]") &&
           extractor.includes("val ocrCx = (sourceGlyphRect[0] + sourceGlyphRect[2]) / 2f"),
   "cleaning geometry must come directly from the OCR/refined text rectangle, not expanded bubble bounds");
-assert.ok(layoutModel.includes("val ocrCx: Float = 0f") && layoutModel.includes(".put(\"ocx\", r5(b.ocrCx))"),
-  "original glyph bounds must survive layout persistence separately from the bubble cover box");
+assert.ok(layoutModel.includes("val ocrCx: Float = 0f") &&
+          layoutModel.includes(".put(\"ocx\", r5(b.ocrCx))") &&
+          layoutModel.includes("b.optDouble(\"ow\", 0.0).toFloat()"),
+  "original glyph bounds must survive layout serialization and restoration separately from the cover box");
 assert.ok(remover.includes("val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width"),
   "image cleaning must use original OCR bounds, not the expanded speech-bubble cover bounds");
 assert.ok(remover.includes("val detectorErasedKeys = erasedBubbleKeys(linesByBubble, detectorErasedLines)") &&
