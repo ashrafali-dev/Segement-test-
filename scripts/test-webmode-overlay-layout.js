@@ -83,8 +83,8 @@ assert.ok(remover.includes("insideSpeechBubbleShape(bubble, balloonMask, width, 
   "pixel cleaning and mask growth must stay inside a known speech-bubble shape");
 assert.ok(remover.includes("val minimumErasedPixels = max(32, (innerArea * 0.06f).toInt())") &&
           remover.includes("val minimumTextEvidence = max(24, (text.w.toLong() * text.h * 6L / 100L).toInt())") &&
-          remover.includes("selectedInsideCount < candidateInkCount * 0.55f"),
-  "partial or ambiguous pixel changes must not remove the opaque cover or mark a source line fully erased");
+          remover.includes("selectedInsideCount < candidateInkCount * 0.80f"),
+  "transparent rendering requires strong source-ink and OCR-box coverage evidence");
 assert.ok(!remover.includes("val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())"),
   "transparent rendering must not use the old permissive 1% erase threshold");
 assert.ok(bubbleCore.includes("maskBands(d, maxBands = 64)") &&
