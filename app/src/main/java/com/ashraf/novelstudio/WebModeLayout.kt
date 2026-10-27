@@ -46,7 +46,12 @@ internal data class WmBubble(
      */
     val free: Boolean = false,
     /** True when the cover bounds and text-safe rectangle came directly from the YOLO instance mask. */
-    val modelMaskFit: Boolean = false
+    val modelMaskFit: Boolean = false,
+    /**
+     * Original OCR text-region geometry, separate from [cx]/[cy]/[w]/[h] which may expand to the whole speech bubble.
+     * Fractions of the source image. Zero size means an older saved layout and falls back to the cover box.
+     */
+    val ocrCx: Float = 0f, val ocrCy: Float = 0f, val ocrW: Float = 0f, val ocrH: Float = 0f
 )
 
 /**
@@ -64,7 +69,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             .put("srcText", b.sourceText).put("tr", b.translatedText).put("so", b.stroke)
             .put("tcx", r5(b.tcx)).put("tcy", r5(b.tcy)).put("tbw", r5(b.tbw)).put("tbh", r5(b.tbh))
             .put("cv", JSONArray().also { arr -> for (v in b.cv) arr.put(r5(v)) })
-            .put("fr", b.free).put("mf", b.modelMaskFit))
+            .put("fr", b.free).put("mf", b.modelMaskFit)
+            .put("ocx", r5(b.ocrCx)).put("ocy", r5(b.ocrCy))
+            .put("ow", r5(b.ocrW)).put("oh", r5(b.ocrH)))
         return JSONObject().put("v", 2).put("to", titleOffset).put("b", a).toString()
     }
 
@@ -88,7 +95,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                     b.optDouble("tcx", 0.0).toFloat(), b.optDouble("tcy", 0.0).toFloat(),
                     b.optDouble("tbw", 0.0).toFloat(), b.optDouble("tbh", 0.0).toFloat(),
                     b.optJSONArray("cv")?.let { ja -> List(ja.length()) { k -> ja.optDouble(k, 0.0).toFloat() } } ?: emptyList(),
-                    b.optBoolean("fr", false), b.optBoolean("mf", false)
+                    b.optBoolean("fr", false), b.optBoolean("mf", false),
+                    b.optDouble("ocx", 0.0).toFloat(), b.optDouble("ocy", 0.0).toFloat(),
+                    b.optDouble("ow", 0.0).toFloat(), b.optDouble("oh", 0.0).toFloat()
                 ))
             }
             WebModeLayout(o.optInt("to", 1), list)
