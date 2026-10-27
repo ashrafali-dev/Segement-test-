@@ -21,6 +21,10 @@ import kotlin.math.roundToInt
 internal object KoharuSegCore {
     const val DEFAULT_SIZE = 512
     const val STRIDE = 32
+    // Dynamic Koharu supports rectangular stride-aligned inputs. After aspect-preserving resize,
+    // a 384px-long webtoon tile can be 224x384; rejecting widths below 256 breaks normal inference.
+    const val MIN_INPUT_SIZE = 128
+    const val MAX_INPUT_SIZE = 1280
     const val ROW_SIZE = 38
     const val PROTO_CHANNELS = 32
     const val MASK_SIZE = 64
@@ -48,7 +52,8 @@ internal object KoharuSegCore {
         val area: Long get() = (r - l).toLong() * (b - t)
     }
 
-    fun validInputSize(size: Int): Boolean = size in 256..1280 && size % STRIDE == 0
+    fun validInputSize(size: Int): Boolean =
+        size in MIN_INPUT_SIZE..MAX_INPUT_SIZE && size % STRIDE == 0
     fun validInputShape(width: Int, height: Int): Boolean = validInputSize(width) && validInputSize(height)
 
     fun decode(
