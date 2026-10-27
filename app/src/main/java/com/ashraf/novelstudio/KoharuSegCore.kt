@@ -56,6 +56,45 @@ internal object KoharuSegCore {
         size in MIN_INPUT_SIZE..MAX_INPUT_SIZE && size % STRIDE == 0
     fun validInputShape(width: Int, height: Int): Boolean = validInputSize(width) && validInputSize(height)
 
+    /**
+     * Normalize the model's prediction tensor to row-major [instances, 38].
+     * Official exports use [1, instances, 38], but some ONNX exporters transpose it to [1, 38, instances].
+     * Names such as output0/output1 do not identify the axis order; trust runtime tensor dimensions instead.
+     */
+    fun normalizePredictionRows(values: FloatArray, shape: LongArray): FloatArray {
+        require(shape.size == 3 && (shape[0] == 1L || shape[0] <= 0L)) {
+            "Koharu output0 runtime shape is invalid: ${shape.contentToString()}"
+        }
+        when {
+            shape[2] == ROW_SIZE.toLong() -> {
+                require(values.isNotEmpty() && values.size % ROW_SIZE == 0) {
+                    "Koharu output0 shape ${shape.contentToString()} has ${values.size} values; expected rows of $ROW_SIZE"
+                }
+                return values
+            }
+            shape[1] == ROW_SIZE.toLong() && shape[2] > 0L -> {
+                val instances = shape[2].toInt()
+                require(values.size == ROW_SIZE * instances) {
+                    "Koharu output0 shape ${shape.contentToString()} has ${values.size} values"
+                }
+                val rows = FloatArray(values.size)
+                for (instance in 0 until instances) {
+                    for (field in 0 until ROW_SIZE) {
+                        rows[instance * ROW_SIZE + field] = values[field * instances + instance]
+                    }
+                }
+                return rows
+            }
+            // Symbolic batch/output dimensions can remain unknown in metadata. The pinned graph documents
+            // row-major output0; accept it only when the runtime value count is divisible by the row width.
+            shape[1] <= 0L && shape[2] <= 0L && values.isNotEmpty() && values.size % ROW_SIZE == 0 ->
+                return values
+            else -> throw IllegalArgumentException(
+                "Koharu output0 shape ${shape.contentToString()} is incompatible; expected [1,N,38] or [1,38,N]"
+            )
+        }
+    }
+
     fun decode(
         predictions: FloatArray,
         prototypes: FloatArray,
