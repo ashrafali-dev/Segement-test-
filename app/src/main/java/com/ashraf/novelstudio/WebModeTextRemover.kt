@@ -90,7 +90,9 @@ internal object WebModeTextRemover {
                 bitmap, text, width, height, padding = 2, clipTo = outline
             )
             changed += modelMaskPixels
-            val minimumTextEvidence = max(12, (text.w.toLong() * text.h / 100L).toInt())
+            // Don't remove the opaque cover because a few mask pixels changed; require meaningful coverage
+            // of this text instance before treating the source lettering as fully erased.
+            val minimumTextEvidence = max(16, (text.w.toLong() * text.h * 3L / 100L).toInt())
             if (modelMaskPixels >= minimumTextEvidence) {
                 notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
                 continue
@@ -106,7 +108,7 @@ internal object WebModeTextRemover {
             val b = (text.b + 2).coerceAtMost(height)
             val fallbackPixels = fillMaskedRect(bitmap, outline, l, t, r, b, fill, width, height)
             changed += fallbackPixels
-            if (fallbackPixels >= max(12, (text.w.toLong() * text.h / 100L).toInt()))
+            if (fallbackPixels >= max(16, (text.w.toLong() * text.h * 3L / 100L).toInt()))
                 notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
         }
 
@@ -117,7 +119,7 @@ internal object WebModeTextRemover {
         }) {
             val pixels = eraseTextInstance(bitmap, free, width, height, padding = 2)
             changed += pixels
-            if (pixels >= max(12, (free.w.toLong() * free.h / 100L).toInt()))
+            if (pixels >= max(16, (free.w.toLong() * free.h * 3L / 100L).toInt()))
                 notifyErasedOcrLines(free, recognizedLines, onOcrRegionErased)
         }
         // Older detectors may provide text boxes without instance masks; preserve their compatible fallback.
@@ -170,7 +172,7 @@ internal object WebModeTextRemover {
                 val fill = medianRingColour(bitmap, outer, inner, width, height) ?: continue
                 val regionChanged = fillMaskedRect(bitmap, outer, l, t, r, b, fill, width, height, inpaint)
                 changed += regionChanged
-                val minimumLineEvidence = max(12, (line.w.toLong() * line.h / 100L).toInt())
+                val minimumLineEvidence = max(16, (line.w.toLong() * line.h * 3L / 100L).toInt())
                 if (regionChanged >= minimumLineEvidence) onOcrRegionErased?.invoke(line)
             }
         }
@@ -874,7 +876,9 @@ internal object WebModeTextRemover {
                     fg1, fg2, fg3, fontPx, x0, y0, innerArea,
                     bubble, balloonMask, width, height
                 )
-                val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())
+                // OCR boxes are now source-glyph bounds. A 1% hit was too easy for a partial stroke to satisfy.
+                // Keep an opaque shaped cover whenever only a small fragment could be reconstructed.
+                val minimumErasedPixels = max(24, (innerArea * 0.04f).toInt())
                 if (bgRemoved >= minimumErasedPixels) {
                     totalRemoved += bgRemoved
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
@@ -939,7 +943,7 @@ internal object WebModeTextRemover {
                 // around two heavy kanji columns is ~70 % ink, and the old 50 % cap threw the whole bubble away.
                 // Only very dense (>= 85 %) masks are treated as artwork now; the shape-size limits above and
                 // the on-artwork AI gate still decide whether this is really lettering.
-                if (selectedCount < max(4, (innerArea * 0.01f).toInt()) ||
+                if (selectedCount < max(24, (innerArea * 0.04f).toInt()) ||
                     selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
                 // Flat bubble: mop up the faint ghosts the strict glyph test leaves behind (anti-aliasing, JPEG
