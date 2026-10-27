@@ -149,7 +149,7 @@ internal object WebModeWriter {
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
       // measures both axes and shrinks the text instead of letting it spill outside.
       t.style.cssText='display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;'
-        +'text-align:center;line-height:1.25;white-space:normal;word-break:break-word;overflow-wrap:break-word;'
+        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:normal;'
         // Bengali vowel signs (ি ী ু ৃ ে ৈ) stick out above and below the line box; room for them
         // stops them being clipped by the box edge or by the gradient's background-clip.
         +'padding:0.16em 0.1em;'
@@ -389,7 +389,7 @@ internal object WebModeWriter {
       var availW=Math.max(8,boxW*0.88),availH=Math.max(8,boxH*0.86),hasTb=false,cW=boxW,cH=boxH;
       var maskLock=b.getAttribute('data-mf')==='1';
       function fitInsideMask(startPx){
-        t.style.overflowWrap='break-word';t.style.wordBreak='break-word';
+        t.style.overflowWrap='normal';t.style.wordBreak='normal';
         var px=Math.max(1.5,Number(startPx)||1.5);
         for(var mi=0;mi<70;mi++){
           t.style.fontSize=px+'px';
@@ -412,7 +412,7 @@ internal object WebModeWriter {
       if(!hasTb)b.style.padding='3px';
       t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
       t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
-      t.style.whiteSpace='normal';t.style.maxBlockSize='none';
+      t.style.whiteSpace='normal';t.style.maxBlockSize='none';t.style.wordBreak='normal';t.style.overflowWrap='normal';
       t.style.flex='none';   // a flex item would shrink to the narrow box and report a wrong, too tall size while we measure
       // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
       // as a last resort, then request a taller geometry instead of clipping the final lines.
@@ -584,7 +584,15 @@ internal object WebModeWriter {
           var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?
             2*Math.max(0,Math.min(ocx-RB.freeL,RB.freeR-ocx)):Infinity;
           // Keep the OCR centre fixed. Width can grow for Bengali, but never beyond the lane around that centre.
-          RB.w=Math.max(8,Math.min(wantW,room,RB.ow*1.35));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
+          // A very tall, narrow OCR box often represents one vertical Japanese text column, not the usable
+          // width of the speech balloon. If no safe balloon rectangle was found, let a word-wrapped
+          // translation widen inside the available image lane instead of stacking Bengali glyphs.
+          var textValue=String(RB.b.textContent||'');
+          var unshapedColumn=!RB.rot&&RB.b.getAttribute('data-mf')!=='1'&&
+            !RB.b.getAttribute('data-tb')&&RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\\s/.test(textValue);
+          var maxBoxW=unshapedColumn?Math.min(RB.rw*0.72,Math.max(RB.ow*3,Math.min(RB.oh*0.55,RB.rw*0.72))):RB.ow*1.35;
+          RB.wideMaxW=maxBoxW;
+          RB.w=Math.max(8,Math.min(wantW,room,maxBoxW));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
           RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;
           RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
         }
@@ -826,7 +834,7 @@ internal object WebModeWriter {
             bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);
             // A box that shares its row with neighbours may not take more width than the row gave it.
             var roomW=(Number.isFinite(R.freeR)&&Number.isFinite(R.freeL))?R.freeR-R.freeL-2:R.rw-4;
-            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(R.ow*1.35,roomW));
+            var wideCap=Number(R.wideMaxW)||R.ow*1.35;\n            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(wideCap,roomW));
             bb.__nsMaxH=R.oh*1.8;
             if(cw<R.ow)bb.__nsMaxW=Math.max(8,cw);   // a box that had to be narrowed must not be re-widened by the text
             var prevW=Number(bb.__nsReqWRatio)||0;
