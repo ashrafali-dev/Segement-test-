@@ -80,11 +80,11 @@ class ManualCropGeometryTest {
     }
 
     @Test fun `detections are shifted into crop pixels`() {
-        // Crop = x 0.10..0.60, y 0.20..0.40 of a 1000x2000 page, decoded at full size (1000x400).
-        val c = crop(0.10f, 0.20f, 0.50f, 0.20f, cropW = 1000, cropH = 400, pageW = 1000, pageH = 2000)
+        // Region x 0.10..0.60, y 0.20..0.40 of a 1000x2000 page = 500x400 page px, decoded at full size.
+        val c = crop(0.10f, 0.20f, 0.50f, 0.20f, cropW = 500, cropH = 400, pageW = 1000, pageH = 2000)
         val full = listOf(BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 0.9f, 200, 500, 400, 700))
         val d = ManualCropGeometry.detectionsInCrop(full, c)!!.single()
-        // Crop origin in page px is (100, 400).
+        // Crop origin in page px is (100, 400), so the box is 100..300 / 100..300 inside the crop.
         assertEquals(100, d.l)
         assertEquals(100, d.t)
         assertEquals(300, d.r)
@@ -92,11 +92,11 @@ class ManualCropGeometryTest {
     }
 
     @Test fun `downscaled crop scales the detector offset, not just subtracts it`() {
-        // Same page region, but the crop bitmap is half size: 500x200 for a region 500x400 page px.
-        val c = crop(0.10f, 0.20f, 0.50f, 0.20f, cropW = 500, cropH = 200, pageW = 1000, pageH = 2000)
+        // Same 500x400 page region, but the crop bitmap is half size: 250x200.
+        val c = crop(0.10f, 0.20f, 0.50f, 0.20f, cropW = 250, cropH = 200, pageW = 1000, pageH = 2000)
         val full = listOf(BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 0.9f, 200, 500, 400, 700))
         val d = ManualCropGeometry.detectionsInCrop(full, c)!!.single()
-        // Page offset (100,400) becomes crop offset (50,40) after the 0.5 scale.
+        // Page offset (100,400) becomes crop offset (50,40) after the 0.5 scale; size 200x200 -> 100x100.
         assertEquals(50, d.l)
         assertEquals(40, d.t)
         assertEquals(150, d.r)
@@ -113,11 +113,14 @@ class ManualCropGeometryTest {
         // 20x20 mask over a 200x200 box: the left half is inside, the right half is not.
         val mask = BubbleDetectorCore.Mask(20, 20, ByteArray(400) { if (it % 20 < 10) 1 else 0 })
         val full = listOf(BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 0.9f, 100, 100, 300, 300, mask))
-        // Crop is the right half of that box (page x 200..300 of a 1000-wide page).
+        // Crop x is the right half of that box (page 200..300) on a 1000-wide page, full height 400.
+        // Decoded at 100x400 px, so page px -> crop px is 0.1 across and 1 vertically.
         val d = ManualCropGeometry.detectionsInCrop(full, crop(0.20f, 0f, 0.10f, 1f, 100, 400, 1000, 400))!!.single()
         assertNotNull(d.mask)
-        assertEquals(100, d.w)
-        // Centre of the trimmed box is outside the original silhouette, so contains() must say false.
+        // 100 page px wide clipped, scaled by 0.1 -> 10 crop px.
+        assertEquals(10, d.w)
+        assertTrue(d.h > 0)
+        // The kept slice is the RIGHT half of the silhouette, which was all outside the mask.
         assertTrue(!d.contains(d.l + d.w / 2f, d.t + d.h / 2f))
     }
 
