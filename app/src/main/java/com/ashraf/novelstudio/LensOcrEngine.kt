@@ -877,7 +877,7 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
          * A full scan overlaps panels for speed; without this cap that burst is what produces HTTP 429 in the
          * first place. Three is the value that has kept Lens answering on the test device.
          */
-        private val REQUEST_SLOTS = java.util.concurrent.Semaphore(5)
+        private val REQUEST_SLOTS = java.util.concurrent.Semaphore(7)
         /** Spacing between request starts so a burst is not mistaken for abuse. */
         private val START_GAP_MS = 120L
         /** Guards the reservation of the next request start; the sleep itself happens outside it. */

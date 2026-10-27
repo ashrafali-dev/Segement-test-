@@ -182,8 +182,8 @@ internal object BubbleDetector {
                     try {
                         // A model run takes 2 CPU threads for seconds: never while the page is being scrolled.
                         var waited = 0
-                        while (SystemClock.elapsedRealtime() - lastActivityMs < 900L && waited < 6000) { Thread.sleep(150); waited += 150 }
-                        if (SystemClock.elapsedRealtime() - lastActivityMs < 900L) {
+                        while (SystemClock.elapsedRealtime() - lastActivityMs < 2500L && waited < 12000) { Thread.sleep(200); waited += 200 }
+                        if (SystemClock.elapsedRealtime() - lastActivityMs < 2500L) {
                             OcrDiag.log("DETECT_SRC", "background detection dropped: reader kept scrolling")
                         } else detect(c, copy)
                     } catch (_: Throwable) {} finally {

@@ -107,7 +107,16 @@ internal object WebModeWriter {
           +'object-fit:fill;pointer-events:none;user-select:none;margin:0;padding:0;border:0;z-index:0;';
         cleanLayer.appendChild(ci);entry=cleanImgs[key]={el:ci,url:''};
       }
-      if(entry.url!==url){entry.url=url;entry.el.src=url;}
+      if(!entry.hooked){
+        entry.hooked=true;
+        // The cover boxes of a bubble whose lettering was "erased in the cleaned picture" stay visible until that picture
+        // has really loaded: a slow / failed / evicted clean image used to leave the ORIGINAL lettering showing under
+        // the translation with no cover at all (the "text appears but nothing behind it, sometimes" bug).
+        entry.el.addEventListener('load',function(){entry.loaded=true;try{forceNext=true;sched();}catch(e){}});
+        entry.el.addEventListener('error',function(){entry.loaded=false;});
+      }
+      if(entry.url!==url){entry.url=url;entry.loaded=false;entry.el.src=url;}
+      if(entry.el.complete&&entry.el.naturalWidth>0)entry.loaded=true;
       var x=ABS?(r.left-o0.left):r.left,y=ABS?(r.top-o0.top):r.top;
       entry.el.style.width=r.width+'px';entry.el.style.height=r.height+'px';
       var hl=holes[key];
@@ -169,7 +178,10 @@ internal object WebModeWriter {
       }
       b.appendChild(t);
       var cover=null;
-      if(!it.cl&&!it.er){
+      var hasCv=!!(it.cv&&it.cv.length>=4);
+      // Bubbles with a real balloon MASK always paint it (paper colour inside the outline): erasing does not depend on
+      // the cleaned picture. Other bubbles with a cleaned picture get a cover too, shown only until that picture loads.
+      if(!it.er){
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
           +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
@@ -184,6 +196,7 @@ internal object WebModeWriter {
           cover.style.borderRadius=it.sf?'12px':'4px';
           cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
         }
+        cover.__nsWaitClean=!!it.cl&&!hasCv;
         coverLayer.appendChild(cover);
       }
       b.__nsCover=cover;
@@ -785,7 +798,9 @@ internal object WebModeWriter {
               cover.setAttribute('data-k',ck);cover.style.width=R.ow+'px';cover.style.height=R.oh+'px';
               cover.style.transform='translate3d('+R.ox0+'px,'+R.oy0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
             }
-            if(cover.style.display!=='block')cover.style.display='block';
+            var wantCover='block';
+            if(cover.__nsWaitClean){var ce=cleanImgs[norm(R.s)];if(ce&&ce.loaded)wantCover='none';}
+            if(cover.style.display!==wantCover)cover.style.display=wantCover;
           }
           // If the text moved away from its source bubble, retain the source cover AND add a
           // matching card under the relocated text so it stays readable over artwork.

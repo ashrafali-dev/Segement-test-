@@ -2144,10 +2144,15 @@ internal class WebModeExtractor(
             // reader's text: real-time only TAKES a finished result from the cache and, when there is none, starts the
             // detector in the background on its own copy of the picture (the next pass over this panel then has masks).
             // Only the thorough scan (not latency bound) waits for the detector here.
+            // Every real-time read counts as "the reader is busy": the background model only starts after 2.5 s of quiet.
+            if (fastMode) BubbleDetector.noteActivity()
             val detOk = Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
             val cachedDets: List<BubbleDetectorCore.Det>? = if (detOk) BubbleDetector.cached(bmp) else null
             val remoteDet = (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true
-            val detectWanted = preRecognized == null && cachedDets == null && !fastMode && remoteDet && detOk
+            // A whole-chapter scan (100+ pictures) must finish in about a minute: the two models need 4-10 s PER picture on a
+            // mid-range phone, one after the other, so the scan does not run them unless wmDetectInScan is switched on.
+            val scanDetect = Prefs.bool(wv.context, "wmDetectInScan", false)
+            val detectWanted = preRecognized == null && cachedDets == null && !fastMode && remoteDet && detOk && scanDetect
             if (detectWanted) {
                 detFuture = try {
                     DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
@@ -2774,9 +2779,9 @@ internal class WebModeExtractor(
          */
         private const val SCAN_LENS_DEADLINE_MS = 45_000L
         /** Panels fetched concurrently during a full scan (network-bound, cheap). */
-        private const val SCAN_FETCH_THREADS = 6
+        private const val SCAN_FETCH_THREADS = 8
         /** Lens requests in flight during a full scan; the engine's own slot semaphore bounds the real work. */
-        private const val SCAN_LENS_THREADS = 5
+        private const val SCAN_LENS_THREADS = 7
         // At most this many Lens requests of tall-panel slices in flight at once (all panels together).
         private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(5)
         private val DETECT_POOL: java.util.concurrent.ExecutorService =
