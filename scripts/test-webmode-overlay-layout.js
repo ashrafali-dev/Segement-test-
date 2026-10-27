@@ -34,7 +34,7 @@ assert.ok(remover.includes("estimateBackgroundModel(region, rw, rh, ix0, iy0, ix
   "text remover must estimate local background outside the OCR box");
 assert.ok(remover.includes("internal class BackgroundModel") && remover.includes("fun at(x: Int, y: Int"),
   "text remover must interpolate the local background across the OCR box");
-assert.ok(remover.includes("Non-AI flat") || remover.includes("Background-driven erase"),
+assert.ok(remover.includes("private fun eraseByBackgroundModel("),
   "text remover must have a non-AI background fill path");
 assert.ok(remover.includes("val grow = (fontPx * 0.05f).toInt().coerceIn(1, 3)"),
   "background erasure must expand the mask to clear anti-aliased text edges");
