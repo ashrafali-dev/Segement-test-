@@ -2221,8 +2221,11 @@ internal class WebModeExtractor(
             val earlyDet = detFuture
             val dets: List<BubbleDetectorCore.Det>? = cachedDetectorResult ?: if (earlyDet != null) {
                 try {
-                    if (fastMode) earlyDet.get(DETECT_FAST_WAIT_MS, TimeUnit.MILLISECONDS)
-                    else earlyDet.get()
+                    if (fastMode) {
+                        val budget = if (Thread.currentThread().name == "ns-webmode-ahead")
+                            DETECT_AHEAD_WAIT_MS else DETECT_FAST_WAIT_MS
+                        earlyDet.get(budget, TimeUnit.MILLISECONDS)
+                    } else earlyDet.get()
                 } catch (_: java.util.concurrent.TimeoutException) {
                     null
                 } catch (_: Throwable) {
@@ -2235,7 +2238,6 @@ internal class WebModeExtractor(
             }
             detectorAttempted = detectorAttempted || earlyDet != null || dets != null
             // Keep status truthful: distinguish a model that is pending from a model that truly was disabled.
-            val detectRan = detectorAttempted
             // Preserve the detector's instance masks while mapping each local slice/tile box back to
             // native source-image pixels. Mask samples are normalized to their box, so the same mask
             // remains valid when the box is scaled and offset.
@@ -2899,11 +2901,11 @@ internal class WebModeExtractor(
         // multiple full-size bitmaps while the previous 1024x1024 inference is still using memory.
         private val detectorInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        /** Short realtime budget for the detector: it is geometry, not the answer, so it may arrive late. */
-        private const val DETECT_FAST_WAIT_MS = 450L
-        // A detector run can take ~3 s on a mid-range phone. This wait is only on the OCR worker and is
-        // used solely for explicit mask-only mode, where a late result would otherwise mean no mask cleaning.
-        private const val DETECT_MASK_ONLY_WAIT_MS = 4_500L
+        /** Extra wait after OCR returns; inference starts before the Lens network wait and runs in parallel. */
+        private const val DETECT_FAST_WAIT_MS = 800L
+        // Read-ahead is not blocking the visible UI. Give it more time so cached bubble layouts normally include
+        // Koharu's mask geometry before the panel enters the viewport.
+        private const val DETECT_AHEAD_WAIT_MS = 1_400L
 
         /** Detector results by image hash, so a panel is analysed once and the next pass is free. */
         private val detectCache = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>?>(16, 0.75f, true) {
