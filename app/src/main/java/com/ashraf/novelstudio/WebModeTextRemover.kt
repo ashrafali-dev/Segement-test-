@@ -76,7 +76,14 @@ internal object WebModeTextRemover {
         for (free in dets.filter {
             it.label == BubbleDetectorCore.CLS_TEXT_FREE && it.mask != null
         }) {
-            val asBubble = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 1f, free.l, free.t, free.r, free.b)
+            // Sample outside the segmented text box. Using a fake outer box identical to [free] leaves no
+            // pixels in medianRingColour's ring and always falls back to inpainting.
+            val pad = max(4, min(free.w, free.h) / 4).coerceAtMost(24)
+            val asBubble = BubbleDetectorCore.Det(
+                BubbleDetectorCore.CLS_BUBBLE, 1f,
+                (free.l - pad).coerceAtLeast(0), (free.t - pad).coerceAtLeast(0),
+                (free.r + pad).coerceAtMost(width), (free.b + pad).coerceAtMost(height)
+            )
             val ring = medianRingColour(bitmap, asBubble, free, width, height)
             changed += if (ring != null) {
                 fillInstanceMask(bitmap, free, ring, width, height, padding = 2)
@@ -88,7 +95,12 @@ internal object WebModeTextRemover {
         for (free in dets.filter {
             it.label == BubbleDetectorCore.CLS_TEXT_FREE && it.mask == null
         }) {
-            val asBubble = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 1f, free.l, free.t, free.r, free.b)
+            val pad = max(4, min(free.w, free.h) / 4).coerceAtMost(24)
+            val asBubble = BubbleDetectorCore.Det(
+                BubbleDetectorCore.CLS_BUBBLE, 1f,
+                (free.l - pad).coerceAtLeast(0), (free.t - pad).coerceAtLeast(0),
+                (free.r + pad).coerceAtMost(width), (free.b + pad).coerceAtMost(height)
+            )
             val ring = medianRingColour(bitmap, asBubble, free, width, height)
             changed += if (ring != null) fillRect(bitmap, free.l, free.t, free.r, free.b, ring, width, height)
             else gradientFillRect(bitmap, free.l, free.t, free.r, free.b, width, height)
