@@ -3135,7 +3135,17 @@ function decorativeUrl(s){
     /(?:^|\/)webtoon\/detail$/.test(p)||
     /\/public\/uploaded-content\/link_slo(?:t)?(?:[\/_.-]|$)/.test(p);
 }
-function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!decorativeUrl(s);}
+function blockedTrackerUrl(s){
+  s=String(s||'').trim().toLowerCase();
+  var host='',path='';
+  try{var u=new URL(s,document.baseURI);host=u.hostname.toLowerCase();path=u.pathname.toLowerCase();}
+  catch(e){path=s.split('#')[0].split('?')[0].toLowerCase();}
+  // Shonen Jump+ occasionally exposes view-sized tracking beacons as visible IMG candidates.
+  // Reject the known ad/analytics origins before image-size heuristics can mistake their wrappers for manga panels.
+  if(/(^|\.)(?:doubleclick\.net|googleadservices\.com|googlesyndication\.com|amazon-adsystem\.com|adsrvr\.org|criteo\.com|adnxs\.com|scorecardresearch\.com|treasuredata\.com)$/.test(host))return true;
+  return false;
+}
+function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!blockedTrackerUrl(s)&&!decorativeUrl(s);}
 function pickSrcset(ss){
   if(!ss)return '';
   var best='',bestScore=-1,parts=String(ss).split(',');
