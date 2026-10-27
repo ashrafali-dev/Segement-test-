@@ -194,6 +194,8 @@ assert.ok(bodyMatch[1].includes("b.__nsShapeMaxW=shapeMaxW"),
   "the fitter must use the detected balloon's real safe-band width, not only the OCR box width");
 assert.ok(bodyMatch[1].includes("b.style.overflow='visible';b.__nsShapeFitApplied=true"),
   "validated wide text must not be clipped by the narrower source/cover box");
+assert.ok(bodyMatch[1].includes("t.style.position='relative';t.style.left='50%';t.style.transform='translateX(-50%)'"),
+  "wider text must remain centred on the bubble instead of being clipped/anchored at its left edge");
 assert.ok(bodyMatch[1].includes("tw>bw+1.5&&!R.b.__nsShapeFitApplied"),
   "post-layout verification must not shrink a shape-validated translation back into the old box");
 assert.ok(!bodyMatch[1].includes("overflowWrap='anywhere'") && !bodyMatch[1].includes("overflow-wrap:anywhere"),
