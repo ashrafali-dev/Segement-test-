@@ -926,15 +926,18 @@ internal object WebModeTextRemover {
             if (uniform) return left
             val fx = if (x1 > x0) ((x - x0).toFloat() / (x1 - x0)).coerceIn(0f, 1f) else 0.5f
             val fy = if (y1 > y0) ((y - y0).toFloat() / (y1 - y0)).coerceIn(0f, 1f) else 0.5f
-            val rH = lerp(red(left), red(right), fx)
-            val gH = lerp(green(left), green(right), fx)
-            val bH = lerp(blue(left), blue(right), fx)
-            val rV = lerp(red(top), red(bottom), fy)
-            val gV = lerp(green(top), green(bottom), fy)
-            val bV = lerp(blue(top), blue(bottom), fy)
-            val r = Math.round(rH * (1f - fy) + rV * fy)
-            val g = Math.round(gH * (1f - fy) + gV * fy)
-            val b = Math.round(bH * (1f - fy) + bV * fy)
+            // Blend the vertical ends, then apply the horizontal difference as a ramp across the box. Unlike a
+            // symmetric average of the two axes, this reproduces the ends exactly: at fy=0 the result is the top
+            // colour and at fy=1 the bottom one, so a purely vertical gradient is followed instead of being
+            // flattened toward the middle by the left/right samples.
+            fun ch(l: Int, r: Int, t: Int, b: Int): Int {
+                val vertical = t + ((b - t) * fy)
+                val horizontal = (r - l) * fx
+                return Math.round(vertical + horizontal).coerceIn(0, 255)
+            }
+            val r = ch(red(left), red(right), red(top), red(bottom))
+            val g = ch(green(left), green(right), green(top), green(bottom))
+            val b = ch(blue(left), blue(right), blue(top), blue(bottom))
             return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
         }
     }
