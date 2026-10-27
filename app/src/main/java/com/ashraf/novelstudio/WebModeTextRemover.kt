@@ -291,7 +291,7 @@ internal object WebModeTextRemover {
             val lineArea = line.w * line.h
             // Prefer a conservative false negative over transparent text with a few source glyphs still visible.
             // The caller keeps an opaque shaped cover when the model mask only explains a minority of this OCR line.
-            if (iw * ih >= lineArea * 0.70f) callback(line)
+            if (iw * ih >= lineArea * 0.80f) callback(line)
         }
     }
 
@@ -952,7 +952,7 @@ internal object WebModeTextRemover {
                 // If most candidate ink was rejected as ambiguous/art, we cannot prove the whole source line
                 // has disappeared. Leave the original under an opaque shaped cover instead.
                 if (selectedCount < max(32, (innerArea * 0.06f).toInt()) ||
-                    candidateInkCount == 0 || selectedInsideCount < candidateInkCount * 0.55f ||
+                    candidateInkCount == 0 || selectedInsideCount < candidateInkCount * 0.80f ||
                     selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
                 // Flat bubble: mop up the faint ghosts the strict glyph test leaves behind (anti-aliasing, JPEG
