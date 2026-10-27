@@ -671,7 +671,9 @@ internal object BubbleDetector {
             inputWidth: Int,
             inputHeight: Int
         ): List<BubbleDetectorCore.Det> {
-            require(KoharuSegCore.validInputShape(inputWidth, inputHeight))
+            require(KoharuSegCore.validInputShape(inputWidth, inputHeight)) {
+                "invalid Koharu run input ${inputWidth}x${inputHeight}; dimensions must be stride-${KoharuSegCore.STRIDE}-aligned and at least ${KoharuSegCore.MIN_INPUT_SIZE}px"
+            }
             check(argb.size >= inputWidth * inputHeight) { "letterboxed Koharu canvas is too small" }
             val pixels = inputWidth * inputHeight
             if (chwPixels != pixels) {
