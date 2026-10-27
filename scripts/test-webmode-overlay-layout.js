@@ -5,6 +5,8 @@ const writer = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebMode
 const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeExtractor.kt", "utf8");
 const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
 const remover = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt", "utf8");
+const bubbleCore = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleDetectorCore.kt", "utf8");
+const layoutModel = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
 const libMatch = extractor.match(/private const val LIB = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(libMatch, "could not locate WebModeExtractor page-discovery JavaScript");
@@ -65,6 +67,26 @@ assert.ok(remover.includes("internal class BackgroundModel") && remover.includes
   "text remover must interpolate the local background across the OCR box");
 assert.ok(remover.includes("private fun eraseByBackgroundModel("),
   "text remover must have a non-AI background fill path");
+assert.ok(extractor.includes("val ocrCx = cx; val ocrCy = cy; val ocrBw = bw; val ocrBh = bh"),
+  "source glyph bounds must be captured before the overlay box expands to speech-bubble geometry");
+assert.ok(layoutModel.includes("val ocrCx: Float = 0f") && layoutModel.includes(".put(\"ocx\", r5(b.ocrCx))"),
+  "original glyph bounds must survive layout persistence separately from the bubble cover box");
+assert.ok(remover.includes("val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width"),
+  "image cleaning must use original OCR bounds, not the expanded speech-bubble cover bounds");
+assert.ok(remover.includes("val detectorErasedKeys = erasedBubbleKeys(linesByBubble, detectorErasedLines)") &&
+          remover.includes("internal fun erasedBubbleKeys("),
+  "only bubbles whose assigned source OCR lines were erased may become transparent");
+assert.ok(!remover.includes("for (b in bubbles) erased.add(WebModeTextRemovalCache.bubbleKey(b))"),
+  "a successful erase anywhere on the page must not mark every bubble as erased");
+assert.ok(remover.includes("insideSpeechBubbleShape(bubble, balloonMask, width, height"),
+  "pixel cleaning and mask growth must stay inside a known speech-bubble shape");
+assert.ok(remover.includes("val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())"),
+  "a handful of changed pixels must not count as proof that all source glyphs disappeared");
+assert.ok(bubbleCore.includes("maskBands(d, maxBands = 64)") &&
+          bubbleCore.includes("(groupStart + 0.1)") && bubbleCore.includes("(endY - 0.1)"),
+  "irregular bubble masks must retain an inset shape cover instead of falling back to a wide rectangle");
+assert.ok(extractor.includes("shapeCoverBands(bytes, bubbles, panelDetections)"),
+  "missing cover bands must be rebuilt even when another region made the image cleaner report success");
 assert.ok(remover.includes("val grow = (fontPx * 0.05f).toInt().coerceIn(1, 3)"),
   "background erasure must expand the mask to clear anti-aliased text edges");
 // The balloon must never be repainted wholesale again: wipeInterior painted the whole interior rectangle.
