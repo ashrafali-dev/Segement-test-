@@ -136,7 +136,10 @@ internal object WebModeWriter {
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
-      // Model-mask geometry is a fixed shape: fit the text inside the safe rectangle, never grow it outside the mask.
+      // Conservative interior bands from the detector/pixel mask. The fitter may use more of the balloon only
+      // when every measured text line remains inside these real shape bands.
+      if(it.cv&&it.cv.length>=4)b.setAttribute('data-cv',it.cv.join(','));
+      // Model-mask geometry is a fixed shape; the shape-aware fitter below proves any wider layout stays inside it.
       if(it.mf)b.setAttribute('data-mf','1');
       // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
       // overflow:hidden is what keeps a long translation inside its mask. fit() still shrinks the font to
@@ -425,10 +428,95 @@ internal object WebModeWriter {
         return r.height<=availH+0.5&&t.scrollHeight<=availH+1&&
           t.scrollWidth<=t.clientWidth+1&&r.width<=availW+1;
       }
+      // Text may use a wider part of an irregular balloon than the single largest safe rectangle,
+      // but only when the actual glyph line boxes are proven to sit inside the detector's interior bands.
+      // This is script-neutral: it measures the rendered text, not Japanese/Korean/English source labels.
+      function lineRects(){
+        try{
+          var rg=document.createRange();rg.selectNodeContents(t);
+          var rs=rg.getClientRects(),out=[];
+          for(var ri=0;ri<rs.length;ri++){
+            var q=rs[ri];
+            if(q&&q.width>0.35&&q.height>0.35)out.push({left:q.left,right:q.right,top:q.top,bottom:q.bottom,width:q.width,height:q.height});
+          }
+          return out;
+        }catch(e){return [];}
+      }
+      function renderedLineCount(){
+        var rs=lineRects(),ys=[];
+        for(var ri=0;ri<rs.length;ri++){
+          var cy=(rs[ri].top+rs[ri].bottom)/2,found=false;
+          for(var yi=0;yi<ys.length;yi++)if(Math.abs(ys[yi]-cy)<=Math.max(2,rs[ri].height*0.28)){found=true;break;}
+          if(!found)ys.push(cy);
+        }
+        return ys.length;
+      }
+      function staysInsideDetectedShape(){
+        var bands=b.__nsSafeBandsPx,rs=lineRects();
+        if(!bands||!bands.length||!rs.length)return false;
+        for(var ri=0;ri<rs.length;ri++){
+          var q=rs[ri],pad=Math.min(1.1,Math.max(0.25,q.height*0.06));
+          var y0=q.top+pad,y1=q.bottom-pad;
+          if(y1<y0){var mid=(q.top+q.bottom)/2;y0=mid;y1=mid;}
+          for(var si=0;si<5;si++){
+            var y=y0+(y1-y0)*(si+0.5)/5,inside=false;
+            for(var bi=0;bi<bands.length;bi++){
+              var band=bands[bi];
+              if(y>=band[1]+0.15&&y<=band[3]-0.15&&q.left>=band[0]+0.5&&q.right<=band[2]-0.5){inside=true;break;}
+            }
+            if(!inside)return false;
+          }
+        }
+        return true;
+      }
+      function fitWithinShape(preferWide){
+        var bands=b.__nsSafeBandsPx;
+        if(!bands||!bands.length)return false;
+        var oldPad=b.style.padding,oldW=availW,oldH=availH,oldTW=t.style.width,
+            oldMW=t.style.maxWidth,oldFS=t.style.fontSize,oldOverflow=t.style.overflow;
+        var limit=Number(b.__nsMaxW);
+        if(!isFinite(limit)||limit<8)limit=boxW-6;
+        var upperW=Math.max(8,Math.min(boxW-6,limit));
+        var startW=Math.max(8,Math.min(availW,upperW));
+        if(preferWide)startW=Math.min(upperW,Math.max(startW+6,startW*1.16));
+        startW=Math.min(startW,upperW);
+        b.style.padding='3px';
+        availH=Math.max(8,boxH*0.86);
+        var chosen=null;
+        for(var wi=0;wi<=8;wi++){
+          var trialW=startW+(upperW-startW)*(wi/8);
+          availW=trialW;
+          t.style.width=trialW+'px';t.style.maxWidth=trialW+'px';t.style.overflow='visible';
+          var loPx=Math.max(1.5,floorPx),hiPx=hi,bestPx=0;
+          for(var fi=0;fi<12;fi++){
+            var midPx=(loPx+hiPx)/2;
+            t.style.fontSize=midPx+'px';
+            if(fits()&&staysInsideDetectedShape()){bestPx=midPx;loPx=midPx;}else hiPx=midPx;
+          }
+          if(bestPx<floorPx){
+            t.style.fontSize=floorPx+'px';
+            if(fits()&&staysInsideDetectedShape())bestPx=floorPx;
+          }
+          if(bestPx>=floorPx){chosen={w:trialW,px:bestPx};break;}
+        }
+        if(chosen){
+          availW=chosen.w;t.style.width=chosen.w+'px';t.style.maxWidth=chosen.w+'px';
+          t.style.fontSize=chosen.px+'px';t.style.overflow='visible';
+          return true;
+        }
+        b.style.padding=oldPad;availW=oldW;availH=oldH;
+        t.style.width=oldTW;t.style.maxWidth=oldMW;t.style.fontSize=oldFS;t.style.overflow=oldOverflow;
+        return false;
+      }
       for(var n=0;n<18;n++){
         var mid=(lo+hi)/2;t.style.fontSize=mid+'px';
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
       }
+      var sourceText=String(t.textContent||'').trim();
+      var manyNarrowLines=hasTb&&cW<boxW*0.58&&sourceText.length>=8&&renderedLineCount()>=3;
+      // If the largest safe rectangle forces a long translation into several tiny lines, try wider
+      // candidate layouts and validate each rendered line against the original mask bands first.
+      if((best<floorPx||manyNarrowLines)&&fitWithinShape(manyNarrowLines))return boxH;
       if(best<floorPx){
         if(maskLock){fitInsideMask(best);return boxH;}
         // Even the smallest readable size does not fit: take the free space at the sides.
@@ -775,6 +863,15 @@ internal object WebModeWriter {
         if(!im){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var r=im.getBoundingClientRect();
         if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
+        // Map the same safe interior bands used to erase the source lettering into live viewport pixels.
+        // Geometry is refreshed with the image on every layout pass, including responsive resize/scroll.
+        var cvRaw=b.getAttribute('data-cv'),cvNums=cvRaw?cvRaw.split(','):[],safeBands=[];
+        for(var cvi=0;cvi+3<cvNums.length;cvi+=4){
+          var cl=Number(cvNums[cvi]),ct=Number(cvNums[cvi+1]),cr=Number(cvNums[cvi+2]),cb=Number(cvNums[cvi+3]);
+          if(!isFinite(cl)||!isFinite(ct)||!isFinite(cr)||!isFinite(cb)||cr<=cl||cb<=ct)continue;
+          safeBands.push([r.left+cl*r.width,r.top+ct*r.height,r.left+cr*r.width,r.top+cb*r.height]);
+        }
+        b.__nsSafeBandsPx=safeBands;
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
         var cleanUrl=b.getAttribute('data-cl');
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
