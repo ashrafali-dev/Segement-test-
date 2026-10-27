@@ -15,6 +15,8 @@ assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploade
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
 assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
+assert.ok(extractor.includes("if (mo == null && !req.visibleOnly)"), "visible screen fallback must not abort before the first screenshot when DOM metadata JS times out");
+assert.ok(extractor.includes("FORCE_META_FALLBACK"), "missing visible metadata must be logged and continue through screenshot OCR");
 const forceInfoAt = extractor.indexOf("val forceInfoScript = if (req.visibleOnly)");
 const forceInfoEnd = extractor.indexOf("else JS_FORCE_INFO", forceInfoAt);
 assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canvas-crop path");
@@ -186,6 +188,12 @@ assert.ok(bodyMatch[1].includes("b.setAttribute('data-cv',it.cv.join(','))"),
 assert.ok(bodyMatch[1].includes("function fitWithinShape(preferWide)") &&
           bodyMatch[1].includes("function staysInsideDetectedShape()"),
   "text may widen only after line-by-line checks against the bubble's detected shape");
+assert.ok(bodyMatch[1].includes("for(var wi=0;wi<=4;wi++)") &&
+          bodyMatch[1].includes("for(var fi=0;fi<8;fi++)"),
+  "shape-aware fitting must keep bounded width/font search work on the WebView UI thread");
+assert.ok(!bodyMatch[1].includes("for(var wi=0;wi<=8;wi++)") &&
+          !bodyMatch[1].includes("for(var fi=0;fi<12;fi++)"),
+  "shape-aware fitting must not regress to the expensive nine-width, twelve-font trial loop");
 assert.ok(bodyMatch[1].includes("b.__nsSafeBandsPx=safeBands"),
   "mask bands must be mapped into the live image's viewport geometry");
 assert.ok(bodyMatch[1].includes("gx-gw/2+cl*gw") && bodyMatch[1].includes("gy-gh/2+ct*gh"),
