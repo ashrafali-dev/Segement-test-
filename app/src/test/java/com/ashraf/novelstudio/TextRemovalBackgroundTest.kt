@@ -73,10 +73,11 @@ class TextRemovalBackgroundTest {
         // ink colour that itself matched the panel gradient would be genuinely ambiguous and is not the case
         // this model claims to handle.
         val ink = argb(18, 18, 22)
-        val img = region(140, 140, { _, y ->
+        val panelColourAt: (Int) -> Int = { y ->
             val t = y / 139f
             argb((220 * (1f - t) + 30 * t).toInt(), 20, (20 * (1f - t) + 210 * t).toInt())
-        }, ink, intArrayOf(50, 50, 90, 90))
+        }
+        val img = region(140, 140, { _, y -> panelColourAt(y) }, ink, intArrayOf(50, 50, 90, 90))
         val m = WebModeTextRemover.estimateBackgroundModel(img, 140, 140, 50, 50, 90, 90, ink, ink)
         assertNotNull(m)
         assertTrue("a ramp must not be collapsed to one colour", !m!!.uniform)
@@ -84,12 +85,12 @@ class TextRemovalBackgroundTest {
         val bottom = m.at(70, 88, 50, 90, 50, 90)
         // The two ends of the ramp must differ, and each must match the real background nearby.
         assertTrue("ends must differ", (!near(top, bottom, 24)))
-        println("GRADIENT model uniform=${m.uniform} top=${hex(top)} want=${hex(img[52 * 140 + 70])} " +
-            "bottom=${hex(bottom)} want=${hex(img[88 * 140 + 70])}")
-        assertTrue("top end follows the panel: got ${hex(top)} want ${hex(img[52 * 140 + 70])}",
-            near(top, img[52 * 140 + 70], 26))
-        assertTrue("bottom end follows the panel: got ${hex(bottom)} want ${hex(img[88 * 140 + 70])}",
-            near(bottom, img[88 * 140 + 70], 26))
+        // Compare against the PANEL, not the image: x=70 is inside the ink block, so the image pixel there is
+        // the lettering. The panel colour comes from the same generator used to build the fixture.
+        val wantTop = panelColourAt(52)
+        val wantBottom = panelColourAt(88)
+        assertTrue("top end follows the panel: got ${hex(top)} want ${hex(wantTop)}", near(top, wantTop, 26))
+        assertTrue("bottom end follows the panel: got ${hex(bottom)} want ${hex(wantBottom)}", near(bottom, wantBottom, 26))
     }
 
     @Test fun `artwork with no dominant background yields no model`() {
