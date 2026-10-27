@@ -389,6 +389,9 @@ internal object WebModeWriter {
       if(!t)return 0;
       var boxW=b.clientWidth,boxH=b.clientHeight;
       if(boxW<8||boxH<8)return boxH;
+      // Shape-fit may let the text extend beyond the old OCR box, but only inside measured balloon bands.
+      // Reset on every new measurement so a resize can never inherit a stale visible-overflow state.
+      b.__nsShapeFitApplied=false;b.style.overflow='hidden';
       var availW=Math.max(8,boxW*0.88),availH=Math.max(8,boxH*0.86),hasTb=false,cW=boxW,cH=boxH;
       var maskLock=b.getAttribute('data-mf')==='1';
       function fitInsideMask(startPx){
@@ -471,12 +474,13 @@ internal object WebModeWriter {
       }
       function fitWithinShape(preferWide){
         var bands=b.__nsSafeBandsPx;
-        if(!bands||!bands.length)return false;
+        var shapeCap=Number(b.__nsShapeMaxW),pageW=Number(b.__nsShapePageW);
+        if(!bands||!bands.length||b.__nsShapeFitBlocked||!isFinite(shapeCap)||shapeCap<8)return false;
         var oldPad=b.style.padding,oldW=availW,oldH=availH,oldTW=t.style.width,
             oldMW=t.style.maxWidth,oldFS=t.style.fontSize,oldOverflow=t.style.overflow;
-        var limit=Number(b.__nsMaxW);
-        if(!isFinite(limit)||limit<8)limit=boxW-6;
-        var upperW=Math.max(8,Math.min(boxW-6,limit));
+        // The parent is the source/cover box, not necessarily the full balloon. Allow a wider child up to
+        // the widest real interior band; every candidate's rendered glyphs are checked against those bands.
+        var upperW=Math.max(8,Math.min(shapeCap,isFinite(pageW)&&pageW>8?pageW-4:shapeCap));
         var startW=Math.max(8,Math.min(availW,upperW));
         if(preferWide)startW=Math.min(upperW,Math.max(startW+6,startW*1.16));
         startW=Math.min(startW,upperW);
@@ -497,15 +501,20 @@ internal object WebModeWriter {
             t.style.fontSize=floorPx+'px';
             if(fits()&&staysInsideDetectedShape())bestPx=floorPx;
           }
-          if(bestPx>=floorPx){chosen={w:trialW,px:bestPx};break;}
+          // Compare every safe width. Stopping at the first floor-sized fit kept translations cramped even
+          // when the detector mask proved that more of the balloon was available.
+          if(bestPx>=floorPx&&(!chosen||bestPx>chosen.px+0.05||
+             (Math.abs(bestPx-chosen.px)<=0.05&&trialW<chosen.w)))chosen={w:trialW,px:bestPx};
         }
         if(chosen){
           availW=chosen.w;t.style.width=chosen.w+'px';t.style.maxWidth=chosen.w+'px';
           t.style.fontSize=chosen.px+'px';t.style.overflow='visible';
+          b.style.overflow='visible';b.__nsShapeFitApplied=true;
           return true;
         }
         b.style.padding=oldPad;availW=oldW;availH=oldH;
         t.style.width=oldTW;t.style.maxWidth=oldMW;t.style.fontSize=oldFS;t.style.overflow=oldOverflow;
+        b.style.overflow='hidden';b.__nsShapeFitApplied=false;
         return false;
       }
       for(var n=0;n<18;n++){
@@ -513,9 +522,11 @@ internal object WebModeWriter {
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
       }
       var sourceText=String(t.textContent||'').trim();
-      var manyNarrowLines=hasTb&&cW<boxW*0.58&&sourceText.length>=8&&renderedLineCount()>=3;
-      // If the largest safe rectangle forces a long translation into several tiny lines, try wider
-      // candidate layouts and validate each rendered line against the original mask bands first.
+      var shapeWidth=Number(b.__nsShapeMaxW)||boxW;
+      var manyNarrowLines=hasTb&&sourceText.length>=8&&renderedLineCount()>=3&&
+        (cW<boxW*0.78||shapeWidth>cW*1.15);
+      // If the safe rectangle forces a long translation into narrow lines, try wider layouts in the real balloon
+      // interior. This works for all target scripts and never assumes that source and translated text have similar widths.
       if((best<floorPx||manyNarrowLines)&&fitWithinShape(manyNarrowLines))return boxH;
       if(best<floorPx){
         if(maskLock){fitInsideMask(best);return boxH;}
@@ -767,12 +778,15 @@ internal object WebModeWriter {
         var tr=t.getBoundingClientRect(),br=R.b.getBoundingClientRect();
         var th=Math.max(tr.height,t.scrollHeight),tw=Math.max(tr.width,t.scrollWidth);
         var bh=R.y1-R.y0,bw=R.x1-R.x0;
-        if(!R.rot&&(th>bh+1.5||tw>bw+1.5)){
+        if(!R.rot&&(th>bh+1.5||(tw>bw+1.5&&!R.b.__nsShapeFitApplied))){
           overflow++;
           if(R.b.getAttribute('data-mf')==='1'){
-            // If browser metrics differ slightly after shaping, reduce font in place. Never resize a model-mask box.
+            // Shape-fit text may be wider than the old OCR box, but it has been checked against the balloon's real bands.
+            // If the height alone overflows, shrink only for height; never undo a valid wider shape layout.
             var lockedFs=parseFloat(t.style.fontSize)||6;
-            var lockedScale=Math.min(0.92,(bw-2)/Math.max(1,tw),(bh-2)/Math.max(1,th));
+            var lockedScale=R.b.__nsShapeFitApplied
+              ? Math.min(0.92,(bh-2)/Math.max(1,th))
+              : Math.min(0.92,(bw-2)/Math.max(1,tw),(bh-2)/Math.max(1,th));
             if(lockedFs>2.5&&lockedScale<0.995)t.style.fontSize=Math.max(2.5,lockedFs*lockedScale*0.96)+'px';
           }else{
             var ratio=Math.min(1.8,(th/0.86+4)/Math.max(1,R.oh));
@@ -865,17 +879,25 @@ internal object WebModeWriter {
         if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         // Map the same safe interior bands used to erase the source lettering into live viewport pixels.
         // Geometry is refreshed with the image on every layout pass, including responsive resize/scroll.
-        var cvRaw=b.getAttribute('data-cv'),cvNums=cvRaw?cvRaw.split(','):[],safeBands=[];
+        var g=b.getAttribute('data-g').split(',');
+        var gx=Number(g[0]),gy=Number(g[1]),gw=Number(g[2]),gh=Number(g[3]);
+        // data-cv entries are fractions of THIS bubble's cover box (bubbleScript converts from page fractions).
+        // Do not map them from the page origin: doing so shifted the mask-check bands away from the actual balloon,
+        // rejecting valid wide layouts and forcing target text back into the narrow source-text rectangle.
+        var cvRaw=b.getAttribute('data-cv'),cvNums=cvRaw?cvRaw.split(','):[],safeBands=[],shapeMaxW=0;
         for(var cvi=0;cvi+3<cvNums.length;cvi+=4){
           var cl=Number(cvNums[cvi]),ct=Number(cvNums[cvi+1]),cr=Number(cvNums[cvi+2]),cb=Number(cvNums[cvi+3]);
           if(!isFinite(cl)||!isFinite(ct)||!isFinite(cr)||!isFinite(cb)||cr<=cl||cb<=ct)continue;
-          safeBands.push([r.left+cl*r.width,r.top+ct*r.height,r.left+cr*r.width,r.top+cb*r.height]);
+          var band=[r.left+(gx-gw/2+cl*gw)*r.width,
+                    r.top+(gy-gh/2+ct*gh)*r.height,
+                    r.left+(gx-gw/2+cr*gw)*r.width,
+                    r.top+(gy-gh/2+cb*gh)*r.height];
+          safeBands.push(band);shapeMaxW=Math.max(shapeMaxW,band[2]-band[0]);
         }
-        b.__nsSafeBandsPx=safeBands;
+        b.__nsSafeBandsPx=safeBands;b.__nsShapeMaxW=shapeMaxW;b.__nsShapePageW=r.width;
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
         var cleanUrl=b.getAttribute('data-cl');
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
-        var g=b.getAttribute('data-g').split(',');
         var bw=g[2]*r.width,bh=g[3]*r.height;
         var vx=r.left+g[0]*r.width,vy=r.top+g[1]*r.height;       // centre in the viewport
         var near=!(vy+bh/2<-MARGIN||vy-bh/2>vh+MARGIN);
@@ -896,6 +918,7 @@ internal object WebModeWriter {
           var R=L[n],bb=R.b,gg=R.g;
           if(R.hidden){if(bb.style.display!=='none')bb.style.display='none';if(bb.__nsCover)bb.__nsCover.style.display='none';continue;}
           bb.__nsPushed=false;
+          bb.__nsShapeFitBlocked=!!R.grp||bb.getAttribute('data-moved')==='1';
           var cw=R.x1-R.x0,ch=R.y1-R.y0;
           var key=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
           var keyChanged=bb.getAttribute('data-k')!==key;
