@@ -88,9 +88,6 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val list = ArrayList<WmBubble>(a.length())
             for (i in 0 until a.length()) {
                 val b = a.getJSONObject(i)
-                // A layout saved while the status pill was inside a screenshot still holds the pill's text (and its
-                // translation): drop it when loading so it can never be painted on a page again.
-                if (UiChromeFilter.isChrome(b.optString("srcText", "")) || UiChromeFilter.isChrome(b.optString("tr", ""))) continue
                 list.add(WmBubble(
                     b.getString("s"),
                     b.getDouble("cx").toFloat(), b.getDouble("cy").toFloat(),
@@ -131,7 +128,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         fun translated(layout: WebModeLayout, values: List<String?>): WebModeLayout =
             WebModeLayout(layout.titleOffset, layout.bubbles.mapIndexed { i, b ->
                 val value = values.getOrNull(i)?.trim().orEmpty()
-                if (value.isEmpty()) b else b.copy(translatedText = value)
+                // The app's own status text is never lettering: it stays in the list (indexes must not shift) but
+                // never receives a translation, so it can never be painted on a page.
+                if (value.isEmpty() || UiChromeFilter.isChrome(b.sourceText)) b else b.copy(translatedText = value)
             })
         private val NL = Regex("\\s*\\n\\s*")
 
@@ -150,23 +149,30 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val expectedLast = n + layout.titleOffset
             val byNo = HashMap<Int, String>()
             val seenNumbers = HashSet<Int>()
+            var outOfRange = 0; var dup = 0; var empty = 0
+            val order = ArrayList<Int>()
             for ((k, m) in ms.withIndex()) {
                 val no = m.groupValues[1].toIntOrNull() ?: continue
-                // PARTIAL PLACEMENT: a marker that is out of range, repeated or empty only loses ITS OWN bubble.
-                // Before, one such marker returned null and the whole reply (every correct bubble too) was thrown
-                // away - that was the "one wrong marker = nothing appears in any panel" bug.
-                if (no < 1 || no > expectedLast) continue
-                if (!seenNumbers.add(no)) continue   // a number that appears twice is ambiguous: keep the first answer
+                // A marker that is out of range, repeated or empty only loses ITS OWN bubble (the old rule threw the
+                // whole reply away for one such marker)...
+                if (no < 1 || no > expectedLast) { outOfRange++; continue }
+                if (!seenNumbers.add(no)) { dup++; continue }   // a number that appears twice is ambiguous: keep the first answer
                 val end = if (k + 1 < ms.size) ms[k + 1].range.first else text.length
                 val body = text.substring(m.range.last + 1, end).trim()
                 // Older prompts/models used a tilde as a fake translation for skipped OCR.
-                // Treat it as an empty answer so it is never painted over a comic bubble.
-                if (body.isNotEmpty() && !body.matches(Regex("[~\uFF5E]+"))) byNo[no] = body
+                if (body.isNotEmpty() && !body.matches(Regex("[~\\uFF5E]+"))) { byNo[no] = body; order.add(no) } else empty++
             }
-            if (byNo.isEmpty()) return null
+            // ...but a reply that answers only a FRACTION of the bubbles, or whose numbers run out of order, shows the
+            // model lost track of the numbering (merged / renumbered / re-ordered paragraphs). Putting such a reply on the
+            // page prints lines in the wrong bubbles and leaves the rest permanently untranslated, so it is rejected and
+            // the caller retries instead (that is what the old 70 % rule protected).
+            val need = if (n <= 2) n else Math.ceil(n * 0.75).toInt()
+            val ascending = order.zipWithNext().all { (x, y) -> y > x }
+            val ok = byNo.size >= need && ascending
+            OcrDiag.log("ALIGN", "bubbles=$n markers=${ms.size} placed=${byNo.size} need=$need outOfRange=$outOfRange dup=$dup empty=$empty ascending=$ascending -> ${if (ok) "ACCEPT" else "REJECT"}")
+            if (!ok) return null
 
-            // Marker numbers are positional IDs, looked up by number. A missing ID leaves ONLY its own bubble blank
-            // (the original lettering stays untouched there); every correctly marked bubble is still placed.
+            // Marker numbers are positional IDs, looked up by number. A missing ID leaves ONLY its own bubble blank.
             val out = List(n) { i -> byNo[i + 1 + layout.titleOffset]?.replace(NL, " ") }
             return if (out.any { !it.isNullOrBlank() }) out else null
         }

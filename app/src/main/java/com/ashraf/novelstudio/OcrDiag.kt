@@ -73,6 +73,7 @@ internal object OcrDiag {
             s.lastSummary = summary
             if (error.isNotBlank()) s.lastError = error
         }
+        BubbleDetector.scanEnd()   // balances scanStart() of a whole-chapter scan job (no-op for live jobs)
         log("JOB_DONE", "ok=$ok via=$how ms=$ms err=$error | $summary")
     }
 

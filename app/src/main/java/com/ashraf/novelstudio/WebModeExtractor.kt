@@ -278,7 +278,7 @@ internal class WebModeExtractor(
 
         fun begin() {
             ensureBridge(wv)
-            if (req.visibleOnly) BubbleDetector.noteActivity()
+            if (req.visibleOnly) BubbleDetector.noteActivity() else BubbleDetector.scanStart()
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
                 "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
             progress("Discovering chapter panels", 1)

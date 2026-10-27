@@ -411,6 +411,9 @@ internal object WebModeWriter {
       t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
       t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
       t.style.whiteSpace='normal';t.style.maxBlockSize='none';
+      // Words stay whole: with break-word a narrow box (tall Japanese bubble) printed one syllable per line. A word wider
+      // than the box now makes the FONT smaller (or the box wider) instead.
+      t.style.wordBreak='normal';t.style.overflowWrap='normal';
       t.style.flex='none';   // a flex item would shrink to the narrow box and report a wrong, too tall size while we measure
       // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
       // as a last resort, then request a taller geometry instead of clipping the final lines.

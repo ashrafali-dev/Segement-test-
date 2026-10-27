@@ -401,8 +401,13 @@ internal object WebModeTextRemover {
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
             // of re-encoding the whole comic page with lossy WebP.
             val modern = Build.VERSION.SDK_INT >= 30
-            val format = if (modern) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.PNG
-            if (!bitmap.compress(format, 100, bytesOut)) return false
+            // Lossless WebP encoding took ~1 s of CPU per picture on a mid-range phone (a 126-picture chapter scan spent
+            // minutes there). High-quality lossy WebP is several times faster and keeps the line art; switch the
+            // pref wmCleanLossless on if the halftone dots of a title look soft.
+            val lossless = Prefs.bool(context, "wmCleanLossless", false)
+            val format = if (modern) (if (lossless) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.WEBP_LOSSY)
+                         else Bitmap.CompressFormat.PNG
+            if (!bitmap.compress(format, if (modern && !lossless) 94 else 100, bytesOut)) return false
             val cleaned = bytesOut.toByteArray()
             if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
             val mime = if (modern) "image/webp" else "image/png"

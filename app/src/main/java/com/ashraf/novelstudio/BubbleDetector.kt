@@ -156,6 +156,11 @@ internal object BubbleDetector {
     /** The reader is scrolling / a real-time job just started: background model runs wait until it is quiet. */
     fun noteActivity() { lastActivityMs = SystemClock.elapsedRealtime() }
 
+    private val scanJobs = java.util.concurrent.atomic.AtomicInteger(0)
+    /** A whole-chapter scan is running: it must get every CPU core, so no background model run starts meanwhile. */
+    fun scanStart() { scanJobs.incrementAndGet() }
+    fun scanEnd() { if (scanJobs.get() > 0) scanJobs.decrementAndGet() }
+
     /**
      * Real-time path: start detection for [bmp] in the background and return IMMEDIATELY (the reader's text must never
      * wait for a 4-10 s model run). The model works on its OWN copy of the picture, so the caller may recycle [bmp] at
@@ -164,7 +169,7 @@ internal object BubbleDetector {
      */
     fun requestAsync(c: Context, bmp: Bitmap) {
         try {
-            if (bmp.isRecycled || !enabled(c)) return
+            if (bmp.isRecycled || !enabled(c) || scanJobs.get() > 0) return
             val key = fingerprint(bmp)
             if (synchronized(cache) { cache.containsKey(key) }) return
             if (!inFlight.compareAndSet(false, true)) return
