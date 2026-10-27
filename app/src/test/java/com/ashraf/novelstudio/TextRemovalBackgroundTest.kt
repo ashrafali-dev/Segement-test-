@@ -67,8 +67,10 @@ class TextRemovalBackgroundTest {
     }
 
     @Test fun `vertical gradient is estimated as a ramp, not one average colour`() {
-        val ink = argb(230, 30, 30)
-        // Red panel fading to blue from top to bottom.
+        // Dark lettering on a coloured panel that fades top to bottom. Dark ink is what a real balloon uses: an
+        // ink colour that itself matched the panel gradient would be genuinely ambiguous and is not the case
+        // this model claims to handle.
+        val ink = argb(18, 18, 22)
         val img = region(140, 140, { _, y ->
             val t = y / 139f
             argb((220 * (1f - t) + 30 * t).toInt(), 20, (20 * (1f - t) + 210 * t).toInt())

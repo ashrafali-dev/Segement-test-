@@ -1018,7 +1018,9 @@ internal object WebModeTextRemover {
         region: IntArray, rw: Int, rh: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int,
         fg1: Int, fg2: Int
     ): BackgroundModel? {
-        val band = max(2, ((ix1 - ix0) / 4).coerceAtMost(((iy1 - iy0) / 4)).coerceAtLeast(2))
+        // A thin band hugging the box. A thick one averages the gradient away: samples taken a whole band away
+        // describe the middle of the ramp, not the colour that touches the lettering.
+        val band = max(2, ((ix1 - ix0) / 12).coerceAtMost(((iy1 - iy0) / 12)).coerceAtLeast(2))
         val minInk = max(58f, minOf(distance(fg1, fg2) * 0.5f, 90f))
 
         fun medianSide(pxs: (Int) -> Pair<Int, Int>, n: Int): Int? {
