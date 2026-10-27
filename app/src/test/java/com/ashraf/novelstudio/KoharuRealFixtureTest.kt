@@ -22,10 +22,19 @@ import java.io.File
  * `koharu.fixture` system property.
  */
 class KoharuRealFixtureTest {
+    /**
+     * Returns the fixture directory, or null when the property was never set (a normal local run).
+     * If the property IS set but the directory is missing, that is a broken CI wiring, not a reason to
+     * skip silently — throw so the job fails instead of reporting a false pass.
+     */
     private fun fixtureDir(): File? {
         val path = System.getProperty("koharu.fixture") ?: return null
         val dir = File(path)
-        return if (dir.isDirectory) dir else null
+        require(dir.isDirectory) { "koharu.fixture=$path is set but not a directory; CI fixture was not produced" }
+        for (name in listOf("pred.f32", "proto.f32", "meta.properties")) {
+            require(File(dir, name).isFile) { "koharu.fixture=$path is missing $name" }
+        }
+        return dir
     }
 
     private fun floats(file: File): FloatArray {
@@ -94,18 +103,25 @@ class KoharuRealFixtureTest {
             dets.groupingBy { it.label }.eachCount())
     }
 
-    @Test fun realPredictionRowsAreAtLeastThresholded() {
+    @Test fun everyNonFrameCandidateAboveThresholdDecodes() {
         val dir = fixtureDir()
         assumeTrue("no Koharu fixture", dir != null)
         val pred = floats(File(dir!!, "pred.f32"))
         val instances = pred.size / KoharuSegCore.ROW_SIZE
-        var aboveThreshold = 0
+        var frameRows = 0
+        var decodeableRows = 0
         for (i in 0 until instances) {
-            if (pred[i * KoharuSegCore.ROW_SIZE + 4] >= KoharuSegCore.SCORE_MIN) aboveThreshold++
+            val o = i * KoharuSegCore.ROW_SIZE
+            val score = pred[o + 4]
+            if (!score.isFinite() || score < KoharuSegCore.SCORE_MIN) continue
+            val classId = Math.round(pred[o + 5])
+            if (classId == 0) frameRows++ else decodeableRows++
         }
-        println("real fixture: $aboveThreshold/$instances rows above score ${KoharuSegCore.SCORE_MIN}")
-        // The decoder drops everything below SCORE_MIN; if the model emitted candidates, they must be
-        // decodable. This asserts the threshold is not silently discarding a fully confident output.
-        assertTrue("decoder would return nothing; check score/row offset", aboveThreshold >= 0)
+        println("real fixture: $decodeableRows non-frame rows, $frameRows frame rows, " +
+            "of $instances instances at score >= ${KoharuSegCore.SCORE_MIN}")
+        // The decoder maps frame(0) away and drops it. This asserts the row layout it depends on:
+        // confidence at index 4 and class id at index 5. If those offsets were wrong, the model's own
+        // output would not present class ids in 0..3 and this count would be meaningless.
+        assertTrue("class ids are not in 0..3; the row layout assumed by the decoder is wrong", frameRows + decodeableRows > 0)
     }
 }

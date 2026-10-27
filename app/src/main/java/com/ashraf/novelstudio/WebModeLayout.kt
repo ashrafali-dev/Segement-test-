@@ -101,15 +101,28 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         fun normalizeOcrText(text: String): String =
             text.lowercase().replace(HASH_NOISE, "").trim()
 
-        /** Stable per-bubble fingerprint: normalized OCR text plus its image and relative position. */
-        fun fingerprint(b: WmBubble): String {
+        /**
+         * The identity of a bubble for caching and de-duplication: its image, its quantised position and
+         * size, and its normalised OCR text.
+         *
+         * Position is not optional. Keying only on the text (as the realtime cache key once did) merged two
+         * bubbles that carry identical lettering — "!", "?!", "...", a repeated name are common in comics —
+         * onto one entry, so a translation produced for bubble A was also drawn on bubble B. Any per-bubble
+         * key must go through here so text-only collisions are impossible.
+         */
+        fun bubbleIdentity(b: WmBubble): String {
             val src = WebModeLogic.normalizeUrl(b.src)
             val text = normalizeOcrText(b.sourceText)
             val geometry = listOf(b.cx, b.cy, b.w, b.h).joinToString(",") {
                 Math.round(it * 10000f).toInt().toString()
             }
+            return "$src|$geometry|$text"
+        }
+
+        /** Stable per-bubble fingerprint: a SHA-256 of [bubbleIdentity]. */
+        fun fingerprint(b: WmBubble): String {
             val bytes = java.security.MessageDigest.getInstance("SHA-256")
-                .digest("$src|$geometry|$text".toByteArray(Charsets.UTF_8))
+                .digest(bubbleIdentity(b).toByteArray(Charsets.UTF_8))
             return bytes.joinToString("") { "%02x".format(it) }
         }
 

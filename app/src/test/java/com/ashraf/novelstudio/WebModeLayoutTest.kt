@@ -1,5 +1,7 @@
 package com.ashraf.novelstudio
 
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -100,5 +102,22 @@ class WebModeSamePositionTest {
 
     @Test fun differentSizeIsNotTheSameBubble() {
         assertFalse(WebModeLayoutStore.samePosition(b(0.5f, 0.5f, 0.6f, 0.008f), b(0.5f, 0.5f, 0.6f, 0.02f)))
+    }
+
+    @Test fun identicalTextInTwoDifferentBubblesHasDistinctIdentity() {
+        // Two bubbles that both say "!" (extremely common in comics) must not share a cache identity,
+        // otherwise the translation produced for one is drawn over the other.
+        val first = b("!", 0.25f, 0.20f)
+        val second = b("!", 0.75f, 0.60f)
+        assertNotEquals(WebModeLayout.bubbleIdentity(first), WebModeLayout.bubbleIdentity(second))
+        assertNotEquals(WebModeLayout.fingerprint(first), WebModeLayout.fingerprint(second))
+    }
+
+    @Test fun identicalTextAtTheSamePlaceKeepsOneIdentity() {
+        // The same bubble re-read after a scroll must keep its identity so it is not re-translated.
+        val a = b("wait", 0.40f, 0.55f)
+        val same = b("wait", 0.40f, 0.55f)
+        assertEquals(WebModeLayout.bubbleIdentity(a), WebModeLayout.bubbleIdentity(same))
+        assertEquals(WebModeLayout.fingerprint(a), WebModeLayout.fingerprint(same))
     }
 }

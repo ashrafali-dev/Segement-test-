@@ -1429,11 +1429,14 @@ class MainActivity : Activity() {
     // links, different image hosts) and OCR box positions shift slightly between fast/detailed passes,
     // so either of them used to cause cache misses for a bubble that was already translated.
     // Punctuation/spacing are ignored so tiny OCR differences still hit the cache.
-    private fun rtAheadBubbleCacheKey(bubble: WmBubble): String {
-        val text = WebModeLayout.normalizeOcrText(bubble.sourceText)
-        val letters = text.filter { it.isLetterOrDigit() }
-        return if (letters.isNotEmpty()) letters else text
-    }
+    /**
+     * Key for the realtime translation cache. It MUST include the bubble's position, not just its text:
+     * keying only on the OCR letters let two bubbles with identical lettering ("!", "...", a repeated
+     * name) share one entry, so bubble A's translation was drawn on bubble B. Delegating to the shared
+     * [WebModeLayout.bubbleIdentity] keeps this and [WebModeLayout.fingerprint] in lock-step.
+     */
+    private fun rtAheadBubbleCacheKey(bubble: WmBubble): String =
+        WebModeLayout.bubbleIdentity(bubble)
 
     /**
      * Put already-cached bubble translations straight onto the page overlay (no chatbot request)
