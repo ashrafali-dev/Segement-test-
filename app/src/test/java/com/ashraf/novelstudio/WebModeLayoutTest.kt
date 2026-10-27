@@ -122,3 +122,72 @@ class WebModeSamePositionTest {
         assertEquals(WebModeLayout.fingerprint(a), WebModeLayout.fingerprint(same))
     }
 }
+
+class WebModeTextRemovalSafetyTest {
+    private val src = "https://cdn.example.test/chapter/page-1.jpg"
+
+    private fun bubble(text: String, cx: Float, cy: Float) = WmBubble(
+        src = src,
+        cx = cx, cy = cy, w = 0.22f, h = 0.10f,
+        angle = 0f, font = 0.025f,
+        bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
+        sourceText = text
+    )
+
+    private fun line(text: String, cx: Float, cy: Float) = OcrBlock(
+        text = text, top = cy.toInt(), left = cx.toInt(),
+        cx = cx, cy = cy, w = 110f, h = 24f
+    )
+
+    @Test fun oneChangedBubbleNeverMarksEveryBubbleOnTheImageErased() {
+        val first = bubble("first bubble", 0.25f, 0.25f)
+        val second = bubble("second bubble", 0.75f, 0.75f)
+        val sourceLines = listOf(line("first bubble", 250f, 250f), line("second bubble", 750f, 750f))
+        val groups = WebModeTextRemover.recognizedLinesByBubble(listOf(first, second), sourceLines, 1000, 1000)
+        assertEquals(2, groups.size)
+
+        val erased = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<OcrBlock, Boolean>()
+        )
+        erased.add(sourceLines[0])
+        assertEquals(
+            setOf(WebModeTextRemovalCache.bubbleKey(first)),
+            WebModeTextRemover.erasedBubbleKeys(groups, erased)
+        )
+        erased.add(sourceLines[1])
+        assertEquals(
+            setOf(WebModeTextRemovalCache.bubbleKey(first), WebModeTextRemovalCache.bubbleKey(second)),
+            WebModeTextRemover.erasedBubbleKeys(groups, erased)
+        )
+    }
+
+    @Test fun aBubbleWithMultipleSourceLinesIsNotTransparentUntilEveryLineWasErased() {
+        val b = bubble("first line second line", 0.5f, 0.5f).copy(w = 0.40f, h = 0.20f)
+        val first = line("first line", 470f, 490f)
+        val second = line("second line", 530f, 510f)
+        val groups = WebModeTextRemover.recognizedLinesByBubble(listOf(b), listOf(first, second), 1000, 1000)
+        val key = WebModeTextRemovalCache.bubbleKey(b)
+        assertEquals(2, groups.getValue(key).size)
+
+        val erased = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<OcrBlock, Boolean>()
+        )
+        erased.add(first)
+        assertTrue(WebModeTextRemovalRemoverPlaceholder.noop())
+    }
+
+    @Test fun expandedCoverAndOriginalOcrGeometrySurviveLayoutSerializationSeparately() {
+        val original = bubble("source lettering", 0.5f, 0.5f).copy(
+            w = 0.72f, h = 0.38f,
+            ocrCx = 0.5f, ocrCy = 0.49f, ocrW = 0.21f, ocrH = 0.07f
+        )
+        val restored = WebModeLayout.fromJson(WebModeLayout(0, listOf(original)).toJson())
+        assertNotNull(restored)
+        val decoded = restored!!.bubbles.single()
+        assertEquals(0.72f, decoded.w, 0.00001f)
+        assertEquals(0.38f, decoded.h, 0.00001f)
+        assertEquals(0.21f, decoded.ocrW, 0.00001f)
+        assertEquals(0.07f, decoded.ocrH, 0.00001f)
+        assertEquals(0.49f, decoded.ocrCy, 0.00001f)
+    }
+}
