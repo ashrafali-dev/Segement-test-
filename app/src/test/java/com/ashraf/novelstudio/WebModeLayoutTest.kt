@@ -173,7 +173,9 @@ class WebModeTextRemovalSafetyTest {
             java.util.IdentityHashMap<OcrBlock, Boolean>()
         )
         erased.add(first)
-        assertTrue(WebModeTextRemovalRemoverPlaceholder.noop())
+        assertTrue(WebModeTextRemover.erasedBubbleKeys(groups, erased).isEmpty())
+        erased.add(second)
+        assertEquals(setOf(key), WebModeTextRemover.erasedBubbleKeys(groups, erased))
     }
 
     @Test fun expandedCoverAndOriginalOcrGeometrySurviveLayoutSerializationSeparately() {
@@ -182,7 +184,7 @@ class WebModeTextRemovalSafetyTest {
             ocrCx = 0.5f, ocrCy = 0.49f, ocrW = 0.21f, ocrH = 0.07f
         )
         val restored = WebModeLayout.fromJson(WebModeLayout(0, listOf(original)).toJson())
-        assertNotNull(restored)
+        assertTrue(restored != null)
         val decoded = restored!!.bubbles.single()
         assertEquals(0.72f, decoded.w, 0.00001f)
         assertEquals(0.38f, decoded.h, 0.00001f)
