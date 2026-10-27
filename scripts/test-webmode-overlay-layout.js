@@ -67,8 +67,9 @@ assert.ok(remover.includes("internal class BackgroundModel") && remover.includes
   "text remover must interpolate the local background across the OCR box");
 assert.ok(remover.includes("private fun eraseByBackgroundModel("),
   "text remover must have a non-AI background fill path");
-assert.ok(extractor.includes("val ocrCx = cx; val ocrCy = cy; val ocrBw = bw; val ocrBh = bh"),
-  "source glyph bounds must be captured before the overlay box expands to speech-bubble geometry");
+assert.ok(extractor.includes("val sourceGlyphRect = refinedBox[i] ?: rects[i]") &&
+          extractor.includes("val ocrCx = (sourceGlyphRect[0] + sourceGlyphRect[2]) / 2f"),
+  "cleaning geometry must come directly from the OCR/refined text rectangle, not expanded bubble bounds");
 assert.ok(layoutModel.includes("val ocrCx: Float = 0f") && layoutModel.includes(".put(\"ocx\", r5(b.ocrCx))"),
   "original glyph bounds must survive layout persistence separately from the bubble cover box");
 assert.ok(remover.includes("val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width"),
