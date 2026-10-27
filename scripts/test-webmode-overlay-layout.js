@@ -12,11 +12,26 @@ const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)
 const decorativeUrl = new Function(decorativeSource + "; return decorativeUrl;")();
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/link_slot_abc.jpg"), true, "link-slot promotional art must not be treated as a manga panel");
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false, "actual manga assets must remain eligible");
+const trackerSource = extractFunction(libMatch[1], "function blockedTrackerUrl(s)");
+const blockedTrackerUrl = new Function("document", trackerSource + "; return blockedTrackerUrl;")({
+  baseURI: "https://shonenjumpplus.com/episode/test",
+});
+assert.equal(blockedTrackerUrl("https://cm.g.doubleclick.net/pixel?google_nid=treasuredata"), true,
+  "DoubleClick pixels must not be treated as visible manga images");
+assert.equal(blockedTrackerUrl("https://s.amazon-adsystem.com/dcm?pid=tracker"), true,
+  "Amazon ad-system images must be excluded from OCR discovery");
+assert.equal(blockedTrackerUrl("https://match.adsrvr.org/track/cmf/generic?id=1"), true,
+  "The Trade Desk tracking endpoint must be excluded from OCR discovery");
+assert.equal(blockedTrackerUrl("https://gum.criteo.com/sync?c=1"), true,
+  "Criteo sync images must be excluded from OCR discovery");
+assert.equal(blockedTrackerUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false,
+  "actual Shonen Jump+ manga images must remain eligible");
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
 assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
 assert.ok(extractor.includes("if (mo == null && !req.visibleOnly)"), "visible screen fallback must not abort before the first screenshot when DOM metadata JS times out");
 assert.ok(extractor.includes("FORCE_META_FALLBACK"), "missing visible metadata must be logged and continue through screenshot OCR");
+assert.ok(extractor.includes("!blockedTrackerUrl(s)"), "known ad/analytics image hosts must be filtered before panel-size heuristics");
 const forceInfoAt = extractor.indexOf("val forceInfoScript = if (req.visibleOnly)");
 const forceInfoEnd = extractor.indexOf("else JS_FORCE_INFO", forceInfoAt);
 assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canvas-crop path");
