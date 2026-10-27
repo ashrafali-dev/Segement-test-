@@ -278,6 +278,7 @@ internal class WebModeExtractor(
 
         fun begin() {
             ensureBridge(wv)
+            if (req.visibleOnly) BubbleDetector.noteActivity()
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
                 "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
             progress("Discovering chapter panels", 1)
@@ -706,7 +707,8 @@ internal class WebModeExtractor(
             if (liveView && !hasCanvas) {
                 // This site already refused our image downloads a moment ago: read the screen's own pixels at once
                 // instead of waiting for every panel to time out again.
-                if (SiteLearner.preferScreen(wv.context, hostOf(meta.url))) {
+                // Icons / notices (e.g. a 130x130 tap hint) are no evidence about the site: the real pages were not loaded yet.
+                if (panels.any { Math.min(it.w, it.h) >= 300 } && SiteLearner.preferScreen(wv.context, hostOf(meta.url))) {
                     progress("Learned: reading this site straight from the screen", 3)
                     fail(WebModeError.IMAGES_NOT_LOADED, "Learned for this site: image downloads fail, reading the screen directly")
                     return
@@ -824,7 +826,7 @@ internal class WebModeExtractor(
                     // Real-time sees only 1-3 panels, so the old "4 failures" rule never fired and EVERY visible panel
                     // went through the whole timeout ladder (roughly 25 s each) before the screen was read instead.
                     if (diag.downloaded == 0 && (liveView || (fetchFailed >= EARLY_ABORT_FAILS && total > fetchFailed))) {
-                        if (liveView) SiteLearner.recordDownload(wv.context, hostOf(meta.url), false, SystemClock.elapsedRealtime() - tFetch)
+                        if (liveView && Math.min(p.w, p.h) >= 300) SiteLearner.recordDownload(wv.context, hostOf(meta.url), false, SystemClock.elapsedRealtime() - tFetch)
                         if (liveView) {
                             // The WebView can display images that a second HTTP request cannot fetch.
                             // Read its already-rendered viewport instead of giving up on the visible page.

@@ -39,7 +39,7 @@ internal object BubbleSegDetector {
     private const val MAX_BYTES = 40_000_000L
     private const val APPROX_BYTES = 12_400_000L
     private const val MIN_FREE_HEAP_MB = 70L
-    private const val IDLE_RELEASE_MS = 12_000L
+    private const val IDLE_RELEASE_MS = 8_000L
 
     @Volatile var lastError: String = ""
         private set
@@ -278,6 +278,8 @@ internal object BubbleSegDetector {
             try {
                 val o = OrtSession.SessionOptions()
                 o.setIntraOpNumThreads(2)
+                try { o.setCPUArenaAllocator(false) } catch (_: Throwable) {}
+                try { o.setMemoryPatternOptimization(false) } catch (_: Throwable) {}
                 return env.createSession(file.absolutePath, o)
             } catch (first: Throwable) {
                 try {

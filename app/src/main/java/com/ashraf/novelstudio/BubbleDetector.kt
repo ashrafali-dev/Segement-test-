@@ -63,7 +63,7 @@ internal object BubbleDetector {
     @Volatile private var ramOk: Boolean? = null
     /** Finished results by page fingerprint: the read-ahead thread fills it, the on-screen path only ever reads it. */
     private val cache = object : LinkedHashMap<Long, List<BubbleDetectorCore.Det>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<BubbleDetectorCore.Det>>?): Boolean = size > 10
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<BubbleDetectorCore.Det>>?): Boolean = size > 5
     }
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), "bubble_detector.onnx")
@@ -144,6 +144,17 @@ internal object BubbleDetector {
             Thread(r, "ns-webmode-detect").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
         }
     private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var lastActivityMs = 0L
+    private val idleHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val idleRelease = Runnable {
+        // Never close the session under a running detection: only release when nobody holds the model gate.
+        if (OnnxHeavyGate.lock.tryLock()) {
+            try { release(); OcrDiag.log("DETECT_SRC", "main detector released (idle)") } finally { OnnxHeavyGate.lock.unlock() }
+        }
+    }
+
+    /** The reader is scrolling / a real-time job just started: background model runs wait until it is quiet. */
+    fun noteActivity() { lastActivityMs = SystemClock.elapsedRealtime() }
 
     /**
      * Real-time path: start detection for [bmp] in the background and return IMMEDIATELY (the reader's text must never
@@ -168,7 +179,14 @@ internal object BubbleDetector {
             if (copy == null) { inFlight.set(false); return }
             try {
                 asyncPool.execute {
-                    try { detect(c, copy) } catch (_: Throwable) {} finally {
+                    try {
+                        // A model run takes 2 CPU threads for seconds: never while the page is being scrolled.
+                        var waited = 0
+                        while (SystemClock.elapsedRealtime() - lastActivityMs < 900L && waited < 6000) { Thread.sleep(150); waited += 150 }
+                        if (SystemClock.elapsedRealtime() - lastActivityMs < 900L) {
+                            OcrDiag.log("DETECT_SRC", "background detection dropped: reader kept scrolling")
+                        } else detect(c, copy)
+                    } catch (_: Throwable) {} finally {
                         try { copy.recycle() } catch (_: Throwable) {}
                         inFlight.set(false)
                     }
@@ -324,7 +342,9 @@ internal object BubbleDetector {
             // Optional second model: gives the BALLOONS found above their real outline. It never replaces anything and
             // never runs when the main detector saw no balloon, when memory is tight, or on the on-screen path.
             var maskNote = ""
-            if (out.any { it.label == BubbleDetectorCore.CLS_BUBBLE || it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
+            if (mainMs > 7000L) {
+                maskNote = " masks:skipped (device busy: main detector took ${mainMs}ms)"
+            } else if (out.any { it.label == BubbleDetectorCore.CLS_BUBBLE || it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
                 val segs = BubbleSegDetector.detect(c, bmp)
                 if (segs != null && segs.isNotEmpty()) {
                     val merged = BubbleDetectorCore.attachMasks(out, segs)
@@ -334,6 +354,8 @@ internal object BubbleDetector {
             } else maskNote = " masks:skipped (main detector saw no balloon)"
             synchronized(cache) { cache[fingerprint(bmp)] = out }
             lastInfo = "${out.size} found · ${mainMs}ms$maskNote"
+            idleHandler.removeCallbacks(idleRelease)
+            idleHandler.postDelayed(idleRelease, 20_000L)
             OcrDiag.log("DETECT_SRC", "main=RT-DETR ${out.count { it.seg == null }} boxes in ${mainMs}ms;$maskNote")
             out
         } catch (e: Throwable) {
@@ -415,6 +437,7 @@ internal object BubbleDetector {
             try {
                 val o = OrtSession.SessionOptions()
                 o.setIntraOpNumThreads(2)   // 4 threads starved the UI and Lens decoding on mid-range phones
+                try { o.setCPUArenaAllocator(false) } catch (_: Throwable) {}   // do not keep a big native memory pool after a run
                 return env.createSession(file.absolutePath, o)
             } catch (first: Throwable) {
                 // Some phones/ORT builds reject an optimisation pass on quantised graphs: retry with optimisations off.

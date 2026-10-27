@@ -29,12 +29,14 @@ internal object BubbleSegCore {
     }
 
     /** One balloon in page pixels. [mask] covers the box [l,t,r,b] row-major (w*h bytes, 1 = inside the balloon). */
-    class Seg(val score: Float, val l: Int, val t: Int, val r: Int, val b: Int, val mask: ByteArray) {
+    class Seg(val score: Float, val l: Int, val t: Int, val r: Int, val b: Int, private val bits: ByteArray) {
         val w: Int get() = r - l
         val h: Int get() = b - t
+        /** Bit [i] (row-major inside the box). One bit per pixel: a 400x400 balloon costs 20 KB, not 160 KB. */
+        fun bit(i: Int): Boolean = ((bits[i shr 3].toInt() shr (i and 7)) and 1) != 0
         fun inside(x: Int, y: Int): Boolean {
             if (x < l || x >= r || y < t || y >= b) return false
-            return mask[(y - t) * (r - l) + (x - l)].toInt() != 0
+            return bit((y - t) * (r - l) + (x - l))
         }
     }
 
@@ -88,7 +90,7 @@ internal object BubbleSegCore {
             val bw = r - l; val bh = b - t
             if (bw < 6 || bh < 6) continue
             for (k in 0 until NC) coef[k] = out0.get((5 + k) * anchors + c.idx)
-            val mask = ByteArray(bw * bh)
+            val bits = ByteArray((bw * bh + 7) / 8)
             for (yy in 0 until bh) {
                 // page pixel -> model pixel -> prototype pixel (nearest)
                 val my = ((t + yy + 0.5f) * lb.scale + lb.padY) * ratio
@@ -100,10 +102,10 @@ internal object BubbleSegCore {
                     var sum = 0f
                     val o = py * PROTO + px
                     for (k in 0 until NC) sum += coef[k] * protos.get(k * plane + o)
-                    if (sum > 0f) mask[yy * bw + xx] = 1   // sigmoid(sum) > 0.5  <=>  sum > 0
+                    if (sum > 0f) { val i = yy * bw + xx; bits[i shr 3] = (bits[i shr 3].toInt() or (1 shl (i and 7))).toByte() }   // sigmoid(sum) > 0.5  <=>  sum > 0
                 }
             }
-            res.add(Seg(c.score, l + originX, t + originY, r + originX, b + originY, mask))
+            res.add(Seg(c.score, l + originX, t + originY, r + originX, b + originY, bits))
         }
         return res
     }
@@ -143,27 +145,26 @@ internal object BubbleSegCore {
     }
 
     /**
-     * The balloon interior as rectangles [l,t,r,b] in page pixels (horizontal runs of [step] rows, equal runs merged).
-     * Painted in the bubble's paper colour they follow the real balloon outline, so the old lettering is hidden
-     * everywhere inside the balloon without touching the artwork around it.
+     * The balloon interior as at most [maxBands] rectangles [l,t,r,b] (page pixels). Each band uses the rows' common
+     * extent (top / middle / bottom row of the band), so it never crosses the outline. Every band becomes one DOM node
+     * in the page overlay: a hundred of them per balloon made scrolling stutter, so the count is capped.
      */
-    fun bands(s: Seg, step: Int = 4, inset: Int = 1): List<IntArray> {
+    fun bands(s: Seg, maxBands: Int = 14, inset: Int = 2): List<IntArray> {
         val out = ArrayList<IntArray>()
+        val step = Math.max(6, (s.h + maxBands - 1) / maxBands)
         var y = 0
-        var cur: IntArray? = null
         while (y < s.h) {
-            val yy = Math.min(s.h - 1, y + step / 2)
-            var first = -1; var last = -1
-            val row = yy * s.w
-            for (x in 0 until s.w) if (s.mask[row + x].toInt() != 0) { if (first < 0) first = x; last = x }
-            if (first >= 0 && last - first >= 2 * inset + 2) {
-                val l = s.l + first + inset; val r = s.l + last + 1 - inset
-                val t = s.t + y; val b = s.t + Math.min(s.h, y + step)
-                val c = cur
-                if (c != null && Math.abs(c[0] - l) <= 2 && Math.abs(c[2] - r) <= 2 && c[3] == t) c[3] = b
-                else { val n = intArrayOf(l, t, r, b); out.add(n); cur = n }
-            } else cur = null
-            y += step
+            val y1 = Math.min(s.h, y + step)
+            var first = 0; var last = s.w - 1
+            for (yy in intArrayOf(y, (y + y1) / 2, y1 - 1)) {
+                val row = Math.min(s.h - 1, yy) * s.w
+                var f = -1; var l = -1
+                for (x in 0 until s.w) if (s.bit(row + x)) { if (f < 0) f = x; l = x }
+                if (f < 0) { first = s.w; last = -1; break }
+                first = Math.max(first, f); last = Math.min(last, l)
+            }
+            if (last - first >= 2 * inset + 2) out.add(intArrayOf(s.l + first + inset, s.t + y, s.l + last + 1 - inset, s.t + y1))
+            y = y1
         }
         return out
     }
