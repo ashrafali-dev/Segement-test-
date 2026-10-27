@@ -275,7 +275,10 @@ internal object BubbleDetectorCore {
         if (safe[2] - safe[0] < 12 || safe[3] - safe[1] < 12) return null
         val safeArea = (safe[2] - safe[0]).toLong() * (safe[3] - safe[1])
         if (safeArea * 5L < d.area) return null
-        val bands = maskBands(d, maxBands = 28)
+        // A single band set per mask row is a safe fallback for strongly curved/irregular balloons.
+        // The 64x64 model mask can therefore still provide a contour-shaped cover when a 28-band compression
+        // would otherwise fail and the writer fall back to a rectangular patch.
+        val bands = maskBands(d, maxBands = 64)
         if (bands.isEmpty()) return null
         return MaskGeometry(d, safe, bands)
     }
@@ -324,8 +327,10 @@ internal object BubbleDetectorCore {
                 while (i + 1 < cur.size) {
                     val pxL = d.l + kotlin.math.ceil(cur[i] * d.w.toDouble() / mw).toInt()
                     val pxR = d.l + kotlin.math.floor(cur[i + 1] * d.w.toDouble() / mw).toInt()
-                    val pxT = d.t + kotlin.math.ceil(groupStart * d.h.toDouble() / mh).toInt()
-                    val pxB = d.t + kotlin.math.floor(endY * d.h.toDouble() / mh).toInt()
+                    // Keep a small vertical inset as well as the horizontal run inset. Low-resolution
+                    // mask-cell edges are uncertain; inset only the band edges, never fill right to the contour.
+                    val pxT = d.t + kotlin.math.ceil((groupStart + 0.1) * d.h.toDouble() / mh).toInt()
+                    val pxB = d.t + kotlin.math.floor((endY - 0.1) * d.h.toDouble() / mh).toInt()
                     if (pxR - pxL >= 2 && pxB - pxT >= 2) out.add(intArrayOf(pxL, pxT, pxR, pxB))
                     i += 2
                 }
