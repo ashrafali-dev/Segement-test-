@@ -180,4 +180,97 @@ class TextRemovalMaskTest {
         val det = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 0.9f, 0, 0, imgW, imgH, mask)
         assertTrue(TextRemovalMask.interiorBands(det, img, imgW, imgH).isEmpty())
     }
+
+    @Test fun `removing several lines never paints outside the balloon mask`() {
+        // A round balloon with THREE lines of lettering. The balloon mask is an ellipse, so the OCR box corners
+        // (which are outside the ellipse) must survive untouched after the erase.
+        val paper = argb(252, 252, 250)
+        val ink = argb(18, 18, 18)
+        val w = 160; val h = 160
+        val cx = 80f; val cy = 80f
+        val inside = { x: Int, y: Int ->
+            val dx = (x + 0.5f - cx) / 70f
+            val dy = (y + 0.5f - cy) / 70f
+            dx * dx + dy * dy <= 1f
+        }
+        val img = IntArray(w * h) { i ->
+            val x = i % w; val y = i / w
+            when {
+                inside(x, y) && x in 40..119 && (y in 55..69 || y in 75..89 || y in 95..109) -> ink
+                else -> paper
+            }
+        }
+        val before = img.copyOf()
+        var changedOutside = 0
+        val lines = listOf(62 to 62, 82 to 82, 102 to 102)
+        for ((y0, mid) in lines) {
+            val mask = TextRemovalMask.inkMask(img, w, h, 30, y0 - 12, 130, y0 + 12, paper) { x, y -> inside(x, y) }
+            assertNotNull("line at y=$y0 must be recognised as lettering", mask)
+            val restored = TextRemovalMask.restoreFromSurroundings(mask!!, img, w, h)
+            for (i in img.indices) {
+                if (mask[i].toInt() != 0) img[i] = restored[i]
+            }
+            assertTrue("line at y=$mid should be gone", near(img[mid * w + 80], paper))
+        }
+        // Nothing outside the ellipse may have changed, even though the OCR box reached into the corners.
+        for (i in img.indices) {
+            val x = i % w; val y = i / w
+            if (!inside(x, y) && img[i] != before[i]) changedOutside++
+        }
+        assertEquals("pixels outside the balloon mask must be untouched", 0, changedOutside)
+        // The lettering lines are restored to the balloon paper, not left as ink.
+        for (mid in listOf(62, 82, 102)) assertTrue("ink at y=$mid must be restored", near(img[mid * w + 80], paper))
+    }
+
+    @Test fun `pixels outside the selected text region are preserved exactly`() {
+        // Text sits in a sub-rect of a larger balloon. Only the ink inside that sub-rect is rewritten; a glyph and
+        // the shading outside the region must keep their exact original values.
+        val paper = argb(250, 248, 240)
+        val shade = argb(226, 224, 216)
+        val ink = argb(15, 15, 15)
+        val w = 120; val h = 120
+        val img = IntArray(w * h) { i ->
+            val x = i % w; val y = i / w
+            when {
+                x < 40 -> shade                              // left part of the balloon, no text
+                x in 55..64 && y in 50..59 -> ink            // the line to remove
+                x in 100..109 && y in 100..109 -> ink        // another glyph FAR outside the selected region
+                else -> paper
+            }
+        }
+        val before = img.copyOf()
+        val mask = TextRemovalMask.inkMask(img, w, h, 50, 45, 70, 65, paper)!!
+        val restored = TextRemovalMask.restoreFromSurroundings(mask, img, w, h)
+        for (i in img.indices) {
+            if (mask[i].toInt() != 0) continue
+            assertEquals("untouched pixel $i must be identical", before[i], restored[i])
+        }
+        // The far glyph is not part of the selection and keeps its ink.
+        assertEquals("the glyph outside the region is preserved", ink, restored[105 * w + 105])
+        // The left shading band is untouched.
+        assertEquals("shading outside the region is preserved", shade, restored[60 * w + 10])
+    }
+
+    @Test fun `flat paper is recognised so the local fill is used`() {
+        val paper = argb(250, 248, 240)
+        val w = 80; val h = 60
+        val img = IntArray(w * h) { paper }
+        val mask = ByteArray(w * h) { if (it % 17 == 0) 1 else 0 }   // some "glyphs"
+        assertTrue("a flat panel must be treated as reconstructable", TextRemovalMask.paperIsFlat(mask, img, w, h))
+    }
+
+    @Test fun `a soft ramp is still reconstructable`() {
+        val w = 100; val h = 80
+        fun ramp(y: Int) = argb(235 - y / 3, 235 - y / 3, 240 - y / 3)
+        val img = IntArray(w * h) { ramp(it / w) }
+        val mask = ByteArray(w * h) { if (it % 23 == 0) 1 else 0 }
+        assertTrue("a gentle gradient must not trigger inpainting", TextRemovalMask.paperIsFlat(mask, img, w, h))
+    }
+
+    @Test fun `busy artwork is not flat and is left for the inpainter`() {
+        val w = 96; val h = 96
+        val img = IntArray(w * h) { i -> argb((i * 37) % 251, (i * 53 + 11) % 253, (i * 97 + 7) % 249) }
+        val mask = ByteArray(w * h) { if (it % 29 == 0) 1 else 0 }
+        assertTrue("artwork must be reported as complex", !TextRemovalMask.paperIsFlat(mask, img, w, h))
+    }
 }

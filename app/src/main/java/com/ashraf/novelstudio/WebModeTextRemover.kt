@@ -52,7 +52,17 @@ internal object WebModeTextRemover {
         bitmap: Bitmap,
         dets: List<BubbleDetectorCore.Det>?,
         recognizedLines: List<OcrBlock> = emptyList(),
-        onOcrRegionErased: ((OcrBlock) -> Unit)? = null
+        onOcrRegionErased: ((OcrBlock) -> Unit)? = null,
+        /**
+         * Optional existing AI inpainter, applied ONLY when the paper around an OCR line is too complex for the
+         * local fill to reconstruct safely. Signature matches [WebModeInpainter.fill]: region + region-local mask,
+         * returns the filled region or null. Null (the default) keeps the pure local fill.
+         *
+         * Callers that want AI pass `WebModeInpainter::fill` bound to their context, after doing the same
+         * availability gate the full cleaner uses. Callers that must not warm the model (the mask-only pass, the
+         * manual crop) leave it null; a flat balloon is reconstructed exactly either way, so nothing is lost.
+         */
+        inpaint: ((x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray) -> IntArray?)? = null
     ): Int {
         if (dets.isNullOrEmpty()) return 0
         val width = bitmap.width
@@ -155,7 +165,7 @@ internal object WebModeTextRemover {
                 // OCR-box corners outside the mask; allow those because pixels are clipped to the mask below.
                 if (maskCoverage(outer, inner) < 0.36f) continue
                 val fill = medianRingColour(bitmap, outer, inner, width, height) ?: continue
-                val regionChanged = fillMaskedRect(bitmap, outer, l, t, r, b, fill, width, height)
+                val regionChanged = fillMaskedRect(bitmap, outer, l, t, r, b, fill, width, height, inpaint)
                 changed += regionChanged
                 if (regionChanged >= 4) onOcrRegionErased?.invoke(line)
             }
@@ -178,7 +188,8 @@ internal object WebModeTextRemover {
         balloon: BubbleDetectorCore.Det,
         l: Int, t: Int, r: Int, b: Int,
         colour: Int,
-        width: Int, height: Int
+        width: Int, height: Int,
+        inpaint: ((x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray) -> IntArray?)? = null
     ): Int {
         if (balloon.mask == null || r <= l || b <= t) return 0
         val x0 = l.coerceIn(0, width - 1)
@@ -195,7 +206,16 @@ internal object WebModeTextRemover {
             // whisper text outside the balloon stay intact.
             balloon.contains(x0 + xx + 0.5f, y0 + yy + 0.5f)
         } ?: return 0
-        val restored = TextRemovalMask.restoreFromSurroundings(mask, pixels, w, h, maxRun = 48)
+        // A flat balloon is reconstructed exactly from its own paper. Only when that paper is COMPLEX (artwork,
+        // heavy shading, colour noise) is the picture otherwise smeared, and only then does the existing
+        // inpainter run - on this one text region, never on the whole balloon.
+        val ai = if (inpaint != null && !TextRemovalMask.paperIsFlat(mask, pixels, w, h)) {
+            try { inpaint(x0, y0, w, h, mask) } catch (_: Throwable) { null }
+        } else null
+        val restored = ai?.takeIf { it.size == pixels.size }?.let { fill ->
+            // The inpainter returns a full region; keep it only on masked pixels, rest untouched.
+            IntArray(pixels.size) { i -> if (mask[i].toInt() != 0) (0xFF000000.toInt() or (fill[i] and 0xFFFFFF)) else pixels[i] }
+        } ?: TextRemovalMask.restoreFromSurroundings(mask, pixels, w, h, maxRun = 48)
         var changed = 0
         for (i in pixels.indices) {
             if (mask[i].toInt() == 0) continue
@@ -583,7 +603,10 @@ internal object WebModeTextRemover {
                 val erasedLines = java.util.Collections.newSetFromMap(
                     java.util.IdentityHashMap<OcrBlock, Boolean>()
                 )
-                val changedPixels = eraseDetected(bitmap, allDetections, recognizedLines) { erasedLines.add(it) }
+                val changedPixels = eraseDetected(
+                    bitmap, allDetections, recognizedLines,
+                    onOcrRegionErased = { erasedLines.add(it) }
+                )
                 val erasedKeys = LinkedHashSet<String>()
                 for ((key, lines) in linesByBubble) {
                     if (lines.isNotEmpty() && lines.all { erasedLines.contains(it) }) erasedKeys.add(key)

@@ -256,6 +256,68 @@ class MainActivity : Activity() {
             .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
     }
 
+    /** Run [js] in the page and wait (bounded) for its value; returns null when the page does not answer. */
+    private fun evaluateJavascriptSync(js: String, timeoutMs: Long): String? {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var out: String? = null
+        handler.post {
+            try {
+                novelWv.evaluateJavascript(js) { raw ->
+                    out = decode(raw)
+                    latch.countDown()
+                }
+            } catch (_: Throwable) { latch.countDown() }
+        }
+        return try {
+            if (latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) out else null
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
+    }
+
+    /**
+     * Draw the WebView into [bitmap] with every app-owned overlay temporarily hidden.
+     *
+     * A manual recovery must read the ORIGINAL pixels: the translation bubbles, cover boxes and the cleaned
+     * image layer are composited over the artwork, so drawing with them visible makes OCR read our own
+     * translation back. The overlays are hidden in the page, the WebView is drawn, and the overlays are
+     * restored in a `finally` — so a crash inside `draw()` cannot leave the reader with a blank image.
+     *
+     * @return true when the WebView was actually drawn.
+     */
+    private fun drawWebViewWithoutOverlays(bitmap: android.graphics.Bitmap): Boolean {
+        val hide = evaluateJavascriptSync(
+            com.ashraf.novelstudio.manualextract.ManualCaptureOverlays.hideScript, 800L
+        )
+        val hidden = hide?.startsWith("hid:") == true
+        if (!hidden) OcrDiag.log("MANUAL", "capture: overlay hide unavailable (${hide?.take(40)}); drawing as-is")
+        try {
+            // Draw on the main thread and WAIT for it, so the restore below can never run before the pixels
+            // are taken (a posted-but-unfinished draw followed by a restore would re-paint the overlays on the
+            // page and the capture would read the translations again).
+            val drawnLatch = java.util.concurrent.CountDownLatch(1)
+            var drawn = false
+            handler.post {
+                try {
+                    novelWv.draw(android.graphics.Canvas(bitmap))
+                    drawn = true
+                } catch (e: Throwable) {
+                    OcrDiag.log("MANUAL", "capture: WebView draw failed ${e.javaClass.simpleName}")
+                } finally { drawnLatch.countDown() }
+            }
+            try { drawnLatch.await(1800, java.util.concurrent.TimeUnit.MILLISECONDS) }
+            catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            return drawn
+        } finally {
+            // Guaranteed restore even when draw() threw: leaving overlays hidden would blank every translation.
+            val restore = evaluateJavascriptSync(
+                com.ashraf.novelstudio.manualextract.ManualCaptureOverlays.restoreScript, 800L
+            )
+            OcrDiag.log("MANUAL", "capture: overlays restore=${restore?.take(40)} hidden=$hidden")
+        }
+    }
+
     /**
      * Last-resort capture for manual extract: draw the WebView and crop the region that covers the tapped
      * image. Used when the page's image was never intercepted (memory cache, lazy loader, blocked host), which
@@ -299,23 +361,18 @@ class MainActivity : Activity() {
         }
         val vw = r.optDouble("vw").toFloat()
         val vh = r.optDouble("vh").toFloat()
-        // Draw the WebView on the main thread; draw() keeps the page's own pixels, no window chrome.
-        val latch = java.util.concurrent.CountDownLatch(1)
-        var shot: android.graphics.Bitmap? = null
-        handler.post {
-            try {
-                val cw = novelWv.width; val ch = novelWv.height
-                if (cw > 0 && ch > 0) {
-                    val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
-                    b.eraseColor(android.graphics.Color.WHITE)
-                    novelWv.draw(android.graphics.Canvas(b))
-                    shot = b
-                }
-            } catch (_: Throwable) {
-            } finally { latch.countDown() }
+        // Draw the WebView on the main thread with app overlays hidden; draw() keeps the page's own pixels.
+        val cw = novelWv.width; val ch = novelWv.height
+        if (cw <= 0 || ch <= 0) {
+            OcrDiag.log("MANUAL", "live capture: WebView has no size")
+            return null
         }
-        try { latch.await(1800, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
-        val view = shot ?: run {
+        val view = try {
+            val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+            b.eraseColor(android.graphics.Color.WHITE)
+            if (!drawWebViewWithoutOverlays(b)) { b.recycle(); null } else b
+        } catch (_: Throwable) { null }
+        if (view == null) {
             OcrDiag.log("MANUAL", "live capture: WebView draw returned nothing")
             return null
         }
@@ -392,22 +449,19 @@ class MainActivity : Activity() {
      * or a box drawn over page art. It is the user's explicit selection, so nothing is filtered out first.
      */
     private fun captureManualRegionFromView(fx0: Float, fy0: Float, fx1: Float, fy1: Float): android.graphics.Bitmap? {
-        val latch = java.util.concurrent.CountDownLatch(1)
-        var view: android.graphics.Bitmap? = null
-        handler.post {
-            try {
-                val cw = novelWv.width; val ch = novelWv.height
-                if (cw > 0 && ch > 0) {
-                    val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
-                    b.eraseColor(android.graphics.Color.WHITE)
-                    novelWv.draw(android.graphics.Canvas(b))
-                    view = b
-                }
-            } catch (_: Throwable) {
-            } finally { latch.countDown() }
+        val cw = novelWv.width; val ch = novelWv.height
+        if (cw <= 0 || ch <= 0) {
+            OcrDiag.log("MANUAL", "frame capture: WebView has no size")
+            return null
         }
-        try { latch.await(1800, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
-        val v = view ?: run {
+        // The frame is a deliberate recovery of what the page really shows: hide our translation/cover/clean
+        // layers or the crop contains our own output, whatever the user framed.
+        val v = try {
+            val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+            b.eraseColor(android.graphics.Color.WHITE)
+            if (!drawWebViewWithoutOverlays(b)) { b.recycle(); null } else b
+        } catch (_: Throwable) { null }
+        if (v == null) {
             OcrDiag.log("MANUAL", "frame capture: WebView draw returned nothing")
             return null
         }

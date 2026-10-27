@@ -228,6 +228,42 @@ internal object TextRemovalMask {
         abs(red(a) - red(b)) <= tol && abs(green(a) - green(b)) <= tol && abs(blue(a) - blue(b)) <= tol
 
     /**
+     * True when the UNMASKED paper of this region is simple enough to reconstruct from its own pixels: one colour
+     * or a gentle ramp. Artwork, heavy shading and colour noise are NOT flat, and a local fill there would smear
+     * the picture - so the caller may fall back to the existing inpainter for that one small region.
+     *
+     * Measured on the paper around the glyphs only (the masked pixels themselves are never sampled, or the glyph
+     * colours would count as "complex"). Uses a coarse quantised histogram: a flat or softly ramped background
+     * lands in a few adjacent buckets, while artwork spreads across many.
+     */
+    fun paperIsFlat(mask: ByteArray, region: IntArray, rw: Int, rh: Int): Boolean {
+        val counts = HashMap<Int, Int>(64)
+        var sampled = 0
+        var x = 0
+        while (x < rw) {
+            var y = 0
+            while (y < rh) {
+                val i = y * rw + x
+                if (i >= mask.size || mask[i].toInt() != 0) { y += 2; continue }
+                // 5-bit-per-channel buckets: wide enough that a ramp or JPEG noise stays in few buckets,
+                // narrow enough that a drawn scene does not collapse to one colour.
+                val c = region[i]
+                val key = ((red(c) shr 3) shl 10) or ((green(c) shr 3) shl 5) or (blue(c) shr 3)
+                counts[key] = (counts[key] ?: 0) + 1
+                sampled++
+                y += 2
+            }
+            x += 2
+        }
+        if (sampled < 24) return true   // too little paper to judge: treat as flat (the safe fill).
+        val dominant = counts.values.maxOrNull() ?: 0
+        // A flat panel is dominated by one bucket; a soft ramp by a handful of neighbouring ones. If fewer than
+        // ~70 % of the paper sits in the five most common buckets, the "paper" is really artwork.
+        val top = counts.values.sortedDescending().take(6).sum()
+        return top * 100 >= sampled * 70 || dominant * 100 >= sampled * 55
+    }
+
+    /**
      * Bands for the balloon interior as it really is: inside the model silhouette AND inside each row of the
      * picture. The writer paints these with one colour, so a curved balloon must NOT get its bounding box.
      *
