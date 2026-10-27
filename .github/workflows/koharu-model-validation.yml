@@ -86,3 +86,32 @@ jobs:
           # Debug unit tests do not touch release signing, so no keystore is needed here.
           gradle :app:testDebugUnitTest --no-daemon \
             -Pkoharu.fixture="$RUNNER_TEMP/koharu-fixture"
+
+      - name: Prove the real-fixture test ran (not skipped)
+        run: |
+          set -euo pipefail
+          REPORT=app/build/test-results/testDebugUnitTest/TEST-com.ashraf.novelstudio.KoharuRealFixtureTest.xml
+          test -f "$REPORT" || { echo "::error::KoharuRealFixtureTest produced no report"; exit 1; }
+          echo "--- KoharuRealFixtureTest report ---"
+          cat "$REPORT"
+          SKIPPED="$(grep -o 'skipped="[0-9]*"' "$REPORT" | head -1 | grep -o '[0-9]*')"
+          TESTS="$(grep -o 'tests="[0-9]*"' "$REPORT" | head -1 | grep -o '[0-9]*')"
+          FAILURES="$(grep -o 'failures="[0-9]*"' "$REPORT" | head -1 | grep -o '[0-9]*')"
+          if [ "${SKIPPED:-0}" -ne 0 ]; then
+            echo "::error::KoharuRealFixtureTest was skipped ($SKIPPED skipped); the fixture was not consumed."
+            exit 1
+          fi
+          if [ "${TESTS:-0}" -lt 2 ] || [ "${FAILURES:-0}" -ne 0 ]; then
+            echo "::error::KoharuRealFixtureTest did not run both cases cleanly (tests=$TESTS failures=$FAILURES)."
+            exit 1
+          fi
+          echo "PASS: real-fixture decoder tests ran ($TESTS tests, 0 skipped, 0 failures)"
+
+      - name: Upload real-fixture test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koharu-real-fixture-test-report
+          path: app/build/test-results/testDebugUnitTest/TEST-com.ashraf.novelstudio.KoharuRealFixtureTest.xml
+          if-no-files-found: warn
+          retention-days: 14
