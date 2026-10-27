@@ -695,20 +695,28 @@ internal class WebModeExtractor(
             val total = panels.size
             val liveView = req.visibleOnly && req.forceOcrSrc.isNullOrBlank()
             val hasCanvas = panels.any { it.src.startsWith("data:", true) }
+            // Shonen Jump+ and similar readers expose already-rendered page images as page-owned blob: URLs.
+            // Native HTTP cannot download a WebView blob URL; fetchWithRetry() must use fetchViaPage() while
+            // that blob still exists in the page. A previous failed ad/thumbnail download must not teach the
+            // site learner to skip this valid page-side path on later scans.
+            val hasPageOwnedSources = panels.any {
+                it.src.startsWith("blob:", true) || it.src.startsWith("data:", true)
+            }
             if (hasCanvas) how = "canvas"
-            OcrDiag.log("PROCESS", "panels=$total liveView=$liveView canvasPanels=${panels.count { it.src.startsWith("data:", true) }} script=${WebModeLogic.pickScript(meta.lang, meta.url).name} lang='${meta.lang}'")
-            if (liveView && !hasCanvas && lastDiscoveryDebug.contains("canvasErr=SecurityError") &&
+            OcrDiag.log("PROCESS", "panels=$total liveView=$liveView canvasPanels=${panels.count { it.src.startsWith("data:", true) }} " +
+                "blobPanels=${panels.count { it.src.startsWith("blob:", true) }} script=${WebModeLogic.pickScript(meta.lang, meta.url).name} lang='${meta.lang}'")
+            if (liveView && !hasPageOwnedSources && lastDiscoveryDebug.contains("canvasErr=SecurityError") &&
                 Regex("(\\d+) canvas").find(lastDiscoveryDebug)?.groupValues?.get(1)?.toIntOrNull()?.let { it > 0 } == true) {
-                // Pixel-locked canvas reader: downloads can only return unrelated images, so go straight to the screen.
+                // Pixel-locked canvas reader with no recoverable image sources: reading the screen is the safe path.
                 fail(WebModeError.IMAGES_NOT_LOADED, "Canvas reader: reading the screen directly")
                 return
             }
-            if (liveView && !hasCanvas) {
-                // This site already refused our image downloads a moment ago: read the screen's own pixels at once
-                // instead of waiting for every panel to time out again.
+            if (liveView && !hasPageOwnedSources) {
+                // This site already refused ordinary image downloads; use screen capture only when no page-owned
+                // blob/data source remains that the WebView itself can export for OCR.
                 if (SiteLearner.preferScreen(wv.context, hostOf(meta.url))) {
                     progress("Learned: reading this site straight from the screen", 3)
-                    fail(WebModeError.IMAGES_NOT_LOADED, "Learned for this site: image downloads fail, reading the screen directly")
+                    fail(WebModeError.IMAGES_NOT_LOADED, "Learned for this site: no page-owned image source; reading the screen directly")
                     return
                 }
             }
