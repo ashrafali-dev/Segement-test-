@@ -30,6 +30,8 @@ class TextRemovalBackgroundTest {
         if (inside) ink else bg(x, y)
     }
 
+    private fun hex(c: Int) = "#%06X".format(c and 0xFFFFFF)
+
     private fun near(a: Int, b: Int, tol: Int = 12): Boolean =
         abs(((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)) <= tol &&
             abs(((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)) <= tol &&
@@ -82,8 +84,12 @@ class TextRemovalBackgroundTest {
         val bottom = m.at(70, 88, 50, 90, 50, 90)
         // The two ends of the ramp must differ, and each must match the real background nearby.
         assertTrue("ends must differ", (!near(top, bottom, 24)))
-        assertTrue("top end follows the panel", near(top, img[52 * 140 + 70], 26))
-        assertTrue("bottom end follows the panel", near(bottom, img[88 * 140 + 70], 26))
+        println("GRADIENT model uniform=${m.uniform} top=${hex(top)} want=${hex(img[52 * 140 + 70])} " +
+            "bottom=${hex(bottom)} want=${hex(img[88 * 140 + 70])}")
+        assertTrue("top end follows the panel: got ${hex(top)} want ${hex(img[52 * 140 + 70])}",
+            near(top, img[52 * 140 + 70], 26))
+        assertTrue("bottom end follows the panel: got ${hex(bottom)} want ${hex(img[88 * 140 + 70])}",
+            near(bottom, img[88 * 140 + 70], 26))
     }
 
     @Test fun `artwork with no dominant background yields no model`() {
