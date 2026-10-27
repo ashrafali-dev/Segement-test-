@@ -67,20 +67,25 @@ assert.ok(remover.includes("internal class BackgroundModel") && remover.includes
   "text remover must interpolate the local background across the OCR box");
 assert.ok(remover.includes("private fun eraseByBackgroundModel("),
   "text remover must have a non-AI background fill path");
-assert.ok(extractor.includes("val sourceGlyphRect = refinedBox[i] ?: rects[i]") &&
+assert.ok(extractor.includes("val sourceGlyphRect = refinedSeed[i] ?: refinedBox[i] ?: rects[i]") &&
           extractor.includes("val ocrCx = (sourceGlyphRect[0] + sourceGlyphRect[2]) / 2f"),
-  "cleaning geometry must come directly from the OCR/refined text rectangle, not expanded bubble bounds");
+  "cleaning geometry must prefer original OCR seed bounds over the recovered full bubble interior");
 assert.ok(layoutModel.includes("val ocrCx: Float = 0f") &&
           layoutModel.includes(".put(\"ocx\", r5(b.ocrCx))") &&
           layoutModel.includes("b.optDouble(\"ow\", 0.0).toFloat()"),
   "original glyph bounds must survive layout serialization and restoration separately from the cover box");
 assert.ok(remover.includes("val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width"),
   "image cleaning must use original OCR bounds, not the expanded speech-bubble cover bounds");
-assert.ok(remover.includes("val detectorErasedKeys = erasedBubbleKeys(linesByBubble, detectorErasedLines)") &&
-          remover.includes("internal fun erasedBubbleKeys("),
-  "only bubbles whose assigned source OCR lines were erased may become transparent");
+assert.ok(!remover.includes("erased.addAll(detectorErasedKeys)") &&
+          remover.includes("Final reconstruction may improve the saved pixels but cannot add an erased key") &&
+          remover.includes("eraseDetected(bitmap, dets, recognizedLines)"),
+  "detector pixel changes must not, by themselves, authorize transparent rendering");
 assert.ok(!remover.includes("for (b in bubbles) erased.add(WebModeTextRemovalCache.bubbleKey(b))"),
   "a successful erase anywhere on the page must not mark every bubble as erased");
+assert.ok(remover.includes("WebModeTextRemovalCache.setErased(sourceUrl, emptySet())") &&
+          remover.includes("activeCleanSource = sourceUrl") &&
+          remover.includes("keep opaque cover"),
+  "a skipped cleaner must not reuse a stale transparent-overlay decision");
 assert.ok(remover.includes("insideSpeechBubbleShape(bubble, balloonMask, width, height"),
   "pixel cleaning and mask growth must stay inside a known speech-bubble shape");
 assert.ok(remover.includes("val minimumErasedPixels = max(32, (innerArea * 0.06f).toInt())") &&
