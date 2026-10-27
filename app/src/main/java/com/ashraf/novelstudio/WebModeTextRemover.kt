@@ -617,6 +617,10 @@ internal object WebModeTextRemover {
         // a dedicated segmentation-mask pass for OCR regions that the balloon model can actually
         // validate. The model mask is a BALLOON mask, not a glyph mask.
         val maskOnly = !Prefs.bool(context, "wmTextRemoval2", true)
+        // Even an unsupported or invalid repeat must not inherit an earlier pass's transparent-overlay decision.
+        if (sourceUrl.isNotBlank()) synchronized(cleanStateLock) {
+            if (activeCleanSource != sourceUrl) WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
+        }
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
         if (isAnimatedOrUnsupported(encoded)) return false
 
