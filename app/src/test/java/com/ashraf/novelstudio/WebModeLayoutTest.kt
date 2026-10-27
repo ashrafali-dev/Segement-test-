@@ -104,6 +104,22 @@ class WebModeSamePositionTest {
         assertFalse(WebModeLayoutStore.samePosition(b(0.5f, 0.5f, 0.6f, 0.008f), b(0.5f, 0.5f, 0.6f, 0.02f)))
     }
 
+    @Test fun malformedExplicitMarkerIsNeverPlacedByParagraphFallback() {
+        val layout = WebModeLayout(0, pageA)
+        assertEquals(null, WebModeLayout.align("[999] not safe to guess", layout))
+    }
+
+    @Test fun duplicateMarkerLeavesOnlyItsAmbiguousBubbleUntranslated() {
+        val layout = WebModeLayout(0, pageA)
+        val placed = WebModeLayout.align(
+            "[001] first translation\\n[001] ambiguous second\\n[003] third translation",
+            layout
+        )
+        assertEquals("first translation", placed?.get(0))
+        assertEquals(null, placed?.get(1))
+        assertEquals("third translation", placed?.get(2))
+    }
+
     @Test fun identicalTextInTwoDifferentBubblesHasDistinctIdentity() {
         // Two bubbles that both say "!" (extremely common in comics) must not share a cache identity,
         // otherwise the translation produced for one is drawn over the other.
