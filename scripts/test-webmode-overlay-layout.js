@@ -81,6 +81,9 @@ assert.ok(!remover.includes("for (b in bubbles) erased.add(WebModeTextRemovalCac
   "a successful erase anywhere on the page must not mark every bubble as erased");
 assert.ok(remover.includes("insideSpeechBubbleShape(bubble, balloonMask, width, height"),
   "pixel cleaning and mask growth must stay inside a known speech-bubble shape");
+assert.ok(remover.includes("val minimumErasedPixels = max(24, (innerArea * 0.04f).toInt())") &&
+          remover.includes("val minimumTextEvidence = max(16, (text.w.toLong() * text.h * 3L / 100L).toInt())"),
+  "partial pixel changes must not remove the opaque cover or mark a source line fully erased");
 assert.ok(remover.includes("val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())"),
   "a handful of changed pixels must not count as proof that all source glyphs disappeared");
 assert.ok(bubbleCore.includes("maskBands(d, maxBands = 64)") &&
