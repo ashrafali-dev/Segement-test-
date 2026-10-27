@@ -142,53 +142,30 @@ internal object MarkerCodec {
         val matches = MARK.findAll(text).toList()
         val order = (spatialOrder.filter { it in 0 until bubbleCount }.distinct() +
             (0 until bubbleCount).filter { it !in spatialOrder })
-        if (matches.isEmpty()) {
-            // A marker-less answer is still useful. Map each distinct paragraph to the next available
-            // source region in geometric order; if there are extra paragraphs, ignore only the extras.
-            val paragraphs = text.split(Regex("\\n\\s*\\n"))
-                .map { oneLine(it) }.filter { it.isNotEmpty() }
-                .let { if (titleOffset > 0 && it.size > bubbleCount) it.drop(titleOffset) else it }
-            for (i in 0 until minOf(paragraphs.size, order.size)) {
-                val target = order[i]
-                if (out[target].isNullOrBlank()) {
-                    out[target] = paragraphs[i]
-                    onFallback(-1, target, "markerless spatial fallback")
-                }
-            }
+
+        if (matches.isNotEmpty()) {
+            // Explicit marker IDs are the only reliable bubble identity. Reassigning a duplicate or out-of-range
+            // marker to a nearby empty slot silently puts a valid translation on the WRONG bubble. Keep every
+            // exact valid marker from [align] and leave failed markers empty for a targeted retry.
             return out
         }
 
-        val firstBubbleNo = 1 + titleOffset
-        val lastBubbleNo = bubbleCount + titleOffset
-        val seen = HashSet<Int>()
-        for ((ordinal, match) in matches.withIndex()) {
-            val end = if (ordinal + 1 < matches.size) matches[ordinal + 1].range.first else text.length
-            val body = oneLine(text.substring(match.range.last + 1, end))
-            if (body.isEmpty() || body.matches(Regex("[~～]+"))) continue
-
-            val raw = match.groupValues[1]
-            val no = raw.toIntOrNull() ?: -1
-            val validUnique = no in firstBubbleNo..lastBubbleNo && seen.add(no)
-            if (validUnique) continue // MarkerCodec.align has already handled this body.
-
-            // A trailing extra marker cannot correspond to another source bubble. Do not recycle it to
-            // overwrite or randomly duplicate a translation.
-            val ordinalSlot = ordinal - titleOffset
-            if (ordinalSlot !in order.indices) continue
-
-            var pivot = ordinalSlot
-            var target = order[pivot]
-            if (!out[target].isNullOrBlank()) {
-                // Prefer the next empty spatial slot (the next bubble in reading order), then the nearest
-                // earlier empty slot. This is the best recoverable mapping when the returned marker is bad.
-                val after = (pivot + 1 until order.size).firstOrNull { out[order[it]].isNullOrBlank() }
-                val before = (pivot - 1 downTo 0).firstOrNull { out[order[it]].isNullOrBlank() }
-                val chosen = after ?: before ?: continue
-                pivot = chosen
-                target = order[pivot]
+        // Markerless output may be placed only when its paragraph count maps exactly to the source bubbles
+        // (or to one title plus all bubbles). Never shift a partial answer across unrelated speech balloons.
+        val rawParagraphs = text.split(Regex("\\n\\s*\\n"))
+            .map { oneLine(it) }.filter { it.isNotEmpty() }
+        val paragraphs = if (titleOffset > 0 && rawParagraphs.size == bubbleCount + 1)
+            rawParagraphs.drop(1) else rawParagraphs
+        if (paragraphs.size != bubbleCount) {
+            onFallback(-1, -1, "markerless count mismatch: ${paragraphs.size} paragraphs for $bubbleCount bubbles")
+            return out
+        }
+        for (i in paragraphs.indices) {
+            val target = order[i]
+            if (out[target].isNullOrBlank()) {
+                out[target] = paragraphs[i]
+                onFallback(-1, target, "exact-count markerless spatial fallback")
             }
-            out[target] = body
-            onFallback(no, target, if (no in firstBubbleNo..lastBubbleNo) "duplicate marker" else "marker out of range")
         }
         return out
     }
