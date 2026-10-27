@@ -231,6 +231,7 @@ internal object BubbleSegDetector {
             out
         } catch (e: Throwable) {
             lastError = (e.message ?: e.javaClass.simpleName).take(160)
+            if (lastError.contains("recycled", ignoreCase = true)) { lastInfo = "skipped: picture was released"; return null }
             failCount++
             retryAtMs = if (failCount >= 3) Long.MAX_VALUE else SystemClock.elapsedRealtime() + 30_000L * failCount
             lastInfo = "FAILED ($failCount): $lastError"

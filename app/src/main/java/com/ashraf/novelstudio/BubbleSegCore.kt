@@ -167,4 +167,38 @@ internal object BubbleSegCore {
         }
         return out
     }
+
+    /**
+     * The largest rectangle INSIDE the balloon mask that contains [seed] (page pixels [l,t,r,b]): grown side by side
+     * (step 3 px) while the new strip stays inside the outline (>= 96 % of its pixels). This is the area the
+     * translation may use, so it stays centred in the real balloon and never touches the outline.
+     */
+    fun fitRect(s: Seg, seed: IntArray, margin: Int = 4): IntArray? {
+        var l = Math.max(seed[0], s.l); var t = Math.max(seed[1], s.t)
+        var r = Math.min(seed[2], s.r); var b = Math.min(seed[3], s.b)
+        if (r - l < 4 || b - t < 4) return null
+        fun stripOk(x0: Int, y0: Int, x1: Int, y1: Int): Boolean {
+            if (x1 <= x0 || y1 <= y0) return false
+            var inn = 0; var all = 0
+            var y = y0
+            while (y < y1) {
+                var x = x0
+                while (x < x1) { all++; if (s.inside(x, y)) inn++; x += 2 }
+                y += 2
+            }
+            return all > 0 && inn * 100 >= all * 96
+        }
+        val step = 3
+        var grew = true
+        var guard = 0
+        while (grew && guard++ < 400) {
+            grew = false
+            if (l - step >= s.l && stripOk(l - step, t, l, b)) { l -= step; grew = true }
+            if (r + step <= s.r && stripOk(r, t, r + step, b)) { r += step; grew = true }
+            if (t - step >= s.t && stripOk(l, t - step, r, t)) { t -= step; grew = true }
+            if (b + step <= s.b && stripOk(l, b, r, b + step)) { b += step; grew = true }
+        }
+        l += margin; t += margin; r -= margin; b -= margin
+        return if (r - l >= 8 && b - t >= 8) intArrayOf(l, t, r, b) else null
+    }
 }

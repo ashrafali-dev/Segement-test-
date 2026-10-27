@@ -203,6 +203,14 @@ internal object BubbleDetectorCore {
      * True when the detector says the two points are inside DIFFERENT speech bubbles: lines of two bubbles must never be
      * joined into one sentence. Unknown (no detection around one of them) is never a veto.
      */
+    /** True when point (x,y) is not part of balloon [d]: outside its mask, or clearly (> 10 px) outside its box. */
+    private fun outsideBalloon(d: Det, x: Float, y: Float): Boolean {
+        if (d.seg != null) return true
+        val dx = Math.max(0f, Math.max(d.l - x, x - d.r))
+        val dy = Math.max(0f, Math.max(d.t - y, y - d.b))
+        return dx > 10f || dy > 10f
+    }
+
     fun inDifferentBubbles(dets: List<Det>?, ax: Float, ay: Float, bx: Float, by: Float): Boolean {
         if (dets == null) return false
         // Use the real "bubble" (outline) boxes only: text_bubble boxes can legitimately be split per text column.
@@ -211,9 +219,8 @@ internal object BubbleDetectorCore {
         if (a != null && b != null) return a !== b
         // With a real balloon MASK the outline is exact: lettering inside the balloon and a small whisper / note next to
         // it OUTSIDE the outline are two texts (they used to be glued under one marker).
-        if (a != null) return a.seg != null
-        if (b != null) return b.seg != null
-        if (a != null || b != null) return false
+        if (a != null) return outsideBalloon(a, bx, by)
+        if (b != null) return outsideBalloon(b, ax, ay)
         // Neither piece is inside a speech bubble: free lettering (captions, labels, notes on artwork). If each one
         // sits in a text_free box and no single box holds both, they are separate texts.
         var inA = false

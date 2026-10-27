@@ -139,6 +139,44 @@ internal object BubbleDetector {
         return h
     }
 
+    private val asyncPool: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ns-webmode-detect").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+        }
+    private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Real-time path: start detection for [bmp] in the background and return IMMEDIATELY (the reader's text must never
+     * wait for a 4-10 s model run). The model works on its OWN copy of the picture, so the caller may recycle [bmp] at
+     * once (the old "Can't call getPixel() on a recycled bitmap" failures); the result lands in the cache and the next
+     * pass over the same panel uses it. One run at a time; a busy detector simply skips (the next pass asks again).
+     */
+    fun requestAsync(c: Context, bmp: Bitmap) {
+        try {
+            if (bmp.isRecycled || !enabled(c)) return
+            val key = fingerprint(bmp)
+            if (synchronized(cache) { cache.containsKey(key) }) return
+            if (!inFlight.compareAndSet(false, true)) return
+            val rt = Runtime.getRuntime()
+            val freeMb = (rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())) / 1048576L
+            if (freeMb < 60L) {
+                inFlight.set(false)
+                OcrDiag.log("DETECT_SRC", "background detection skipped: low memory (free heap ${freeMb}MB)")
+                return
+            }
+            val copy = try { bmp.copy(Bitmap.Config.ARGB_8888, false) } catch (_: Throwable) { null }
+            if (copy == null) { inFlight.set(false); return }
+            try {
+                asyncPool.execute {
+                    try { detect(c, copy) } catch (_: Throwable) {} finally {
+                        try { copy.recycle() } catch (_: Throwable) {}
+                        inFlight.set(false)
+                    }
+                }
+            } catch (_: Throwable) { try { copy.recycle() } catch (_: Throwable) {}; inFlight.set(false) }
+        } catch (_: Throwable) { inFlight.set(false) }
+    }
+
     /** Finished result for this picture, or null. Never runs a model, so it is safe on any thread. */
     fun cached(bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (bmp.isRecycled) return null
@@ -240,6 +278,7 @@ internal object BubbleDetector {
     /** Detections for [bmp] in page pixels, or null when the detector is off/unavailable. Never throws. */
     fun detect(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
+        if (bmp.isRecycled) return null
         cached(bmp)?.let { return it }
         OnnxHeavyGate.lock.lock()
         try { return detectLocked(c, bmp) } finally { OnnxHeavyGate.lock.unlock() }
@@ -300,6 +339,7 @@ internal object BubbleDetector {
         } catch (e: Throwable) {
             lastError = (e.message ?: e.javaClass.simpleName).take(160)
             Log.w(TAG, "detector failed: $lastError")
+            if (lastError.contains("recycled", ignoreCase = true)) return null   // the caller's picture went away: not a model failure
             failCount++
             broken = true
             retryAtMs = if (failCount >= 4) Long.MAX_VALUE else SystemClock.elapsedRealtime() + 20_000L * failCount
