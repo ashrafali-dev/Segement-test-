@@ -1,6 +1,7 @@
 package com.ashraf.novelstudio.manualextract
 
 import android.graphics.Bitmap
+import com.ashraf.novelstudio.BubbleDetectorCore
 import com.ashraf.novelstudio.OcrScript
 import com.ashraf.novelstudio.WmBubble
 
@@ -16,6 +17,10 @@ internal object ManualExtractHost {
         translateAndPlace: (bubble: WmBubble, text: String, script: OcrScript, onDone: (String) -> Unit) -> Unit,
         /** One marked request for N bubbles; the Activity places each answer at its own bubble. */
         translateAndPlaceAll: (bubbles: List<WmBubble>, prompt: String, script: OcrScript, onDone: (List<String?>) -> Unit) -> Unit,
+        /** Detector output over the whole page image, or null when no model runs. */
+        detectPage: (src: String) -> List<BubbleDetectorCore.Det>? = { null },
+        /** Pixel size of the whole page image, or null when unknown. */
+        pageSize: (src: String) -> Pair<Int, Int>? = { null },
         /** Called on the main thread with a short user-facing reason whenever a run does not place anything. */
         onFailure: (String) -> Unit = {}
     ) {
@@ -29,6 +34,8 @@ internal object ManualExtractHost {
             override fun translateAndPlaceAll(
                 bubbles: List<WmBubble>, prompt: String, script: OcrScript, onDone: (List<String?>) -> Unit
             ) = translateAndPlaceAll(bubbles, prompt, script, onDone)
+            override fun detectPage(src: String): List<BubbleDetectorCore.Det>? = detectPage(src)
+            override fun pageSize(src: String): Pair<Int, Int>? = pageSize(src)
         })
     }
 

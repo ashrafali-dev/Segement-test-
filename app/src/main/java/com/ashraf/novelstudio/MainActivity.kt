@@ -503,7 +503,11 @@ class MainActivity : Activity() {
                         novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
                         number = "", contentSel = ""
                     )
-                    val layout = WebModeLayout(0, listOf(bubble))
+                    // Same rule as translateAndPlaceAll: the page keys the layout, the bubble is anchored to
+                    // the image it came from so the overlay can actually draw it.
+                    val imageSrc = WebModeLogic.normalizeUrl(bubble.src)
+                    val anchored = if (imageSrc.isBlank()) bubble else bubble.copy(src = imageSrc)
+                    val layout = WebModeLayout(0, listOf(anchored))
                     WebModeLayoutStore.setScan(url, layout)
                     // One tap = one translation. Deliberately NOT registerRealtimeBatch here: that marks the
                     // chapter as a realtime batch, and the realtime loop then keeps re-reading panels as the
@@ -518,21 +522,67 @@ class MainActivity : Activity() {
                     val url = cleanUrl(novelWv.url.orEmpty())
                     if (url.isBlank()) { onDone(emptyList()); return@post }
                     if (bubbles.isEmpty()) { onDone(emptyList()); return@post }
+                    // `url` is the PAGE and keys the saved layout. Each bubble must additionally be anchored to
+                    // the IMAGE it was read from, which is the only thing the overlay can draw on. Before this,
+                    // Manual Lite passed the page URL as the anchor, the writer found no <img> for it and the
+                    // translation was never drawn — which read as "text and bubble land in the wrong place".
+                    val anchored = bubbles.mapNotNull { b ->
+                        val imageSrc = WebModeLogic.normalizeUrl(b.src)
+                        if (imageSrc.isBlank()) null else b.copy(src = imageSrc)
+                    }
+                    if (anchored.isEmpty()) {
+                        OcrDiag.log("MANUAL", "place: no image anchor for ${bubbles.size} bubble(s); src=${bubbles.firstOrNull()?.src?.take(80)}")
+                        onDone(emptyList())
+                        return@post
+                    }
                     // The whole selection goes to the chatbot as ONE marked request (markers number the bubbles
                     // directly), so three bubbles on screen become three separately placed translations instead
                     // of one block. Same rule as above: no realtime batch registration, the mode stays idle.
-                    val layout = WebModeLayout(0, bubbles)
+                    val layout = WebModeLayout(0, anchored)
                     WebModeLayoutStore.setScan(url, layout)
                     val chapter = Chapter(
                         title = "", text = prompt, next = null, prev = null, url = url,
                         novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
                         number = "", contentSel = ""
                     )
+                    OcrDiag.log("MANUAL", "place: page=${url.take(80)} anchored=${
+                        anchored.groupingBy { it.src }.eachCount().entries.joinToString(",") { (s, n) -> "${s.take(60)}=$n" }
+                    }")
                     handleChapter(chapter, useSavedTranslation = false)
                     // Placement is driven by applyTranslation once the chatbot answers; the caller only needs
                     // to know the request started.
                     onDone(emptyList())
                 }
+            },
+            detectPage = { src ->
+                // Detector masks must come from the whole page image: a crop-only detection binds the mask to
+                // a throwaway bitmap, so the balloon outline never reaches the page. Reuses the same cached
+                // image bytes the capture path reads and the same enabled check the realtime scan uses.
+                val key = WebModeLogic.normalizeUrl(src)
+                if (key.isBlank() || !BubbleDetector.enabled(this)) null
+                else try {
+                    val bytes = ImageTap.get(key) ?: return@install null
+                    val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        ?: return@install null
+                    try {
+                        BubbleDetector.detect(this, full)?.also { dets ->
+                            OcrDiag.log("MANUAL", "detect: full image=${full.width}x${full.height} dets=${dets.size} masks=${dets.count { it.mask != null }} status=${BubbleDetector.lastInfo}")
+                        }
+                    } finally { full.recycle() }
+                } catch (e: Throwable) {
+                    OcrDiag.log("MANUAL", "detect: ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+                    null
+                }
+            },
+            pageSize = { src ->
+                // Header-only decode: no full bitmap, so asking for the size never doubles peak memory.
+                val key = WebModeLogic.normalizeUrl(src)
+                val bytes = if (key.isBlank()) null else ImageTap.get(key)
+                if (bytes == null) null else try {
+                    val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                    if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
+                } catch (_: Throwable) { null }
             },
             onFailure = { reason -> handler.post { toast(reason) } }
         )

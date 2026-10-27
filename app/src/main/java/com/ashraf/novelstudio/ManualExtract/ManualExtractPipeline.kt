@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.SystemClock
 import com.ashraf.novelstudio.BubbleBuilder
-import com.ashraf.novelstudio.BubbleDetector
 import com.ashraf.novelstudio.BubbleDetectorCore
 import com.ashraf.novelstudio.MarkerCodec
 import com.ashraf.novelstudio.OcrDiag
@@ -29,6 +28,19 @@ internal class ManualExtractPipeline(
          * normalized rect. Implementations MUST only fetch the tapped image, never a full-page screenshot.
          */
         fun captureCrop(src: String, x: Float, y: Float, w: Float, h: Float): Bitmap?
+
+        /**
+         * Detector output for the WHOLE page image [src], in that image's pixels, or null when no model is
+         * installed/enabled. Called at most once per manual run.
+         *
+         * Detection must run on the full image, not on the crop: a downscaled crop returns masks bound to a
+         * throwaway bitmap that never reaches the page, while a full-image detection gives the same instance
+         * silhouettes the realtime scan uses, so the crop just becomes a window into them.
+         */
+        fun detectPage(src: String): List<BubbleDetectorCore.Det>? = null
+
+        /** Pixel size of the whole page image [src], or null when it is unknown (canvas / live capture). */
+        fun pageSize(src: String): Pair<Int, Int>? = null
 
         /**
          * Translate [text] and place it over [bubble] using the existing overlay (built-in mask). [onDone] is
@@ -115,12 +127,16 @@ internal class ManualExtractPipeline(
                 // has no source image to re-capture from, and the frame is exactly what the user chose.
                 val expanded = if (src.isBlank()) null else expandCrop(host, src, x, y, w, h)
                 if (expanded != null) {
+                    var e: Bitmap? = null
                     try {
-                        val e = downscale(expanded, ManualExtractConfig.MAX_OCR_DIM)
-                        if (e !== expanded) expanded.recycle()
+                        e = downscale(expanded, ManualExtractConfig.MAX_OCR_DIM)
                         outcome = ocr.read(e, script, ManualExtractConfig.OCR_CAP_MS)
-                        if (e !== expanded) e.recycle()
-                    } catch (_: Throwable) { /* keep first outcome */ }
+                    } catch (_: Throwable) { /* keep first outcome */ } finally {
+                        // The expanded bitmap is owned here; recycle it and the downscaled copy (if different)
+                        // only AFTER OCR has finished with it.
+                        if (e != null && e !== expanded && !e.isRecycled) e.recycle()
+                        if (!expanded.isRecycled) expanded.recycle()
+                    }
                     m.mark("ocr_retry")
                 }
             }
@@ -144,10 +160,20 @@ internal class ManualExtractPipeline(
             }
 
             // 5) ONE bubble per detected bubble, each mapped back to source-image coordinates.
-            val dets = detsFor(ocrBmp)
+            // Detections come from the FULL page image (host.detectPage) and are trimmed to this crop; the crop
+            // therefore uses the same instance masks as the realtime scan instead of masks from a downscale.
+            val page = host.pageSize(src)
+            // Without the page size the crop's own pixel size is all that is known; the fractional mapping
+            // stays exact (crop px / crop px), and only detector trimming loses the page origin.
+            val cropRect = ManualCropGeometry.Crop(
+                if (page == null) 0f else x, if (page == null) 0f else y,
+                if (page == null) 1f else w, if (page == null) 1f else h,
+                page?.first ?: cw, page?.second ?: ch
+            )
+            val dets = detsFor(src, cropRect)
             // Erase the original lettering in the crop itself. cleanAndCache() is not used here: it is keyed by
             // an image URL and served through the WebView interceptor, while a manual crop is a one-off bitmap.
-            // Same idea, applied in place: fill each detected bubble with its own colour.
+            // The OCR line boxes are the text region; the model masks only constrain the fill.
             try {
                 val erasedPx = com.ashraf.novelstudio.WebModeTextRemover.eraseDetected(ocrBmp, dets, outcome.blocks)
                 if (erasedPx > 0) OcrDiag.log("ERASE", "manual crop pixels=$erasedPx dets=${dets?.size ?: 0}")
@@ -155,7 +181,7 @@ internal class ManualExtractPipeline(
             val groups = BubbleBuilder.group(outcome.blocks, dets)
             if (groups.isEmpty()) return fail(m, "no bubbles")
             val bubbles = groups.mapNotNull { g ->
-                buildBubble(ocrBmp, g, src, x, y, w, h)
+                buildBubble(ocrBmp, g, src, cropRect)
             }
             if (bubbles.isEmpty()) return fail(m, "no bubbles")
             m.blocks = bubbles.size
@@ -204,11 +230,9 @@ internal class ManualExtractPipeline(
      * crop is only a fraction of the panel.
      */
     private fun buildBubble(
-        bmp: Bitmap, g: BubbleBuilder.Group, src: String,
-        x: Float, y: Float, w: Float, h: Float
+        bmp: Bitmap, g: BubbleBuilder.Group, src: String, crop: ManualCropGeometry.Crop
     ): WmBubble? {
-        val cw = bmp.width.toFloat(); val ch = bmp.height.toFloat()
-        if (cw <= 0f || ch <= 0f) return null
+        if (bmp.width <= 0 || bmp.height <= 0) return null
         val rects = g.lines.map { com.ashraf.novelstudio.WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
         val style = try {
             com.ashraf.novelstudio.WmBubbleStyle.analyse(bmp, intArrayOf(g.l, g.t, g.r, g.b), rects, expand = true)
@@ -219,15 +243,12 @@ internal class ManualExtractPipeline(
         val sb = style?.b ?: g.b
 
         // BubbleFit supplies the largest write-rectangle inside the outline (used to fit the translation).
-        var fitL = 0; var fitT = 0; var fitR = 0; var fitB = 0
-        var hasFit = false
+        var safeRect: IntArray? = null
         try {
             val fit = com.ashraf.novelstudio.BubbleFit.analyse(bmp, intArrayOf(sl, st, sr, sb), rects)
             if (fit != null) {
                 val safe = fit.safe
-                if (safe[2] > safe[0] && safe[3] > safe[1]) {
-                    fitL = safe[0]; fitT = safe[1]; fitR = safe[2]; fitB = safe[3]; hasFit = true
-                }
+                if (safe[2] > safe[0] && safe[3] > safe[1]) safeRect = intArrayOf(safe[0], safe[1], safe[2], safe[3])
             }
         } catch (_: Throwable) { }
 
@@ -236,35 +257,36 @@ internal class ManualExtractPipeline(
             ?: (g.lines.map { it.h }.sorted().let { if (it.isEmpty()) 0f else it[it.size / 2] })
         if (fontPx <= 0f) return null
 
-        // crop pixels -> source fractions
-        fun fx(px: Float): Float = x + (px / cw) * w
-        fun fy(py: Float): Float = y + (py / ch) * h
-        // Font is a width fraction in the writer, so it must scale by the source width, not the crop width.
-        val fontNorm = (fontPx / cw) * w
-
         val text = if (g.lines.any { it.vertical }) g.columnText(vertical = true) else g.text
         if (text.isBlank()) return null
+        val angle = g.lines.map { it.angle }.sorted().let { if (it.isEmpty()) 0f else it[it.size / 2] }
 
-        return WmBubble(
+        return ManualCropGeometry.toWmBubble(
             src = src,
-            cx = fx((sl + sr) / 2f), cy = fy((st + sb) / 2f),
-            w = ((sr - sl) / cw) * w, h = ((sb - st) / ch) * h,
-            angle = 0f, font = fontNorm.coerceIn(0.002f, 0.30f),
-            bg = style?.bg ?: 0xFFFFFFFF.toInt(), fg = style?.fg ?: 0xFF000000.toInt(),
-            fg2 = style?.fg2 ?: 0xFF000000.toInt(),
-            soft = style?.soft ?: false, stroke = style?.stroke ?: 0,
+            crop = crop,
+            cover = intArrayOf(sl, st, sr, sb),
+            safe = safeRect,
+            fontPx = fontPx,
+            angle = angle,
+            bg = style?.bg ?: 0xFFFFFFFF.toInt(),
+            fg = style?.fg ?: 0xFF000000.toInt(),
+            fg2 = style?.fg2 ?: style?.fg ?: 0xFF000000.toInt(),
+            soft = style?.soft ?: false,
+            stroke = style?.stroke ?: 0,
             sourceText = text,
-            tcx = if (hasFit) fx((fitL + fitR) / 2f) else 0f,
-            tcy = if (hasFit) fy((fitT + fitB) / 2f) else 0f,
-            tbw = if (hasFit) ((fitR - fitL) / cw) * w else 0f,
-            tbh = if (hasFit) ((fitB - fitT) / ch) * h else 0f
+            modelMaskFit = safeRect != null
         )
     }
 
-    /** Detector output for this crop, or null when the model is not installed/enabled (pixel grouping then). */
-    private fun detsFor(bmp: Bitmap): List<BubbleDetectorCore.Det>? = try {
-        val ctx = ocr.app
-        if (BubbleDetector.enabled(ctx)) BubbleDetector.detect(ctx, bmp) else null
+    /**
+     * Detector output for this crop, or null when the model is not installed/enabled (pixel grouping then).
+     *
+     * Masked detections are taken from a full-image detection and trimmed to the crop ([ManualCropGeometry]).
+     * The old code detected on the downscaled crop, so the masks described a throwaway bitmap and the
+     * balloon outline was never used for erasing or for the safe text rectangle.
+     */
+    private fun detsFor(src: String, crop: ManualCropGeometry.Crop): List<BubbleDetectorCore.Det>? = try {
+        ManualCropGeometry.detectionsInCrop(host.detectPage(src), crop)
     } catch (_: Throwable) { null }
 
     /** Downscale so the longest side ≤ [maxDim]; returns the SAME bitmap when no scaling is needed. */
