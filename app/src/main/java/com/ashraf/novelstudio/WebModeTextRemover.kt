@@ -675,28 +675,7 @@ internal object WebModeTextRemover {
 
                 // Only mark an overlay bubble as cleaned when all of its OCR lines were really erased.
                 // Text masks can still clean artwork/SFX even when those regions have no speech-balloon cover.
-                val linesByBubble = LinkedHashMap<String, MutableList<OcrBlock>>()
-                for (line in recognizedLines) {
-                    if (line.text.isBlank() || line.w < 2f || line.h < 2f) continue
-                    val nx = line.cx / width
-                    val ny = line.cy / height
-                    val covering = bubbles.filter { bb ->
-                        nx >= bb.cx - bb.w / 2f && nx <= bb.cx + bb.w / 2f &&
-                            ny >= bb.cy - bb.h / 2f && ny <= bb.cy + bb.h / 2f
-                    }
-                    if (covering.isEmpty()) continue
-                    val lineText = WebModeLayout.normalizeOcrText(line.text)
-                    val textMatch = covering.filter { bb ->
-                        val bText = WebModeLayout.normalizeOcrText(bb.sourceText)
-                        bText.isNotBlank() && lineText.isNotBlank() &&
-                            (bText.contains(lineText) || lineText.contains(bText))
-                    }
-                    val chosen = (textMatch.ifEmpty { covering }).minByOrNull { bb ->
-                        kotlin.math.abs(bb.cx * width - line.cx) + kotlin.math.abs(bb.cy * height - line.cy)
-                    } ?: continue
-                    val key = WebModeTextRemovalCache.bubbleKey(chosen)
-                    linesByBubble.getOrPut(key) { ArrayList() }.add(line)
-                }
+                val linesByBubble = recognizedLinesByBubble(bubbles, recognizedLines, width, height)
 
                 val erasedLines = java.util.Collections.newSetFromMap(
                     java.util.IdentityHashMap<OcrBlock, Boolean>()
@@ -705,10 +684,7 @@ internal object WebModeTextRemover {
                     bitmap, allDetections, recognizedLines,
                     onOcrRegionErased = { erasedLines.add(it) }
                 )
-                val erasedKeys = LinkedHashSet<String>()
-                for ((key, lines) in linesByBubble) {
-                    if (lines.isNotEmpty() && lines.all { erasedLines.contains(it) }) erasedKeys.add(key)
-                }
+                val erasedKeys = erasedBubbleKeys(linesByBubble, erasedLines)
                 if (changedPixels < 4 || (erasedKeys.isEmpty() && textMasks.isEmpty())) {
                     OcrDiag.log("MASK_CLEAN", "skip: model masks did not safely erase text pixels")
                     return false
@@ -735,14 +711,22 @@ internal object WebModeTextRemover {
             // Every bubble whose lettering was really erased (flat AND artwork). The writer only drops its
             // opaque cover box for bubbles in this set; any other bubble keeps the safe box fallback.
             val erased = HashSet<String>()
-            // Detector-driven erase first: it covers each bubble with the bubble's own colour, which is what
-            // actually removes the original lettering on artwork and inside bubbles the pixel finder could not
-            // resolve. The per-bubble passes below then only fix what is left.
-            val erasedByDetector = try { eraseDetected(bitmap, dets) } catch (_: Throwable) { 0 }
+            // Detector erasure is tracked per source OCR line. A few changed pixels in ONE bubble must never
+            // mark every bubble in this image as fully erased: that made the overlay transparent over residual ink.
+            val linesByBubble = recognizedLinesByBubble(bubbles, recognizedLines, width, height)
+            val detectorErasedLines = java.util.Collections.newSetFromMap(
+                java.util.IdentityHashMap<OcrBlock, Boolean>()
+            )
+            val erasedByDetector = try {
+                eraseDetected(bitmap, dets, recognizedLines,
+                    onOcrRegionErased = { detectorErasedLines.add(it) })
+            } catch (_: Throwable) { 0 }
             if (erasedByDetector > 0) {
                 totalRemoved += erasedByDetector
-                for (b in bubbles) erased.add(WebModeTextRemovalCache.bubbleKey(b))
-                OcrDiag.log("ERASE", "detector pass dets=${dets?.size ?: 0} pixels=$erasedByDetector")
+                val detectorErasedKeys = erasedBubbleKeys(linesByBubble, detectorErasedLines)
+                erased.addAll(detectorErasedKeys)
+                OcrDiag.log("ERASE", "detector pass dets=${dets?.size ?: 0} pixels=$erasedByDetector " +
+                    "sourceLines=${detectorErasedLines.size}/${recognizedLines.size} erasedBubbles=${detectorErasedKeys.size}/${linesByBubble.size}")
             }
             val boundedBubbles = bubbles.asSequence()
                 .filter { it.sourceText.isNotBlank() && it.w > 0f && it.h > 0f }
@@ -761,11 +745,15 @@ internal object WebModeTextRemover {
             // wipeLetteringByBackground), so only the text is removed and its own colours are restored.
 
             for (bubble in boundedBubbles) {
-                val cx = bubble.cx * width
-                val cy = bubble.cy * height
-                val bw = bubble.w * width
-                val bh = bubble.h * height
+                // The cover geometry can span the whole speech balloon. Text cleaning must always use the
+                // original OCR glyph box, never that expanded cover rectangle.
+                val hasOcrBox = bubble.ocrW > 0f && bubble.ocrH > 0f
+                val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width
+                val cy = (if (hasOcrBox) bubble.ocrCy else bubble.cy) * height
+                val bw = (if (hasOcrBox) bubble.ocrW else bubble.w) * width
+                val bh = (if (hasOcrBox) bubble.ocrH else bubble.h) * height
                 if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite()) continue
+                val balloonMask = speechBubbleMaskFor(bubble, dets, width, height, cx, cy, bw, bh)
                 // ox/oy = the exact OCR box (where the old lettering is).
                 val ox0 = (cx - bw / 2f).toInt().coerceIn(0, width - 1)
                 val oy0 = (cy - bh / 2f).toInt().coerceIn(0, height - 1)
@@ -832,6 +820,8 @@ internal object WebModeTextRemover {
                 val strokeCand = if (hasStroke) ByteArray(regionCount) else null
                 for (i in 0 until regionCount) {
                     val p = region[i]
+                    if (!insideSpeechBubbleShape(bubble, balloonMask, width, height,
+                            x0 + (i % rw) + 0.5f, y0 + (i / rw) + 0.5f)) continue
                     val fromBg = distance(p, bg)
                     if (fromBg < (if (soft) 52f else 46f)) continue
                     val thr = if (soft) 78f else max(82f, fromBg * 1.08f)
@@ -874,9 +864,11 @@ internal object WebModeTextRemover {
                 // coloured balloon its own colour instead of turning it into a white rectangle.
                 val bgRemoved = eraseByBackgroundModel(
                     bitmap, region, rw, rh, ix0, iy0, ix1, iy1, candidate, regionCount,
-                    fg1, fg2, fg3, fontPx, x0, y0, innerArea
+                    fg1, fg2, fg3, fontPx, x0, y0, innerArea,
+                    bubble, balloonMask, width, height
                 )
-                if (bgRemoved >= 4) {
+                val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())
+                if (bgRemoved >= minimumErasedPixels) {
                     totalRemoved += bgRemoved
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
                     continue
@@ -940,7 +932,8 @@ internal object WebModeTextRemover {
                 // around two heavy kanji columns is ~70 % ink, and the old 50 % cap threw the whole bubble away.
                 // Only very dense (>= 85 %) masks are treated as artwork now; the shape-size limits above and
                 // the on-artwork AI gate still decide whether this is really lettering.
-                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
+                if (selectedCount < max(4, (innerArea * 0.01f).toInt()) ||
+                    selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
                 // Flat bubble: mop up the faint ghosts the strict glyph test leaves behind (anti-aliasing, JPEG
                 // ringing, halos, thin strokes, shapes rejected by size).
@@ -960,6 +953,8 @@ internal object WebModeTextRemover {
                         val i = ry * rw + rx
                         if (selected[i].toInt() != 0 || protect[i].toInt() != 0) continue
                         val p = region[i]
+                        if (!insideSpeechBubbleShape(bubble, balloonMask, width, height,
+                                x0 + rx + 0.5f, y0 + ry + 0.5f)) continue
                         if (distance(p, bg) < 9f) continue
                         val ink = min(distance(p, fg1), distance(p, fg2))
                         if (ink <= ghostThr || distance(p, fg3) <= ghostThr) selected[i] = 1
@@ -981,6 +976,8 @@ internal object WebModeTextRemover {
                                 if (nx < 0 || nx >= rw) continue
                                 val ni = ny * rw + nx
                                 if (mask[ni].toInt() == 0 && protect[ni].toInt() == 0 &&
+                                    insideSpeechBubbleShape(bubble, balloonMask, width, height,
+                                        x0 + nx + 0.5f, y0 + ny + 0.5f) &&
                                     distance(region[ni], bg) >= 8f &&
                                     (soft || min(distance(region[ni], fg1), distance(region[ni], fg2)) <=
                                         max(58f, min(distance(bg, fg1), distance(bg, fg2)) * 0.6f))) mask[ni] = 1
