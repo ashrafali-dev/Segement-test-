@@ -491,24 +491,30 @@ internal object WebModeWriter {
         t.style.margin='0';t.style.position='relative';t.style.left='50%';t.style.transform='translateX(-50%)';
         availH=Math.max(8,boxH*0.86);
         var chosen=null;
-        for(var wi=0;wi<=8;wi++){
-          var trialW=startW+(upperW-startW)*(wi/8);
+        // This runs on the WebView UI thread. Keep the search bounded: checking every glyph line against every
+        // mask band inside all 108 font/width trials made multi-bubble pages appear stuck after the answer arrived.
+        // Find a box-fitting font cheaply, then perform only a few shape validations while stepping down if needed.
+        for(var wi=0;wi<=4;wi++){
+          var trialW=startW+(upperW-startW)*(wi/4);
           availW=trialW;
           t.style.width=trialW+'px';t.style.maxWidth=trialW+'px';t.style.overflow='visible';
           var loPx=Math.max(1.5,floorPx),hiPx=fitCap,bestPx=0;
-          for(var fi=0;fi<12;fi++){
+          for(var fi=0;fi<8;fi++){
             var midPx=(loPx+hiPx)/2;
             t.style.fontSize=midPx+'px';
-            if(fits()&&staysInsideDetectedShape()){bestPx=midPx;loPx=midPx;}else hiPx=midPx;
+            if(fits()){bestPx=midPx;loPx=midPx;}else hiPx=midPx;
           }
-          if(bestPx<floorPx){
-            t.style.fontSize=floorPx+'px';
-            if(fits()&&staysInsideDetectedShape())bestPx=floorPx;
+          if(bestPx<floorPx)bestPx=floorPx;
+          var validPx=0,trialPx=bestPx;
+          for(var si=0;si<4&&trialPx>=floorPx;si++){
+            t.style.fontSize=trialPx+'px';
+            if(fits()&&staysInsideDetectedShape()){validPx=trialPx;break;}
+            if(trialPx<=floorPx+0.05)break;
+            trialPx=Math.max(floorPx,trialPx*0.88);
           }
-          // Compare every safe width. Stopping at the first floor-sized fit kept translations cramped even
-          // when the detector mask proved that more of the balloon was available.
-          if(bestPx>=floorPx&&(!chosen||bestPx>chosen.px+0.05||
-             (Math.abs(bestPx-chosen.px)<=0.05&&trialW<chosen.w)))chosen={w:trialW,px:bestPx};
+          // Compare five representative widths, choosing the largest validated font without blocking the reader.
+          if(validPx>=floorPx&&(!chosen||validPx>chosen.px+0.05||
+             (Math.abs(validPx-chosen.px)<=0.05&&trialW<chosen.w)))chosen={w:trialW,px:validPx};
         }
         if(chosen){
           availW=chosen.w;t.style.width=chosen.w+'px';t.style.maxWidth=chosen.w+'px';
