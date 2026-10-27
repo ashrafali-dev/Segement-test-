@@ -420,7 +420,7 @@ internal object WebModeWriter {
       // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
       // as a last resort, then request a taller geometry instead of clipping the final lines.
       var cap=Number(maxPx);if(!isFinite(cap)||cap<2)cap=4;
-      var lo=0.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
+      var lo=0.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo,fitCap=hi;
       // A readable floor: below it the box grows (sideways first, then taller) instead of the font shrinking further.
       var floorPx=maskLock?Math.max(3,Math.min(cap*0.5,hi)):Math.max(6,Math.min(cap*0.62,hi));
       function fits(){
@@ -487,7 +487,7 @@ internal object WebModeWriter {
           var trialW=startW+(upperW-startW)*(wi/8);
           availW=trialW;
           t.style.width=trialW+'px';t.style.maxWidth=trialW+'px';t.style.overflow='visible';
-          var loPx=Math.max(1.5,floorPx),hiPx=hi,bestPx=0;
+          var loPx=Math.max(1.5,floorPx),hiPx=fitCap,bestPx=0;
           for(var fi=0;fi<12;fi++){
             var midPx=(loPx+hiPx)/2;
             t.style.fontSize=midPx+'px';
