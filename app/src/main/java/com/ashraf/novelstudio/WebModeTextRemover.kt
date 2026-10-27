@@ -90,7 +90,8 @@ internal object WebModeTextRemover {
                 bitmap, text, width, height, padding = 2, clipTo = outline
             )
             changed += modelMaskPixels
-            if (modelMaskPixels >= 4) {
+            val minimumTextEvidence = max(12, (text.w.toLong() * text.h / 100L).toInt())
+            if (modelMaskPixels >= minimumTextEvidence) {
                 notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
                 continue
             }
@@ -105,7 +106,8 @@ internal object WebModeTextRemover {
             val b = (text.b + 2).coerceAtMost(height)
             val fallbackPixels = fillMaskedRect(bitmap, outline, l, t, r, b, fill, width, height)
             changed += fallbackPixels
-            if (fallbackPixels >= 4) notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
+            if (fallbackPixels >= max(12, (text.w.toLong() * text.h / 100L).toInt()))
+                notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
         }
 
         // 2) Koharu's onomatopoeia_text instances: the mask here IS the lettering, so erase its shape and
@@ -115,7 +117,8 @@ internal object WebModeTextRemover {
         }) {
             val pixels = eraseTextInstance(bitmap, free, width, height, padding = 2)
             changed += pixels
-            if (pixels >= 4) notifyErasedOcrLines(free, recognizedLines, onOcrRegionErased)
+            if (pixels >= max(12, (free.w.toLong() * free.h / 100L).toInt()))
+                notifyErasedOcrLines(free, recognizedLines, onOcrRegionErased)
         }
         // Older detectors may provide text boxes without instance masks; preserve their compatible fallback.
         for (free in dets.filter {
@@ -167,7 +170,8 @@ internal object WebModeTextRemover {
                 val fill = medianRingColour(bitmap, outer, inner, width, height) ?: continue
                 val regionChanged = fillMaskedRect(bitmap, outer, l, t, r, b, fill, width, height, inpaint)
                 changed += regionChanged
-                if (regionChanged >= 4) onOcrRegionErased?.invoke(line)
+                val minimumLineEvidence = max(12, (line.w.toLong() * line.h / 100L).toInt())
+                if (regionChanged >= minimumLineEvidence) onOcrRegionErased?.invoke(line)
             }
         }
         return changed
@@ -283,7 +287,9 @@ internal object WebModeTextRemover {
             val iw = (minOf(r, instance.r.toFloat()) - maxOf(l, instance.l.toFloat())).coerceAtLeast(0f)
             val ih = (minOf(b, instance.b.toFloat()) - maxOf(t, instance.t.toFloat())).coerceAtLeast(0f)
             val lineArea = line.w * line.h
-            if (iw * ih >= lineArea * 0.35f) callback(line)
+            // Prefer a conservative false negative over transparent text with a few source glyphs still visible.
+            // The caller keeps an opaque shaped cover when the model mask only explains a minority of this OCR line.
+            if (iw * ih >= lineArea * 0.70f) callback(line)
         }
     }
 
@@ -850,7 +856,9 @@ internal object WebModeTextRemover {
                         if (tmp[ry * rw + rx].toInt() == 0) continue
                         for (dy in -rad..rad) {
                             val ny = ry + dy
-                            if (ny in 0 until rh && strokeCand[ny * rw + rx].toInt() != 0) candidate[ny * rw + rx] = 1
+                            if (ny in 0 until rh && strokeCand[ny * rw + rx].toInt() != 0 &&
+                                insideSpeechBubbleShape(bubble, balloonMask, width, height,
+                                    x0 + rx + 0.5f, y0 + ny + 0.5f)) candidate[ny * rw + rx] = 1
                         }
                     }
                 }
