@@ -54,7 +54,10 @@ class KoharuSegCoreTest {
         assertFalse(found.any { it.label == 0 && it.l == 0 && it.t == 0 && it.r == 512 && it.b == 512 })
     }
 
-    @Test fun dynamicInputSizesMustRespectTheModelStride() {
+    @Test fun dynamicInputSizesMustRespectStrideAndAllowNarrowWebtoonTiles() {
+        assertTrue(KoharuSegCore.validInputSize(128))
+        assertTrue(KoharuSegCore.validInputSize(160))
+        assertTrue(KoharuSegCore.validInputSize(224))
         assertTrue(KoharuSegCore.validInputSize(256))
         assertTrue(KoharuSegCore.validInputSize(320))
         assertTrue(KoharuSegCore.validInputSize(384))
@@ -63,7 +66,12 @@ class KoharuSegCoreTest {
         assertTrue(KoharuSegCore.validInputSize(640))
         assertTrue(KoharuSegCore.validInputSize(768))
         assertTrue(KoharuSegCore.validInputShape(288, 512))
+        // A tall comic tile at 384px input commonly pads to 224x384. This must not trigger
+        // the previous generic "Failed requirement." and disable Koharu for the whole session.
+        assertTrue(KoharuSegCore.validInputShape(224, 384))
+        assertTrue(KoharuSegCore.validInputShape(160, 256))
         assertFalse(KoharuSegCore.validInputShape(280, 512))
+        assertFalse(KoharuSegCore.validInputSize(96))
         assertFalse(KoharuSegCore.validInputSize(500))
         assertFalse(KoharuSegCore.validInputSize(2048))
     }
