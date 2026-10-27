@@ -128,6 +128,7 @@ internal object WebModeWriter {
       if(it.hole){var hk=norm(it.s);(holes[hk]=holes[hk]||[]);for(var hq=0;hq<it.r.length;hq++)holes[hk].push(it.r[hq]);continue;}
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
+      if(it.rq===1)b.setAttribute('data-rq','1');
       b.setAttribute('data-cl',it.cl||'');
       // Erased in place (canvas panel): the old lettering is already gone from the page pixels, so no cover box.
       b.setAttribute('data-er',it.er?'1':'');
@@ -836,7 +837,9 @@ internal object WebModeWriter {
           lc.style.transform='translate3d('+cx+'px,'+cy+'px,0)';}
         lc.style.display='block';
       }
-      window.__nsLayoutReport={visible:vis.length,overflow:overflow,overlaps:overlaps,pushed:pushed,t:Date.now()};
+      var rqNodes=w.querySelectorAll('.__ns_b[data-rq="1"]'),rqVisible=0;
+      for(var rqi=0;rqi<vis.length;rqi++)if(vis[rqi].R.b.getAttribute('data-rq')==='1')rqVisible++;
+      window.__nsLayoutReport={visible:vis.length,requiredVisible:rqVisible,requiredTotal:rqNodes.length,overflow:overflow,overlaps:overlaps,pushed:pushed,t:Date.now()};
       return need;
     }
     function layout(){
@@ -1319,6 +1322,8 @@ internal object WebModeWriter {
         });
       }
     }catch(e){}
+    var lr=window.__nsLayoutReport;
+    if(lr&&lr.requiredTotal>0&&lr.requiredVisible<lr.requiredTotal)return 'pending';
     return 'ok';
   }catch(e){return 'err:'+e;}
 })(__ITEMS__,__SOURCES__,__FONT__,__PID__)
@@ -1357,7 +1362,13 @@ internal object WebModeWriter {
      * Draws each translated paragraph on the spot of its original text. [translated] is index-aligned
      * with [WebModeLayout.bubbles]; a null/blank entry leaves that bubble's original text untouched.
      */
-    fun bubbleScript(layout: WebModeLayout, translated: List<String?>, font: String, pageId: String): String {
+    fun bubbleScript(
+        layout: WebModeLayout,
+        translated: List<String?>,
+        font: String,
+        pageId: String,
+        requiredBubbleKeys: Set<String> = emptySet()
+    ): String {
         val arr = JSONArray()
         // The cleaner records exactly which bubbles it erased (flat and artwork alike). The cleaned image is
         // shown only if every ERASED bubble of that image has a translation; otherwise the original <img>
@@ -1446,6 +1457,7 @@ internal object WebModeWriter {
                     }
                 }
                 .put("mf", b.modelMaskFit)
+                .put("rq", if (t.isNotBlank() && WebModeLayout.bubbleIdentity(b) in requiredBubbleKeys) 1 else 0)
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
