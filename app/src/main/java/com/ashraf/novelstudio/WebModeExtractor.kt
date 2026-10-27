@@ -1960,6 +1960,67 @@ internal class WebModeExtractor(
             }
         }
 
+        /**
+         * Cover rectangles for bubbles whose picture could not be cleaned. They are attached to [out] so
+         * the writer paints the balloon's interior instead of one box over it. Bounded and optional: any
+         * failure leaves the existing box cover in place.
+         */
+        private fun shapeCoverBands(
+            encoded: ByteArray, out: ArrayList<WmBubble>, dets: List<BubbleDetectorCore.Det>?
+        ) {
+            if (dets.isNullOrEmpty() || out.isEmpty()) return
+            if (dets.none { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }) return
+            val target = out.filter { it.cv.isEmpty() && !it.free && it.sourceText.isNotBlank() }
+            if (target.isEmpty()) return
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
+            val w = bounds.outWidth
+            val h = bounds.outHeight
+            if (w <= 0 || h <= 0) return
+            val sample = when { w > 5000 -> 4; w > 2400 -> 2; else -> 1 }
+            val bmp = try {
+                BitmapFactory.decodeByteArray(encoded, 0, encoded.size, BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                })
+            } catch (_: Throwable) { null } ?: return
+            try {
+                val scaledDets = if (sample == 1) dets else dets.map { d ->
+                    BubbleDetectorCore.Det(
+                        d.label, d.score, d.l / sample, d.t / sample,
+                        maxOf(d.l / sample + 1, d.r / sample), maxOf(d.t / sample + 1, d.b / sample), d.mask
+                    )
+                }
+                val bands = WebModeTextRemover.coverBandsFor(bmp, scaledDets)
+                if (bands.isEmpty()) return
+                // One band belongs to the smallest balloon whose mask covers its centre.
+                var assigned = 0
+                for (b in bands) {
+                    val cx = ((b[0] + b[2]) / 2f) * sample
+                    val cy = ((b[1] + b[3]) / 2f) * sample
+                    val owner = target.minByOrNull { bb ->
+                        Math.abs(bb.cx * w - cx) + Math.abs(bb.cy * h - cy) + (bb.w * bb.h * w * h).toDouble() / 1e9
+                    } ?: continue
+                    val index = out.indexOf(owner)
+                    if (index < 0) continue
+                    val b0 = out[index]
+                    if (b0.cv.size > 4 * 64) continue
+                    val cv = ArrayList<Float>(b0.cv.size + 4).apply { addAll(b0.cv) }
+                    cv.add((b[0] * sample).toFloat() / w)
+                    cv.add((b[1] * sample).toFloat() / h)
+                    cv.add((b[2] * sample).toFloat() / w)
+                    cv.add((b[3] * sample).toFloat() / h)
+                    out[index] = b0.copy(cv = cv)
+                    assigned++
+                }
+                OcrDiag.log("COVER", "shape bands=${bands.size} assigned=$assigned util=${bmp.width}x${bmp.height}")
+            } catch (_: Throwable) {
+                // Cover geometry is an improvement, never a requirement: the box cover is still valid.
+            } finally {
+                try { bmp.recycle() } catch (_: Throwable) {}
+            }
+        }
+
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
@@ -2015,6 +2076,10 @@ internal class WebModeExtractor(
                         )
                         val cleanerMode = if (fullTextRemoverOn) "full" else "balloon-mask-only"
                         OcrDiag.log("CLEAN", "mode=$cleanerMode ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} masks=${panelDetections?.count { it.mask != null } ?: 0} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
+                        // The picture stays untouched when the cleaner declines (artwork, nothing found). The
+                        // overlay then has to cover the old lettering itself; these bands come from the model's
+                        // silhouette, so the cover follows the balloon instead of being its bounding box.
+                        if (!cleaned) shapeCoverBands(bytes, bubbles, panelDetections)
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
@@ -2023,6 +2088,7 @@ internal class WebModeExtractor(
                 }
                 return PanelOcr(texts.joinToString("\n\n"), bubbles)
             }
+
             if (crop != null) {
                 // Decode the requested rectangle. If the region decoder is unsupported or throws,
                 // use a bounded downsampled bitmap and crop that instead.

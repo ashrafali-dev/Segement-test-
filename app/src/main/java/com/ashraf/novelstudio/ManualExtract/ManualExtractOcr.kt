@@ -6,6 +6,7 @@ import android.os.SystemClock
 import com.ashraf.novelstudio.LensOcrEngine
 import com.ashraf.novelstudio.MlKitOcrEngine
 import com.ashraf.novelstudio.OcrBlock
+import com.ashraf.novelstudio.OcrDiag
 import com.ashraf.novelstudio.OcrResult
 import com.ashraf.novelstudio.OcrScript
 import com.ashraf.novelstudio.Prefs
@@ -32,7 +33,10 @@ internal class ManualExtractOcr(context: Context) {
         const val MAX_FORCE_DIM = 1600
     }
 
-    data class Outcome(val blocks: List<OcrBlock>, val engine: String)
+    data class Outcome(val blocks: List<OcrBlock>, val engine: String) {
+        /** Glyphs actually recognised, the only honest measure of "did this read anything useful". */
+        val letters: Int get() = blocks.sumOf { b -> b.text.count { ch -> ch.isLetterOrDigit() } }
+    }
 
     /**
      * Blocks whose text is non-blank. May be empty when neither engine saw text.
@@ -45,7 +49,15 @@ internal class ManualExtractOcr(context: Context) {
         val t0 = SystemClock.elapsedRealtime()
         val useLens = Prefs.get(app, "ocrEngine", "mlkit") == "lens"
 
-        if (useLens) {
+        // Lens never benefits from more pixels than it will upload. Above its own limit the bitmap is shrunk
+        // for the network anyway, so a larger selection is read by the local engine at full resolution instead
+        // of being silently degraded on the way out.
+        val lensUsable = useLens &&
+            maxOf(bitmap.width, bitmap.height) <= ManualExtractConfig.MAX_REMOTE_DIM
+        if (useLens && !lensUsable) {
+            OcrDiag.log("MANUAL", "OCR: crop ${bitmap.width}x${bitmap.height} exceeds the remote limit; reading locally")
+        }
+        if (lensUsable) {
             val lensBlocks = try {
                 val e = lens ?: LensOcrEngine(app).also { lens = it }
                 // Fresh: bypassCache also skips the short-lived empty-region cache, which would otherwise
@@ -61,8 +73,24 @@ internal class ManualExtractOcr(context: Context) {
             // Full inference, not the fast path: the user marked this box to get every glyph.
             e.recognizeRegion(bitmap, script).blocks.filter { it.text.isNotBlank() }
         } catch (_: Throwable) { emptyList() }
-        val engine = if (useLens) "ML Kit (Lens found none)" else "ML Kit"
+        val engine = if (!useLens) "ML Kit" else if (!lensUsable) "ML Kit (crop too large for Lens)" else "ML Kit (Lens found none)"
         return Outcome(mlBlocks, engine)
+    }
+
+    /**
+     * Local engine only, on the same crop. This is the existing fallback route, made explicit so the manual
+     * recovery can ask for it when the primary read produced nothing or too little.
+     */
+    fun readLocalOnly(bitmap: Bitmap, script: OcrScript, deadlineMs: Long): Outcome {
+        val t0 = SystemClock.elapsedRealtime()
+        val mlBlocks = try {
+            val e = mlkit ?: MlKitOcrEngine().also { mlkit = it }
+            e.recognizeRegion(bitmap, script).blocks.filter { it.text.isNotBlank() }
+        } catch (_: Throwable) { emptyList() }
+        if (SystemClock.elapsedRealtime() - t0 > deadlineMs) {
+            OcrDiag.log("MANUAL", "OCR: local pass took ${SystemClock.elapsedRealtime() - t0}ms (cap ${deadlineMs}ms)")
+        }
+        return Outcome(mlBlocks, "ML Kit (fallback)")
     }
 
     fun close() {
@@ -83,6 +111,17 @@ internal class ManualExtractOcr(context: Context) {
  * If nothing lies within one block-height of the tap, everything is kept: a wide area selection should still
  * translate all of it rather than nothing.
  */
+/**
+ * Is [this] a better reading than [other]? A retry must never REPLACE a good read with a worse one: more glyphs
+ * wins; at equal glyph counts the reading with more lines (a multi-line bubble) wins.
+ */
+internal fun ManualExtractOcr.Outcome.isBetterThan(other: ManualExtractOcr.Outcome): Boolean {
+    if (other.blocks.isEmpty()) return blocks.isNotEmpty()
+    if (blocks.isEmpty()) return false
+    if (letters != other.letters) return letters > other.letters
+    return blocks.size > other.blocks.size
+}
+
 internal fun ManualExtractOcr.Outcome.narrowToTap(bmp: Bitmap, x: Float, y: Float): ManualExtractOcr.Outcome {
     if (blocks.size <= 1) return this
     val px = x.coerceIn(0f, 1f) * bmp.width

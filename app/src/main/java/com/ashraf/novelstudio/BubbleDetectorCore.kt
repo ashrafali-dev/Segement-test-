@@ -181,9 +181,12 @@ internal object BubbleDetectorCore {
         // balloon around a short text line must not be rejected just because its area/text-area ratio is high.
         val textArea = Math.max(1L, (r - l).toLong() * (b - t).toLong())
         if (d.mask == null && (d.r - d.l).toLong() * (d.b - d.t).toLong() > textArea * 40L) return null
-        // Pull the box in a little: the outline and the tail are part of the detector box, round bubbles are not boxes.
-        val mw = Math.max(2, ((d.r - d.l) * 0.06f).toInt())
-        val mh = Math.max(2, ((d.b - d.t) * 0.06f).toInt())
+        // Pull the box in a little: the outline and the tail are part of the detector box, round bubbles are not
+        // boxes. With a model mask the pull is larger: the outer cells of the mask follow the balloon's outline,
+        // and translation text that uses them leaves its box over the contour.
+        val k = if (d.mask != null) 0.12f else 0.06f
+        val mw = Math.max(2, ((d.r - d.l) * k).toInt())
+        val mh = Math.max(2, ((d.b - d.t) * k).toInt())
         return intArrayOf(
             Math.min(d.l + mw, l), Math.min(d.t + mh, t),
             Math.max(d.r - mw, r), Math.max(d.b - mh, b)
@@ -277,7 +280,17 @@ internal object BubbleDetectorCore {
         return MaskGeometry(d, safe, bands)
     }
 
-    /** Compress the model's binary mask into horizontal rectangles which stay inside each row-run. */
+    /**
+     * Compress the model's binary mask into horizontal rectangles which stay inside each row-run.
+     *
+     * The writer paints these rectangles with the balloon's flat fill colour. Two rules keep that paint off the
+     * balloon OUTLINE, which is the most visible art on the page:
+     *
+     *  - a run keeps a margin from its own mask edge (left and right), so the anti-aliased row boundary of the
+     *    mask - where the contour usually is - is never inside a rectangle;
+     *  - a run that reaches the horizontal edge of the mask CELLS is not a fill area but the balloon outline
+     *    itself seen edge-on, so it is skipped instead of being painted.
+     */
     private fun maskBands(d: Det, maxBands: Int): List<IntArray> {
         val mask = d.mask ?: return emptyList()
         val mw = mask.width
@@ -291,7 +304,13 @@ internal object BubbleDetectorCore {
                 if (mask.pixels[y * mw + x].toInt() == 0) { x++; continue }
                 val start = x
                 while (x < mw && mask.pixels[y * mw + x].toInt() != 0) x++
-                if (x - start >= 2) { runs.add(start); runs.add(x) }
+                if (x - start >= 2) {
+                    // One mask cell in from each side. The model's 64x64 mask cell covers many page pixels, so
+                    // this is a proportional inset that stays meaningful at every box size.
+                    val innerL = start + 1
+                    val innerR = x - 1
+                    if (innerR - innerL >= 2) { runs.add(innerL); runs.add(innerR) }
+                }
             }
             rows.add(runs.toIntArray())
         }

@@ -80,26 +80,12 @@ internal object WebModeTextRemover {
             changed += fillMaskedRect(bitmap, outline, l, t, r, b, fill, width, height)
         }
 
-        // 2) Koharu's onomatopoeia_text instances: use the actual model mask, not a filled rectangle.
-        // On a flat background the neighbouring median colour erases cleanly; over artwork, interpolate only
-        // the dilated text mask so a rectangular patch cannot wipe the surrounding drawing.
+        // 2) Koharu's onomatopoeia_text instances: the mask here IS the lettering, so erase its shape and
+        // restore each pixel from the surrounding picture (flat colour or local ramp), never one flat patch.
         for (free in dets.filter {
             it.label == BubbleDetectorCore.CLS_TEXT_FREE && it.mask != null
         }) {
-            // Sample outside the segmented text box. Using a fake outer box identical to [free] leaves no
-            // pixels in medianRingColour's ring and always falls back to inpainting.
-            val pad = max(4, min(free.w, free.h) / 4).coerceAtMost(24)
-            val asBubble = BubbleDetectorCore.Det(
-                BubbleDetectorCore.CLS_BUBBLE, 1f,
-                (free.l - pad).coerceAtLeast(0), (free.t - pad).coerceAtLeast(0),
-                (free.r + pad).coerceAtMost(width), (free.b + pad).coerceAtMost(height)
-            )
-            val ring = medianRingColour(bitmap, asBubble, free, width, height)
-            changed += if (ring != null) {
-                fillInstanceMask(bitmap, free, ring, width, height, padding = 2)
-            } else {
-                gradientFillInstanceMask(bitmap, free, width, height, padding = 2)
-            }
+            changed += eraseTextInstance(bitmap, free, width, height, padding = 2)
         }
         // Older detectors may provide text boxes without instance masks; preserve their compatible fallback.
         for (free in dets.filter {
@@ -158,9 +144,14 @@ internal object WebModeTextRemover {
     }
 
     /**
-     * Fill an OCR region, but write pixels ONLY where the model's balloon instance mask says the
-     * pixel belongs to that balloon. This is the key distinction from drawing a rectangular cover:
-     * curved edges and overlapping artwork/whisper text outside the mask are left untouched.
+     * Erase ONE OCR region that sits inside a balloon, without painting over the balloon itself.
+     *
+     * The model's instance mask is the balloon SILHOUETTE. It says where the balloon is; it does NOT say which
+     * pixels are glyphs. Filling every masked pixel - what this used to do - re-tinted the whole balloon with the
+     * sampled colour, which on a curved, shaded or outlined balloon reads as a rectangular patch.
+     *
+     * So: the model mask decides WHERE work may happen, the region's own paper colour decides WHAT is lettering,
+     * and the ink is restored from the surrounding paper.
      */
     private fun fillMaskedRect(
         bitmap: Bitmap,
@@ -179,81 +170,50 @@ internal object WebModeTextRemover {
         if (w <= 0 || h <= 0 || w.toLong() * h > 1_250_000L) return 0
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, x0, y0, w, h)
+        val mask = TextRemovalMask.inkMask(pixels, w, h, 0, 0, w, h, colour) { xx, yy ->
+            // Model silhouette only: pixels outside it are never touched, so artwork under a rounded edge and any
+            // whisper text outside the balloon stay intact.
+            balloon.contains(x0 + xx + 0.5f, y0 + yy + 0.5f)
+        } ?: return 0
+        val restored = TextRemovalMask.restoreFromSurroundings(mask, pixels, w, h, maxRun = 48)
         var changed = 0
-        for (yy in 0 until h) for (xx in 0 until w) {
-            if (!balloon.contains(x0 + xx + 0.5f, y0 + yy + 0.5f)) continue
-            val at = yy * w + xx
-            if (pixels[at] != colour) {
-                pixels[at] = colour
-                changed++
-            }
+        for (i in pixels.indices) {
+            if (mask[i].toInt() == 0) continue
+            if (restored[i] != pixels[i]) changed++
+            pixels[i] = restored[i]
         }
         if (changed > 0) bitmap.setPixels(pixels, 0, w, x0, y0, w, h)
         return changed
     }
 
     /**
-     * Paint only the model's segmented text mask (plus a tiny anti-alias margin), not its whole rectangle.
-     * This is especially important for Japanese SFX rendered over artwork.
+     * Erase the model's segmented TEXT mask (dialogue_text / onomatopoeia_text plus a tiny anti-alias margin).
+     * This is the one place where the mask really is lettering, so the mask itself is the erase shape; the fill
+     * still comes from the surrounding pixels, never from one flat colour.
      */
-    private fun fillInstanceMask(
+    private fun eraseTextInstance(
         bitmap: Bitmap,
         instance: BubbleDetectorCore.Det,
-        colour: Int,
         width: Int,
         height: Int,
         padding: Int
     ): Int = editInstanceMask(bitmap, instance, width, height, padding) { pixels, w, h, globalL, globalT ->
-        var changed = 0
+        val mask = ByteArray(w * h)
+        var ink = 0
         for (yy in 0 until h) for (xx in 0 until w) {
-            if (!instanceMaskNear(instance, globalL + xx + 0.5f, globalT + yy + 0.5f, padding)) continue
-            val idx = yy * w + xx
-            if (pixels[idx] != colour) { pixels[idx] = colour; changed++ }
+            if (instanceMaskNear(instance, globalL + xx + 0.5f, globalT + yy + 0.5f, padding)) {
+                mask[yy * w + xx] = 1
+                ink++
+            }
         }
-        changed
-    }
-
-    /**
-     * Local directional interpolation restricted to the model's text mask. It cannot remove the original drawing
-     * underneath text perfectly (that requires an inpainting model), but it avoids a solid rectangular patch.
-     */
-    private fun gradientFillInstanceMask(
-        bitmap: Bitmap,
-        instance: BubbleDetectorCore.Det,
-        width: Int,
-        height: Int,
-        padding: Int
-    ): Int = editInstanceMask(bitmap, instance, width, height, padding) { pixels, w, h, globalL, globalT ->
-        val source = pixels.copyOf()
+        // Almost the whole box is mask: that is a filled rectangle, not lettering. Leave the picture alone.
+        if (ink < 4 || ink > w * h * 0.9f) return@editInstanceMask 0
+        val restored = TextRemovalMask.restoreFromSurroundings(mask, pixels, w, h, maxRun = 32)
         var changed = 0
-        for (yy in 0 until h) for (xx in 0 until w) {
-            if (!instanceMaskNear(instance, globalL + xx + 0.5f, globalT + yy + 0.5f, padding)) continue
-            var sr = 0.0; var sg = 0.0; var sb = 0.0; var sw = 0.0
-            for ((dx, dy) in arrayOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) {
-                var distance = 1
-                while (distance <= 32) {
-                    val nx = xx + dx * distance
-                    val ny = yy + dy * distance
-                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) break
-                    if (!instanceMaskNear(instance, globalL + nx + 0.5f, globalT + ny + 0.5f, padding)) {
-                        val colour = source[ny * w + nx]
-                        val weight = 1.0 / (distance * distance)
-                        sr += ((colour shr 16) and 0xFF) * weight
-                        sg += ((colour shr 8) and 0xFF) * weight
-                        sb += (colour and 0xFF) * weight
-                        sw += weight
-                        break
-                    }
-                    distance++
-                }
-            }
-            if (sw > 0.0) {
-                pixels[yy * w + xx] = 0xFF000000.toInt() or
-                    ((sr / sw).toInt().coerceIn(0, 255) shl 16) or
-                    ((sg / sw).toInt().coerceIn(0, 255) shl 8) or
-                    (sb / sw).toInt().coerceIn(0, 255)
-                changed++
-            }
+        for (i in pixels.indices) {
+            if (mask[i].toInt() == 0) continue
+            if (restored[i] != pixels[i]) changed++
+            pixels[i] = restored[i]
         }
         changed
     }
@@ -351,6 +311,59 @@ internal object WebModeTextRemover {
         }
         if (agreeing * 100 < rs.size * 70) return null
         return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
+    }
+
+    /**
+     * Shape-correct cover rectangles for the readable balloons of one picture.
+     *
+     * The overlay used to cover a bubble the cleaner could not erase with ONE rectangle over the balloon box,
+     * which is the box-shaped patch reported on curved/cloud balloons. These bands come from the model's own
+     * silhouette and only cover pixels whose colour is the balloon's paper, so the cover follows the contour.
+     *
+     * @return flat [l, t, r, b] rectangles in image pixels; empty when no balloon has a flat interior.
+     */
+    fun coverBandsFor(
+        bitmap: Bitmap,
+        dets: List<BubbleDetectorCore.Det>?,
+        maxBands: Int = 48
+    ): List<IntArray> {
+        if (dets.isNullOrEmpty()) return emptyList()
+        val balloons = dets.filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }
+        if (balloons.isEmpty()) return emptyList()
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 8 || height < 8) return emptyList()
+        val out = ArrayList<IntArray>()
+        for (d in balloons) {
+            if (out.size >= maxBands) break
+            val bands = try { interiorBandsOf(bitmap, d, width, height) } catch (_: Throwable) { emptyList() }
+            for (b in bands) {
+                if (out.size >= maxBands) break
+                out.add(b)
+            }
+        }
+        return out
+    }
+
+    /** Interior bands of ONE balloon, reading only that balloon's box (a tall page never enters memory). */
+    private fun interiorBandsOf(
+        bitmap: Bitmap, d: BubbleDetectorCore.Det, width: Int, height: Int
+    ): List<IntArray> {
+        val x0 = d.l.coerceIn(0, width - 1)
+        val y0 = d.t.coerceIn(0, height - 1)
+        val x1 = d.r.coerceIn(x0 + 1, width)
+        val y1 = d.b.coerceIn(y0 + 1, height)
+        val w = x1 - x0
+        val h = y1 - y0
+        if (w < 16 || h < 16 || w.toLong() * h > 4_000_000L) return emptyList()
+        val box = IntArray(w * h)
+        bitmap.getPixels(box, 0, w, x0, y0, w, h)
+        val local = BubbleDetectorCore.Det(
+            d.label, d.score, d.l - x0, d.t - y0, d.r - x0, d.b - y0, d.mask
+        )
+        return TextRemovalMask.interiorBands(local, box, w, h).map { b ->
+            intArrayOf(b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0)
+        }
     }
 
     /** Fill a rectangle with [colour], leaving pixels that already match it untouched. Returns pixels changed. */
@@ -926,13 +939,18 @@ internal object WebModeTextRemover {
             if (uniform) return left
             val fx = if (x1 > x0) ((x - x0).toFloat() / (x1 - x0)).coerceIn(0f, 1f) else 0.5f
             val fy = if (y1 > y0) ((y - y0).toFloat() / (y1 - y0)).coerceIn(0f, 1f) else 0.5f
-            // Blend the vertical ends, then apply the horizontal difference as a ramp across the box. Unlike a
-            // symmetric average of the two axes, this reproduces the ends exactly: at fy=0 the result is the top
-            // colour and at fy=1 the bottom one, so a purely vertical gradient is followed instead of being
-            // flattened toward the middle by the left/right samples.
+            // Bilinear reproduction of the four sampled ends, built as "top value + the two ramps away from it":
+            //   value = top + (bottom - top) * fy + (left - right) * (1 - fx)
+            // so at fy=0 the top colour is reproduced exactly, at fy=1 the bottom one, and the horizontal term only
+            // adds the left/right difference. Each channel is interpolated on its own; mixing the channels of
+            // different sides would invent colours that appear nowhere in the panel.
+            //
+            // The horizontal term used to be added with the wrong sign, which tilted every side sample toward the
+            // opposite edge: on a pale top / dark bottom panel the restored ends came out swapped - the "random
+            // colour smear" seen on gradient and shaded balloons.
             fun ch(l: Int, r: Int, t: Int, b: Int): Int {
-                val vertical = t + ((b - t) * fy)
-                val horizontal = (r - l) * fx
+                val vertical = lerp(t, b, fy)
+                val horizontal = (l - r) * (1f - fx)
                 return Math.round(vertical + horizontal).coerceIn(0, 255)
             }
             val r = ch(red(left), red(right), red(top), red(bottom))
@@ -1049,12 +1067,15 @@ internal object WebModeTextRemover {
             return if (agree * 100 >= rs.size * 60) ref else null
         }
 
-        val spanX = (ix1 - ix0)
-        val spanY = (iy1 - iy0)
-        val left = medianSide({ i -> Pair(ix0 - 1 - (i / spanY.coerceAtLeast(1)) % band, iy0 + i % spanY.coerceAtLeast(1)) }, band * spanY)
-        val right = medianSide({ i -> Pair(ix1 + (i / spanY.coerceAtLeast(1)) % band, iy0 + i % spanY.coerceAtLeast(1)) }, band * spanY)
-        val top = medianSide({ i -> Pair(ix0 + i % spanX.coerceAtLeast(1), iy0 - 1 - (i / spanX.coerceAtLeast(1)) % band) }, spanX * band)
-        val bottom = medianSide({ i -> Pair(ix0 + i % spanX.coerceAtLeast(1), iy1 + (i / spanX.coerceAtLeast(1)) % band) }, spanX * band)
+        val spanX = (ix1 - ix0).coerceAtLeast(1)
+        val spanY = (iy1 - iy0).coerceAtLeast(1)
+        // Walk each side band: rows for the left/right bands (so "band" steps across the box height) and columns
+        // for the top/bottom bands. The step used to be computed from the OTHER axis, so on a tall box the side
+        // bands wrapped onto their own column and every side sample was a single vertical strip.
+        val left = medianSide({ i -> Pair(ix0 - 1 - (i / spanY) % band, iy0 + i % spanY) }, band * spanY)
+        val right = medianSide({ i -> Pair(ix1 + (i / spanY) % band, iy0 + i % spanY) }, band * spanY)
+        val top = medianSide({ i -> Pair(ix0 + i % spanX, iy0 - 1 - (i / spanX) % band) }, spanX * band)
+        val bottom = medianSide({ i -> Pair(ix0 + i % spanX, iy1 + (i / spanX) % band) }, spanX * band)
 
         val sides = listOfNotNull(left, right, top, bottom)
         if (sides.isEmpty()) return null
@@ -1063,7 +1084,8 @@ internal object WebModeTextRemover {
         val tp = top ?: base; val bt = bottom ?: base
         // "Uniform" must describe what the model will actually paint, not the side medians. A smooth gradient
         // can leave every side's median near the middle while the top and bottom of the box still differ, and
-        // calling that flat is exactly the one-average-colour bug this model exists to avoid.
+        // calling that flat is exactly the one-average-colour bug this model exists to avoid. Check BOTH axes:
+        // a left-to-right ramp has equal top/bottom medians but its two horizontal ends are far apart.
         val uniform = distance(l, r) <= 24f && distance(tp, bt) <= 24f
         return BackgroundModel(
             left = l, right = r,

@@ -115,34 +115,58 @@ internal class ManualExtractPipeline(
             m.mark("crop")
             if (cancelled()) return fail(m, "cancelled")
 
-            // 4) OCR crop only
-            var outcome = ocr.read(ocrBmp, script, ManualExtractConfig.OCR_CAP_MS)
+            // 4) OCR crop only. A mark means "there IS text here", so read it as a deliberate recovery: first a
+            //    padded, full-quality read of exactly what was marked.
+            var outcome = readMarked(ocrBmp, script, ManualExtractConfig.OCR_PAD_FIRST)
             // A crop can take in a neighbour bubble or a wide area selection. Without a tap position (Extract
             // reads the whole visible panel) all blocks are correct; with one, keep only the text the user
             // pointed at so the translation lands on the bubble they tapped.
             if (hasTapPoint) outcome = outcome.narrowToTap(ocrBmp, x, y)
             m.mark("ocr")
-            if (outcome.blocks.isEmpty() && SystemClock.elapsedRealtime() - tStart < ManualExtractConfig.TOTAL_CAP_MS / 2) {
-                // one slightly-expanded retry — still a crop, never full-panel. A preset bitmap (6-dot frame)
-                // has no source image to re-capture from, and the frame is exactly what the user chose.
-                val expanded = if (src.isBlank()) null else expandCrop(host, src, x, y, w, h)
-                if (expanded != null) {
-                    var e: Bitmap? = null
-                    try {
-                        e = downscale(expanded, ManualExtractConfig.MAX_OCR_DIM)
-                        outcome = ocr.read(e, script, ManualExtractConfig.OCR_CAP_MS)
-                    } catch (_: Throwable) { /* keep first outcome */ } finally {
-                        // The expanded bitmap is owned here; recycle it and the downscaled copy (if different)
-                        // only AFTER OCR has finished with it.
-                        if (e != null && e !== expanded && !e.isRecycled) e.recycle()
-                        if (!expanded.isRecycled) expanded.recycle()
+            m.reads = 1
+
+            // Escalate when the read is empty OR clearly incomplete. This used to happen only on a completely
+            // empty result, so a half-read bubble (one line recognised, the other missed) was accepted as final
+            // - which is exactly the "missing text" the user marked the region to recover.
+            if (needsStrongerRead(outcome, ocrBmp) &&
+                SystemClock.elapsedRealtime() - tStart < ManualExtractConfig.TOTAL_CAP_MS) {
+                OcrDiag.log("MANUAL", "retry: blocks=${outcome.blocks.size} letters=${outcome.letters} " +
+                    "reason=${if (outcome.blocks.isEmpty()) "empty" else "incomplete"}")
+                // A wider crop of the SAME marked image. Still a crop, never the full panel; the original
+                // coordinate origin is kept so every block still maps back onto the page.
+                if (src.isNotBlank()) {
+                    val expanded = expandCrop(host, src, x, y, w, h)
+                    if (expanded != null) {
+                        var e: Bitmap? = null
+                        try {
+                            e = downscale(expanded, ManualExtractConfig.MAX_OCR_DIM)
+                            val retry = readMarked(e, script, ManualExtractConfig.OCR_PAD_RETRY)
+                            m.reads++
+                            if (retry.isBetterThan(outcome)) outcome = retry
+                        } catch (_: Throwable) {
+                            // keep the first outcome
+                        } finally {
+                            // The expanded bitmap is owned here; recycle it and the downscaled copy (if
+                            // different) only AFTER OCR has finished with it.
+                            if (e != null && e !== expanded && !e.isRecycled) e.recycle()
+                            if (!expanded.isRecycled) expanded.recycle()
+                        }
                     }
-                    m.mark("ocr_retry")
                 }
+                // Still nothing usable: the same crop through the local engine, which is the app's existing
+                // fallback and often reads small CJK glyphs the remote engine dropped.
+                if (outcome.blocks.isEmpty() &&
+                    SystemClock.elapsedRealtime() - tStart < ManualExtractConfig.TOTAL_CAP_MS) {
+                    val local = ocr.readLocalOnly(ocrBmp, script, ManualExtractConfig.OCR_CAP_MS)
+                    m.reads++
+                    if (local.blocks.isNotEmpty()) outcome = local
+                }
+                if (hasTapPoint) outcome = outcome.narrowToTap(ocrBmp, x, y)
+                m.mark("ocr_retry")
             }
             m.engine = outcome.engine
             m.blocks = outcome.blocks.size
-            m.letters = outcome.blocks.sumOf { b -> b.text.count { it.isLetterOrDigit() } }
+            m.letters = outcome.letters
             if (outcome.blocks.isEmpty()) return fail(m, "no text")
 
             // Detector-guided cleanup writes pixels. Captured crops may be immutable, so promote the owned OCR
@@ -214,6 +238,130 @@ internal class ManualExtractPipeline(
     private fun fail(m: ManualExtractMetrics, reason: String): Result {
         m.log(false, reason)
         return Result(false, "", reason)
+    }
+
+    /**
+     * One full-quality read of the marked pixels, with [padFraction] of whitespace-margin added around them.
+     *
+     * Padding is what stops a mark drawn tight on the glyphs from clipping their anti-aliased edges (and the
+     * first/last character of every line). The result is mapped back onto the ORIGINAL crop, not the padded one,
+     * so downstream geometry keeps using the same coordinates as the page.
+     */
+    private fun readMarked(bmp: Bitmap, script: OcrScript, padFraction: Float): ManualExtractOcr.Outcome {
+        val padded = pad(bmp, padFraction)
+        if (padded === bmp) return ocr.read(bmp, script, ManualExtractConfig.OCR_CAP_MS)
+        val left = (bmp.width * padFraction).toInt()
+        val top = (bmp.height * padFraction).toInt()
+        return try {
+            val inner = ocr.read(padded, script, ManualExtractConfig.OCR_CAP_MS)
+            // Shift every box back into the unpadded crop's coordinate system.
+            ManualExtractOcr.Outcome(inner.blocks.map { shiftBlock(it, -left, -top) }, inner.engine)
+        } finally {
+            if (!padded.isRecycled) padded.recycle()
+        }
+    }
+
+    /** Copy [src] onto a larger canvas of its own paper colour; returns [src] itself when no padding is useful. */
+    private fun pad(src: Bitmap, fraction: Float): Bitmap {
+        if (fraction <= 0f) return src
+        val px = (src.width * fraction).toInt()
+        val py = (src.height * fraction).toInt()
+        if (px < 3 && py < 3) return src
+        if (src.width + 2 * px > ManualExtractConfig.MAX_OCR_DIM + px ||
+            src.height + 2 * py > ManualExtractConfig.MAX_OCR_DIM + py) return src
+        val w = src.width + 2 * px
+        val h = src.height + 2 * py
+        if (w.toLong() * h > 12_000_000L) return src
+        return try {
+            val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(out)
+            // The crop's own dominant colour is the only honest "outside" this picture has.
+            canvas.drawColor(dominantColour(src))
+            canvas.drawBitmap(src, px.toFloat(), py.toFloat(), null)
+            out
+        } catch (_: Throwable) {
+            src
+        }
+    }
+
+    private fun dominantColour(src: Bitmap): Int {
+        // Four-corner sample: the crop border is what the mark touched, so its corners describe the margin.
+        val xs = intArrayOf(0, src.width - 1, 0, src.width - 1)
+        val ys = intArrayOf(0, 0, src.height - 1, src.height - 1)
+        var r = 0; var g = 0; var b = 0
+        for (i in 0 until 4) {
+            val c = src.getPixel(xs[i].coerceIn(0, src.width - 1), ys[i].coerceIn(0, src.height - 1))
+            r += (c shr 16) and 0xFF; g += (c shr 8) and 0xFF; b += c and 0xFF
+        }
+        return 0xFF000000.toInt() or ((r / 4) shl 16) or ((g / 4) shl 8) or (b / 4)
+    }
+
+    private fun shiftBlock(b: com.ashraf.novelstudio.OcrBlock, dx: Int, dy: Int): com.ashraf.novelstudio.OcrBlock =
+        b.copy(
+            top = b.top + dy, left = b.left + dx,
+            cx = b.cx + dx, cy = b.cy + dy,
+            polygon = b.polygon.map { (x, y) -> (x + dx) to (y + dy) }
+        )
+
+    /**
+     * True when a read of [bmp] should be retried with a wider/stronger pass:
+     *  - nothing was recognised at all, or
+     *  - very few glyphs came back while the box is clearly full of ink (a partial line read).
+     *
+     * A box that genuinely holds no lettering (blank part of the balloon) stays "empty" and is reported as such;
+     * the check is about the crop's ink, not about a fixed character count.
+     */
+    private fun needsStrongerRead(outcome: ManualExtractOcr.Outcome, bmp: Bitmap): Boolean {
+        val letters = outcome.letters
+        if (outcome.blocks.isEmpty()) return true
+        if (letters < 2) return true
+        val ink = inkFraction(bmp, outcome.blocks)
+        return ink >= ManualExtractConfig.INCOMPLETE_INK_FRACTION && letters < 24
+    }
+
+    /** Share of the crop's dark/contrasting pixels that are NOT inside any recognised block. */
+    private fun inkFraction(bmp: Bitmap, blocks: List<com.ashraf.novelstudio.OcrBlock>): Float {
+        if (bmp.isRecycled || bmp.width < 8 || bmp.height < 8) return 0f
+        val stepX = maxOf(1, bmp.width / 120)
+        val stepY = maxOf(1, bmp.height / 120)
+        var total = 0
+        var unexplained = 0
+        // Threshold on the crop's own mean, so a dark page with pale lettering is handled too.
+        var sum = 0L
+        var n = 0
+        var y = 0
+        while (y < bmp.height) {
+            var x = 0
+            while (x < bmp.width) {
+                val c = bmp.getPixel(x, y)
+                sum += (((c shr 16) and 0xFF) * 299 + ((c shr 8) and 0xFF) * 587 + (c and 0xFF) * 114) / 1000
+                n++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (n == 0) return 0f
+        val mean = (sum / n).toInt()
+        val thresh = 52
+        y = 0
+        while (y < bmp.height) {
+            var x = 0
+            while (x < bmp.width) {
+                val c = bmp.getPixel(x, y)
+                val l = (((c shr 16) and 0xFF) * 299 + ((c shr 8) and 0xFF) * 587 + (c and 0xFF) * 114) / 1000
+                if (Math.abs(l - mean) >= thresh) {
+                    total++
+                    val covered = blocks.any { b ->
+                        x >= b.left && x < b.left + b.w && y >= b.top && y < b.top + b.h
+                    }
+                    if (!covered) unexplained++
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        if (total < 12) return 0f
+        return unexplained.toFloat() / total
     }
 
     /**

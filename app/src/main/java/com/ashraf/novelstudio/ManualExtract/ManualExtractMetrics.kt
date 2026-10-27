@@ -14,6 +14,8 @@ internal class ManualExtractMetrics {
     var ocrH: Int = 0
     var blocks: Int = 0
     var letters: Int = 0
+    /** OCR reads performed for this run: 1 = the first pass was good enough, more = recovery passes ran. */
+    var reads: Int = 0
 
     fun mark(step: String) { marks[step] = android.os.SystemClock.elapsedRealtime() }
 
@@ -24,7 +26,7 @@ internal class ManualExtractMetrics {
         sb.append("run ok=").append(ok).append(" total=").append(total).append("ms engine=").append(engine)
         sb.append(" crop=").append(cropW).append('x').append(cropH)
         sb.append(" ocr=").append(ocrW).append('x').append(ocrH)
-        sb.append(" blocks=").append(blocks).append(" letters=").append(letters)
+        sb.append(" blocks=").append(blocks).append(" letters=").append(letters).append(" reads=").append(reads)
         var prev = start
         for ((k, v) in marks) { sb.append(' ').append(k).append('=').append(v - prev); prev = v }
         if (note.isNotBlank()) sb.append(" note=").append(note)
