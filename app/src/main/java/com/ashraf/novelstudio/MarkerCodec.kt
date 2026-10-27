@@ -123,11 +123,11 @@ internal object MarkerCodec {
     }
 
     /**
-     * Recover non-empty bodies attached to duplicate/out-of-range markers into spatially ordered empty slots.
+     * Complete only unambiguous placement.
      *
-     * Valid markers keep their exact destinations. A malformed marker only borrows an empty slot near its
-     * ordinal position in [spatialOrder]; it never overwrites a valid translation. Extra trailing markers
-     * beyond the number of bubbles are ignored, and empty bodies are never drawn.
+     * Explicit marker IDs are never remapped: duplicate, garbled, or out-of-range bodies remain unplaced rather
+     * than being guessed onto another bubble. Markerless paragraphs are accepted only when their count matches
+     * every bubble (or one title plus every bubble), then mapped by spatial order.
      */
     fun recoverFailedMarkersBySpatialOrder(
         text: String,
