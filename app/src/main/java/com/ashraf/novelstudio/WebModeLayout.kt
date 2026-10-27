@@ -159,9 +159,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             val placed = MarkerCodec.align(text, n, layout.titleOffset) { no, reason ->
                 OcrDiag.log("ALIGN_SKIP", "no=$no reason=$reason bubbles=$n titleOffset=${layout.titleOffset}")
             }
-            // Use the actual OCR bubble coordinates to recover only failed marker bodies. Valid markers
-            // retain their exact slots; malformed/duplicate markers can fill an empty spatial slot but
-            // never overwrite a good translation. Layout order is top-to-bottom, then left-to-right.
+            // Valid explicit marker IDs keep their exact OCR bubble slots. Failed marker bodies remain
+            // unplaced; guessing a spatial destination can silently show a correct translation on the wrong bubble.
+            // Markerless replies are handled separately and require exact paragraph-count agreement.
             val spatialOrder = layout.bubbles.indices.sortedWith(
                 compareBy<Int> { layout.bubbles[it].cy }.thenBy { layout.bubbles[it].cx }
             )
