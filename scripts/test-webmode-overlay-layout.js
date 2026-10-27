@@ -196,6 +196,13 @@ assert.ok(!bodyMatch[1].includes("for(var wi=0;wi<=8;wi++)") &&
   "shape-aware fitting must not regress to the expensive nine-width, twelve-font trial loop");
 assert.ok(bodyMatch[1].includes("b.__nsSafeBandsPx=safeBands"),
   "mask bands must be mapped into the live image's viewport geometry");
+assert.ok(bodyMatch[1].includes("data-rq") &&
+          bodyMatch[1].includes("requiredVisible:rqVisible,requiredTotal:rqNodes.length") &&
+          bodyMatch[1].includes("return 'pending'"),
+  "live overlay must report a missing bubble binding instead of always claiming success");
+assert.ok(mainActivity.includes("requiredBubbleKeys = requiredPlacementKeys") &&
+          mainActivity.includes("waitForRequiredPlacement(6)"),
+  "live OCR hashes must remain retryable until the translated bubbles are actually visible");
 assert.ok(bodyMatch[1].includes("gx-gw/2+cl*gw") && bodyMatch[1].includes("gy-gh/2+ct*gh"),
   "bubble-relative safe bands must be translated through the bubble's own image-space origin");
 assert.ok(bodyMatch[1].includes("b.__nsShapeMaxW=shapeMaxW"),
