@@ -28,6 +28,16 @@ internal object WebModeTextRemover {
     private const val MAX_BYTES = 18 * 1024 * 1024
 
     /**
+     * Largest working area for ONE bubble while erasing (~500k px ≈ 2 MB of masks). Above this the box is not a
+     * single line of lettering but a mis-grouped region, and the bounded processing rule applies instead of
+     * allocating a multi-megabyte scratch set next to the other worker's.
+     */
+    private const val MAX_REGION_PIXELS = 500_000L
+
+    /** Bounded to one cleaning job at a time: concurrent jobs doubled peak memory on low-RAM phones. */
+    private val cleanSlot = java.util.concurrent.locks.ReentrantLock()
+
+    /**
      * Erase lettering using the DETECTOR's boxes instead of the pixel guess.
      *
      * For every `text_bubble` detection the bubble's real fill colour is sampled from the ring between the text
@@ -309,19 +319,26 @@ internal object WebModeTextRemover {
         val stepX = ((outer.w / 24).coerceAtLeast(1))
         val stepY = ((outer.h / 24).coerceAtLeast(1))
         val rs = ArrayList<Int>(1024); val gs = ArrayList<Int>(1024); val bs = ArrayList<Int>(1024)
-        var y = outer.t + pad
-        while (y < outer.b - pad) {
-            var x = outer.l + pad
-            while (x < outer.r - pad) {
-                val inside = x >= inner.l - pad && x < inner.r + pad && y >= inner.t - pad && y < inner.b + pad
-                if (!inside && x in 0 until width && y in 0 until height &&
-                    (outer.mask == null || outer.contains(x.toFloat(), y.toFloat()))) {
-                    val c = bitmap.getPixel(x, y)
+        // Read the whole outer box in ONE getPixels call. getPixel() per sample was ~1 JNI round trip per ring
+        // pixel on every bubble, which dominated realtime cleaning time on low-end phones.
+        val bw = (outer.r - outer.l).coerceAtLeast(1)
+        val bh = (outer.b - outer.t).coerceAtLeast(1)
+        if (bw <= 0 || bh <= 0 || bw.toLong() * bh.toLong() > MAX_REGION_PIXELS) return null
+        val box = IntArray(bw * bh)
+        bitmap.getPixels(box, 0, bw, outer.l, outer.t, bw, bh)
+        var yy = outer.t + pad
+        while (yy < outer.b - pad) {
+            var xx = outer.l + pad
+            while (xx < outer.r - pad) {
+                val inside = xx >= inner.l - pad && xx < inner.r + pad && yy >= inner.t - pad && yy < inner.b + pad
+                if (!inside && xx in 0 until width && yy in 0 until height &&
+                    (outer.mask == null || outer.contains(xx.toFloat(), yy.toFloat()))) {
+                    val c = box[(yy - outer.t) * bw + (xx - outer.l)]
                     rs.add((c shr 16) and 0xFF); gs.add((c shr 8) and 0xFF); bs.add(c and 0xFF)
                 }
-                x += stepX
+                xx += stepX
             }
-            y += stepY
+            yy += stepY
         }
         if (rs.size < 24) return null
         rs.sort(); gs.sort(); bs.sort()
@@ -412,6 +429,33 @@ internal object WebModeTextRemover {
         val maskOnly = !Prefs.bool(context, "wmTextRemoval2", true)
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
         if (isAnimatedOrUnsupported(encoded)) return false
+
+        // One cleaning job at a time. The visible worker and the read-ahead worker both call this, and each one
+        // decodes a full-size ARGB panel plus its own scratch masks. Running them together is what pushed the
+        // process into the memory sawtooth that made realtime stutter: the second job's allocation lands while
+        // the first still holds its decoded bitmap and masks. Skipping (rather than queueing) is safe — the
+        // panel stays uncleaned this pass, keeps its overlay cover box, and the next scan picks it up.
+        if (!cleanSlot.tryLock()) {
+            OcrDiag.log("CLEAN", "skip: another cleaner is running (bounded to one at a time)")
+            return false
+        }
+        try {
+            return cleanAndCacheLocked(context, sourceUrl, encoded, bubbles, allowAi, dets, recognizedLines, maskOnly)
+        } finally {
+            cleanSlot.unlock()
+        }
+    }
+
+    private fun cleanAndCacheLocked(
+        context: Context,
+        sourceUrl: String,
+        encoded: ByteArray,
+        bubbles: List<WmBubble>,
+        allowAi: Boolean,
+        dets: List<BubbleDetectorCore.Det>?,
+        recognizedLines: List<OcrBlock>,
+        maskOnly: Boolean
+    ): Boolean {
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
@@ -522,19 +566,16 @@ internal object WebModeTextRemover {
                 .take(500)
                 .toList()
 
-            // Step 1 - bubbles whose SHAPE is known (closed flat speech bubble): paint the whole interior with the paper
-            // colour. This does not depend on the lettering test below, so Japanese columns, bold SFX and lettering the
-            // recogniser missed are wiped too, and the bubble counts as cleaned. (Before, any bubble that failed one of the
-            // strict glyph checks kept its old text and fell back to an ugly background box.)
-            // `soft` only says the ring around the OCR box is textured; the bubble interior itself can still be
-            // flat paper. Dense Japanese/Korean columns touch the ring and were tagged soft, which skipped this
-            // whole pass — the old lettering then stayed under the translation. wipeInterior() already refuses
-            // when the interior is mostly dark/coloured, so it is safe to try it for soft bubbles too.
-            for (bubble in boundedBubbles) {
-                if (bubble.cv.size < 4) continue
-                val n = try { wipeInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)) } catch (_: Exception) { 0 }
-                if (n > 0) { totalRemoved += n; erased.add(WebModeTextRemovalCache.bubbleKey(bubble)) }
-            }
+            // Step 1 - NO whole-interior wipe.
+            //
+            // A previous version painted every pixel inside the bubble's interior rectangles with one flat colour
+            // (wipeInterior). That is what damaged the balloon: a curved, tailed or coloured balloon became a flat
+            // rectangular patch, its outline and the artwork inside it were destroyed, and no lettering was needed
+            // for it to happen — it ran before (and independently of) the glyph test below.
+            //
+            // The OCR box already says exactly where the lettering is. Erasing is driven by that box from here on,
+            // and every fill samples the background that actually surrounds the glyphs (see sampleLocalBackground /
+            // wipeLetteringByBackground), so only the text is removed and its own colours are restored.
 
             for (bubble in boundedBubbles) {
                 val cx = bubble.cx * width
@@ -574,7 +615,12 @@ internal object WebModeTextRemover {
                 val rw = x1 - x0
                 val rh = y1 - y0
                 val regionSize = rw.toLong() * rh.toLong()
-                if (regionSize > 2_000_000L) continue
+                // Bound the per-bubble working set. One bubble used to reserve up to 2 M px, which is an 8 MB
+                // IntArray plus six ByteArray(regionCount) masks allocated back to back: ~12-20 MB of garbage
+                // per bubble. Two workers doing that at once on a low-RAM phone is exactly the memory
+                // sawtooth that made realtime stutter. A genuine OCR line never needs this much area; a
+                // bigger box is a mis-grouped paragraph and is left for the next pass.
+                if (regionSize > MAX_REGION_PIXELS) continue
                 val regionCount = regionSize.toInt()
                 // OCR box in region coordinates.
                 val ix0 = ox0 - x0; val iy0 = oy0 - y0
@@ -640,49 +686,65 @@ internal object WebModeTextRemover {
                 // colour, erase only pixels matching the detected lettering colour. This is ideal for white
                 // or coloured speech-bubble interiors and avoids rejecting the whole word because one glyph
                 // touches a burst line. The path is disabled for textured/gradient backgrounds.
-                if (soft) {
-                    val localPaper = estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)
-                    if (localPaper != null &&
-                        min(distance(localPaper, fg1), distance(localPaper, fg2)) >= 52f) {
-                        val inkMask = ByteArray(regionCount)
-                        var inkCount = 0
-                        for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
-                            val at = ry * rw + rx
-                            if (candidate[at].toInt() != 0 &&
-                                distance(region[at], localPaper) >= 34f) {
+                // Background-driven erase, for flat AND multi-coloured balloons.
+                //
+                // A side-sampled background model describes what the paper looks like across this OCR box: one
+                // colour when it is flat, a smooth ramp when it is a gradient, or a per-side mix when several
+                // colours meet. The glyph mask is then simply "pixels that disagree with that model", and each one
+                // is restored with the model's own colour at that exact spot. This is what keeps a pale-green or
+                // coloured balloon its own colour instead of turning it into a white rectangle.
+                run {
+                    val model = estimateBackgroundModel(region, rw, rh, ix0, iy0, ix1, iy1, fg1, fg2)
+                    if (model != null) {
+                        val paperRef = model.at((ix0 + ix1) / 2, (iy0 + iy1) / 2, ix0, ix1, iy0, iy1)
+                        if (min(distance(paperRef, fg1), distance(paperRef, fg2)) >= 52f) {
+                            // Ink = clearly different from the LOCAL background, and closer to the lettering.
+                            val inkMask = ByteArray(regionCount)
+                            var inkCount = 0
+                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                                val at = ry * rw + rx
+                                if (candidate[at].toInt() == 0) continue
+                                val bgHere = model.at(rx, ry, ix0, ix1, iy0, iy1)
+                                if (distance(region[at], bgHere) < 30f) continue
+                                if (min(distance(region[at], fg1), distance(region[at], fg2)) >
+                                    max(96f, distance(bgHere, fg1) * 1.05f)) continue
                                 inkMask[at] = 1
                                 inkCount++
                             }
-                        }
-                        // A suspiciously dense mask is more likely an artwork patch than lettering.
-                        if (inkCount >= 4 && inkCount <= innerArea * 0.72f) {
-                            val mask = inkMask.copyOf()
-                            val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)
-                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
-                                if (inkMask[ry * rw + rx].toInt() == 0) continue
-                                for (dy in -grow..grow) for (dx in -grow..grow) {
-                                    val nx = rx + dx; val ny = ry + dy
-                                    if (nx !in ix0 until ix1 || ny !in iy0 until iy1) continue
-                                    val ni = ny * rw + nx
-                                    if (mask[ni].toInt() == 0 && distance(region[ni], localPaper) >= 22f &&
-                                        min(distance(region[ni], fg1), distance(region[ni], fg2)) <= 110f) {
-                                        mask[ni] = 1
+                            if (inkCount >= 4 && inkCount <= innerArea * 0.85f) {
+                                val mask = inkMask.copyOf()
+                                val grow = (fontPx * 0.05f).toInt().coerceIn(1, 3)
+                                for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                                    if (inkMask[ry * rw + rx].toInt() == 0) continue
+                                    for (dy in -grow..grow) for (dx in -grow..grow) {
+                                        val nx = rx + dx; val ny = ry + dy
+                                        if (nx !in ix0 until ix1 || ny !in iy0 until iy1) continue
+                                        val ni = ny * rw + nx
+                                        if (mask[ni].toInt() != 0) continue
+                                        val bgHere = model.at(nx, ny, ix0, ix1, iy0, iy1)
+                                        // Only take anti-aliased edges of the glyph, never clean background.
+                                        if (distance(region[ni], bgHere) >= 20f &&
+                                            min(distance(region[ni], fg1), distance(region[ni], fg2)) <= 120f) {
+                                            mask[ni] = 1
+                                        }
                                     }
                                 }
-                            }
-                            val out = region.copyOf()
-                            var removedPixels = 0
-                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
-                                val at = ry * rw + rx
-                                if (mask[at].toInt() == 0) continue
-                                out[at] = localPaper
-                                removedPixels++
-                            }
-                            if (removedPixels >= 4) {
-                                bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                                totalRemoved += removedPixels
-                                erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
-                                continue
+                                val out = region.copyOf()
+                                var removedPixels = 0
+                                for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                                    val at = ry * rw + rx
+                                    if (mask[at].toInt() == 0) continue
+                                    out[at] = model.at(rx, ry, ix0, ix1, iy0, iy1)
+                                    removedPixels++
+                                }
+                                if (removedPixels >= 4) {
+                                    bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
+                                    totalRemoved += removedPixels
+                                    erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                                    OcrDiag.log("ERASE", "bg-model ${if (model.uniform) "flat" else "gradient"} " +
+                                        "box=${ix1 - ix0}x${iy1 - iy0} ink=$removedPixels")
+                                    continue
+                                }
                             }
                         }
                     }
@@ -748,17 +810,27 @@ internal object WebModeTextRemover {
                 // the on-artwork AI gate still decide whether this is really lettering.
                 if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
-                // Flat bubble: sweep EVERYTHING inside the OCR box (slightly widened) that differs from the paper
-                // colour, unless it belongs to a protected shape. This removes the faint ghosts that the strict
-                // glyph test leaves behind: anti-aliasing, JPEG ringing, halos, thin strokes, shapes rejected by size.
+                // Flat bubble: mop up the faint ghosts the strict glyph test leaves behind (anti-aliasing, JPEG
+                // ringing, halos, thin strokes, shapes rejected by size).
+                //
+                // It must take the LETTERING colours only. The old rule marked every pixel that merely differed
+                // from the paper colour, so on a shaded or gradient balloon it erased the shading too and left a
+                // flat rectangle behind. A ghost is now a pixel that is still recognisably the ink (a faint blend
+                // of the ink with the paper), never a pixel that merely differs from the paper.
                 if (!soft) {
                     val m = (fontPx * 0.12f).toInt().coerceIn(1, 4)
                     val sx0 = max(0, ix0 - m); val sy0 = max(0, iy0 - m)
                     val sx1 = min(rw, ix1 + m); val sy1 = min(rh, iy1 + m)
+                    // How far from the pure ink a pixel may be and still count as its anti-aliased edge: at most
+                    // half the ink/paper distance. Beyond that it is paper, shading, or a different colour.
+                    val ghostThr = max(34f, min(distance(bg, fg1), distance(bg, fg2)) * 0.5f).coerceAtMost(72f)
                     for (ry in sy0 until sy1) for (rx in sx0 until sx1) {
                         val i = ry * rw + rx
-                        if (selected[i].toInt() == 0 && protect[i].toInt() == 0 &&
-                            distance(region[i], bg) >= 9f) selected[i] = 1
+                        if (selected[i].toInt() != 0 || protect[i].toInt() != 0) continue
+                        val p = region[i]
+                        if (distance(p, bg) < 9f) continue
+                        val ink = min(distance(p, fg1), distance(p, fg2))
+                        if (ink <= ghostThr || distance(p, fg3) <= ghostThr) selected[i] = 1
                     }
                 }
 
@@ -777,7 +849,9 @@ internal object WebModeTextRemover {
                                 if (nx < 0 || nx >= rw) continue
                                 val ni = ny * rw + nx
                                 if (mask[ni].toInt() == 0 && protect[ni].toInt() == 0 &&
-                                    distance(region[ni], bg) >= 8f) mask[ni] = 1
+                                    distance(region[ni], bg) >= 8f &&
+                                    (soft || min(distance(region[ni], fg1), distance(region[ni], fg2)) <=
+                                        max(58f, min(distance(bg, fg1), distance(bg, fg2)) * 0.6f))) mask[ni] = 1
                             }
                         }
                     }
@@ -883,119 +957,87 @@ internal object WebModeTextRemover {
     }
 
     /**
-     * Estimate the background from the ring OUTSIDE an OCR text box. Return a colour only when
-     * enough ring pixels agree with the median; textured art therefore falls back to the normal mask
-     * and non-AI local interpolation instead of being flattened.
+     * Background model for the OCR box, which is what actually gets erased.
+     *
+     * The previous code could only answer "one flat colour" or "give up". Real pages are neither: a balloon may
+     * be pale green, a panel red, or the paper may carry a soft light gradient. This samples the four sides of
+     * the box and keeps, per side, the median colour that is clearly NOT lettering (the ring is where the original
+     * text is absent). Those side colours are then bilinearly interpolated across the box, so a gradient or a
+     * multi-coloured background is restored with its own variation instead of one average colour.
+     *
+     * Returns null when no side yields a trustworthy colour (heavy artwork), which leaves the existing masked
+     * local-fill path in charge.
      */
-    private fun estimateFlatBackground(
-        region: IntArray, rw: Int, rh: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int
-    ): Int? {
-        val inner = (ix1 - ix0).toLong() * (iy1 - iy0).toLong()
-        val ring = rw.toLong() * rh.toLong() - inner
-        if (ring < 24L) return null
-        val stride = max(1, kotlin.math.sqrt(ring.toDouble() / 1600.0).toInt())
-        val samples = ArrayList<Int>(min(1800, (ring / (stride * stride)).toInt() + 8))
-        var y = 0
-        while (y < rh) {
-            var x = 0
-            while (x < rw) {
-                if (x < ix0 || x >= ix1 || y < iy0 || y >= iy1) samples.add(region[y * rw + x])
-                x += stride
-            }
-            y += stride
+    internal class BackgroundModel(
+        val left: Int, val right: Int, val top: Int, val bottom: Int,
+        val uniform: Boolean
+    ) {
+        /** Background colour at region pixel ([x],[y]) inside the box, interpolated from the four sides. */
+        fun at(x: Int, y: Int, x0: Int, x1: Int, y0: Int, y1: Int): Int {
+            if (uniform) return left
+            val fx = if (x1 > x0) ((x - x0).toFloat() / (x1 - x0)).coerceIn(0f, 1f) else 0.5f
+            val fy = if (y1 > y0) ((y - y0).toFloat() / (y1 - y0)).coerceIn(0f, 1f) else 0.5f
+            val rH = lerp(red(left), red(right), fx)
+            val gH = lerp(green(left), green(right), fx)
+            val bH = lerp(blue(left), blue(right), fx)
+            val rV = lerp(red(top), red(bottom), fy)
+            val gV = lerp(green(top), green(bottom), fy)
+            val bV = lerp(blue(top), blue(bottom), fy)
+            val r = Math.round(rH * (1f - fy) + rV * fy)
+            val g = Math.round(gH * (1f - fy) + gV * fy)
+            val b = Math.round(bH * (1f - fy) + bV * fy)
+            return 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
         }
-        if (samples.size < 12) return null
-        val rs = IntArray(samples.size) { red(samples[it]) }.also { it.sort() }
-        val gs = IntArray(samples.size) { green(samples[it]) }.also { it.sort() }
-        val bs = IntArray(samples.size) { blue(samples[it]) }.also { it.sort() }
-        val mid = samples.size / 2
-        val paper = 0xFF000000.toInt() or (rs[mid] shl 16) or (gs[mid] shl 8) or bs[mid]
-        var agreeing = 0
-        for (p in samples) if (distance(p, paper) <= 30f) agreeing++
-        return if (agreeing.toFloat() / samples.size >= 0.68f) paper else null
     }
 
-    /**
-     * Paints the paper colour over every pixel inside the bubble-interior rectangles [cv] (flat list of left, top, right,
-     * bottom image fractions) that differs from it. Returns the number of pixels changed. If more than ~45 % of the
-     * interior is dark/coloured it is not an empty bubble with lettering but artwork: nothing is touched.
-     */
-    /**
-     * True when the pixels just around the masked lettering are plain (flat colour or a soft gradient). Free lettering
-     * on such a background can be erased with the onion fill without smearing any artwork; before, free lettering was
-     * erased only by the AI painter, so on a phone without it the old Korean stayed under the translation.
-     */
-    private fun smoothSurround(region: IntArray, mask: ByteArray, rw: Int, rh: Int): Boolean {
-        var n = 0
-        var sum = 0L
-        var sum2 = 0L
-        var y = 0
-        while (y < rh) {
-            var x = 0
-            while (x < rw) {
-                if (mask[y * rw + x].toInt() == 0) {
-                    var near = false
-                    var dy = -6
-                    while (dy <= 6 && !near) {
-                        val ny = y + dy
-                        if (ny in 0 until rh) {
-                            var dx = -6
-                            while (dx <= 6) {
-                                val nx = x + dx
-                                if (nx in 0 until rw && mask[ny * rw + nx].toInt() != 0) { near = true; break }
-                                dx += 3
-                            }
-                        }
-                        dy += 3
-                    }
-                    if (near) {
-                        val p = region[y * rw + x]
-                        val l = (299 * red(p) + 587 * green(p) + 114 * blue(p)) / 1000
-                        n++; sum += l; sum2 += l.toLong() * l
-                    }
-                }
-                x += 2
-            }
-            y += 2
-        }
-        if (n < 20) return false
-        val mean = sum.toDouble() / n
-        val variance = sum2.toDouble() / n - mean * mean
-        return variance <= 20.0 * 20.0
-    }
+    private fun lerp(a: Int, b: Int, t: Float): Float = a + (b - a) * t
 
-    private fun wipeInterior(bitmap: Bitmap, cv: List<Float>, width: Int, height: Int, bg: Int): Int {
-        val rects = ArrayList<IntArray>()
-        var q = 0
-        while (q + 3 < cv.size) {
-            val l = (cv[q] * width).toInt().coerceIn(0, width)
-            val t = (cv[q + 1] * height).toInt().coerceIn(0, height)
-            val r = ceil(cv[q + 2] * width).toInt().coerceIn(l, width)
-            val b = ceil(cv[q + 3] * height).toInt().coerceIn(t, height)
-            if (r - l >= 2 && b - t >= 2 && (r - l).toLong() * (b - t) <= 2_500_000L) rects.add(intArrayOf(l, t, r, b))
-            q += 4
+    internal fun estimateBackgroundModel(
+        region: IntArray, rw: Int, rh: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int,
+        fg1: Int, fg2: Int
+    ): BackgroundModel? {
+        val band = max(2, ((ix1 - ix0) / 4).coerceAtMost(((iy1 - iy0) / 4)).coerceAtLeast(2))
+        val minInk = max(58f, min(distance(fg1, fg2) * 0.5f, 90f))
+
+        fun medianSide(pxs: (Int) -> Pair<Int, Int>, n: Int): Int? {
+            val rs = ArrayList<Int>(n); val gs = ArrayList<Int>(n); val bs = ArrayList<Int>(n)
+            for (i in 0 until n) {
+                val (x, y) = pxs(i)
+                if (x < 0 || y < 0 || x >= rw || y >= rh) continue
+                val p = region[y * rw + x]
+                // Skip glyph pixels and their anti-aliasing: the ring must describe the paper, not the text.
+                if (min(distance(p, fg1), distance(p, fg2)) <= minInk) continue
+                rs.add(red(p)); gs.add(green(p)); bs.add(blue(p))
+            }
+            if (rs.size < 6) return null
+            rs.sort(); gs.sort(); bs.sort()
+            val m = rs.size / 2
+            // Reject a side that is mostly artwork (no dominant colour).
+            val ref = 0xFF000000.toInt() or (rs[m] shl 16) or (gs[m] shl 8) or bs[m]
+            var agree = 0
+            for (i in rs.indices) {
+                val p = 0xFF000000.toInt() or (rs[i] shl 16) or (gs[i] shl 8) or bs[i]
+                if (distance(p, ref) <= 46f) agree++
+            }
+            return if (agree * 100 >= rs.size * 60) ref else null
         }
-        if (rects.isEmpty()) return 0
-        var total = 0L
-        var ink = 0L
-        for (rc in rects) {
-            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
-            for (p in px) { total++; if (distance(p, bg) >= 60f) ink++ }
-        }
-        if (total == 0L || ink * 100 > total * 45) return 0
-        val paper = opaque(bg)
-        var changed = 0
-        for (rc in rects) {
-            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
-            var any = false
-            for (i in px.indices) if (distance(px[i], bg) >= 4f) { px[i] = paper; changed++; any = true }
-            if (any) bitmap.setPixels(px, 0, w, rc[0], rc[1], w, h)
-        }
-        return changed
+
+        val spanX = (ix1 - ix0)
+        val spanY = (iy1 - iy0)
+        val left = medianSide({ i -> Pair(ix0 - 1 - (i / spanY.coerceAtLeast(1)) % band, iy0 + i % spanY.coerceAtLeast(1)) }, band * spanY)
+        val right = medianSide({ i -> Pair(ix1 + (i / spanY.coerceAtLeast(1)) % band, iy0 + i % spanY.coerceAtLeast(1)) }, band * spanY)
+        val top = medianSide({ i -> Pair(ix0 + i % spanX.coerceAtLeast(1), iy0 - 1 - (i / spanX.coerceAtLeast(1)) % band) }, spanX * band)
+        val bottom = medianSide({ i -> Pair(ix0 + i % spanX.coerceAtLeast(1), iy1 + (i / spanX.coerceAtLeast(1)) % band) }, spanX * band)
+
+        val sides = listOfNotNull(left, right, top, bottom)
+        if (sides.isEmpty()) return null
+        val uniform = sides.all { distance(it, sides[0]) <= 24f }
+        val base = sides[0]
+        return BackgroundModel(
+            left = left ?: base, right = right ?: base,
+            top = top ?: base, bottom = bottom ?: base,
+            uniform = uniform
+        )
     }
 
     /** Colour for one erased pixel on artwork: inverse-distance blend of the nearest kept pixel in each of 8 directions (1/d² weights: no streaks, no pulling in far colours). */
