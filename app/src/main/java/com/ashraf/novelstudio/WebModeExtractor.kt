@@ -1371,15 +1371,30 @@ internal class WebModeExtractor(
                 )
             } else JS_COLLECT
             val mo = evalWait(wrap(LIB + collectBody)) { parseJson(it) }
-            if (mo == null) { fail(WebModeError.NO_IMAGES); return }
-            val meta = PageMeta(
+            // The live canvas can still be perfectly capturable when the large DOM metadata script times out
+            // or returns no JSON. Do not report NO_IMAGES before taking even one screenshot: id=102 on
+            // Shonen Jump+ followed this exact path and never emitted FORCE_STEP.
+            if (mo == null && !req.visibleOnly) { fail(WebModeError.NO_IMAGES); return }
+            val meta = if (mo != null) PageMeta(
                 url = mo.optString("url", startUrl),
                 lang = mo.optString("lang"),
                 title = mo.optString("title").trim().take(200),
                 novel = mo.optString("novel").trim().take(120),
                 next = mo.optString("next").takeIf { it.startsWith("http") },
                 prev = mo.optString("prev").takeIf { it.startsWith("http") }
-            )
+            ) else {
+                OcrDiag.log("FORCE_META_FALLBACK", "visible DOM metadata unavailable; continuing screen capture url=" + startUrl.take(120))
+                // URL-based script routing remains available; JS_FORCE_INFO gets another chance to provide the
+                // actual canvas geometry. If it also fails, the bounded full-viewport OCR fallback still runs.
+                PageMeta(
+                    url = startUrl,
+                    lang = "",
+                    title = "",
+                    novel = hostOf(startUrl),
+                    next = null,
+                    prev = null
+                )
+            }
             val script = newScript(meta.lang, meta.url)
             val accs = LinkedHashMap<String, ForceAcc>()
             // In visible-only recovery, collect image candidates exactly once and include CSS
