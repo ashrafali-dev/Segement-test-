@@ -108,10 +108,13 @@ internal object ManualCropGeometry {
         val py0 = crop.y * crop.pageH
         val px1 = px0 + crop.w * crop.pageW
         val py1 = py0 + crop.h * crop.pageH
-        // Page pixels -> crop pixels. The crop may have been decoded/downscaled to a different pixel size, so
-        // the offset cannot be subtracted raw.
-        val kx = crop.cropW.toFloat() / crop.pageW.coerceAtLeast(1)
-        val ky = crop.cropH.toFloat() / crop.pageH.coerceAtLeast(1)
+        // Page pixels -> crop pixels. The crop covers [w * pageW] page px and was decoded at [cropW] px, so the
+        // scale is the DECODED size over the REGION's page size — not over the whole page. Using the page
+        // width here shrinks a full-resolution crop of half the page to 0.5.
+        val regionPageW = (crop.w * crop.pageW).coerceAtLeast(1f)
+        val regionPageH = (crop.h * crop.pageH).coerceAtLeast(1f)
+        val kx = crop.cropW.toFloat() / regionPageW
+        val ky = crop.cropH.toFloat() / regionPageH
         val out = ArrayList<BubbleDetectorCore.Det>()
         for (d in full) {
             val l = maxOf(d.l.toFloat(), px0)

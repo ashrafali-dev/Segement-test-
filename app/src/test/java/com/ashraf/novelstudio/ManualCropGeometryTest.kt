@@ -92,15 +92,15 @@ class ManualCropGeometryTest {
     }
 
     @Test fun `downscaled crop scales the detector offset, not just subtracts it`() {
-        // Same 500x400 page region, but the crop bitmap is half size: 250x200.
+        // Same 500x400 page region, but the crop bitmap is half size in BOTH axes: 250x200.
         val c = crop(0.10f, 0.20f, 0.50f, 0.20f, cropW = 250, cropH = 200, pageW = 1000, pageH = 2000)
         val full = listOf(BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 0.9f, 200, 500, 400, 700))
         val d = ManualCropGeometry.detectionsInCrop(full, c)!!.single()
-        // Page offset (100,400) becomes crop offset (50,40) after the 0.5 scale; size 200x200 -> 100x100.
+        // Region-relative 0.5 scale on both axes: offsets (100,100) -> (50,50), size 200x200 -> 100x100.
         assertEquals(50, d.l)
-        assertEquals(40, d.t)
+        assertEquals(50, d.t)
         assertEquals(150, d.r)
-        assertEquals(140, d.b)
+        assertEquals(150, d.b)
     }
 
     @Test fun `detections outside the crop are dropped`() {
@@ -114,11 +114,11 @@ class ManualCropGeometryTest {
         val mask = BubbleDetectorCore.Mask(20, 20, ByteArray(400) { if (it % 20 < 10) 1 else 0 })
         val full = listOf(BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 0.9f, 100, 100, 300, 300, mask))
         // Crop x is the right half of that box (page 200..300) on a 1000-wide page, full height 400.
-        // Decoded at 100x400 px, so page px -> crop px is 0.1 across and 1 vertically.
+        // Decoded at 100x400 px = the region's own page size, so page px -> crop px is 1:1.
         val d = ManualCropGeometry.detectionsInCrop(full, crop(0.20f, 0f, 0.10f, 1f, 100, 400, 1000, 400))!!.single()
         assertNotNull(d.mask)
-        // 100 page px wide clipped, scaled by 0.1 -> 10 crop px.
-        assertEquals(10, d.w)
+        // The 200..300 page slice is the whole crop width, so the trimmed box is 100 crop px wide.
+        assertEquals(100, d.w)
         assertTrue(d.h > 0)
         // The kept slice is the RIGHT half of the silhouette, which was all outside the mask.
         assertTrue(!d.contains(d.l + d.w / 2f, d.t + d.h / 2f))
