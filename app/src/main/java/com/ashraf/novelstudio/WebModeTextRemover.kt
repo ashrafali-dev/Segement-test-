@@ -50,26 +50,48 @@ internal object WebModeTextRemover {
         if (width < 8 || height < 8) return 0
         var changed = 0
 
-        // 1) Lettering inside a bubble: fill with the bubble's own colour.
-        for (text in dets.filter { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
-            val outline = dets.filter { it.label == BubbleDetectorCore.CLS_BUBBLE }
-                .filter { o -> o.contains(text.l.toFloat(), text.t.toFloat()) && o.contains(text.r - 1f, text.b - 1f) }
+        // 1) Koharu's dialogue_text instances: associate by mask coverage, not by two box corners.
+        // Rounded/cloud balloons often place a tight text box partly over the contour even when most of
+        // the text is inside. Fill remains clipped to the balloon mask so neighbouring art/whispers survive.
+        val balloonMasks = dets.filter {
+            it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
+        }
+        for (text in dets.filter {
+            it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE && it.mask != null
+        }) {
+            val outline = balloonMasks.asSequence()
+                .filter { maskCoverage(it, text) >= 0.40f }
                 .minByOrNull { it.area } ?: continue
             val fill = medianRingColour(bitmap, outline, text, width, height) ?: continue
-            changed += fillRect(bitmap, text.l, text.t, text.r, text.b, fill, width, height)
+            val l = (text.l - 2).coerceAtLeast(0)
+            val t = (text.t - 2).coerceAtLeast(0)
+            val r = (text.r + 2).coerceAtMost(width)
+            val b = (text.b + 2).coerceAtMost(height)
+            changed += fillMaskedRect(bitmap, outline, l, t, r, b, fill, width, height)
         }
 
-        // 2) Free lettering (SFX, narration on artwork): remove it from its own box using neighbouring pixels.
-        for (free in dets.filter { it.label == BubbleDetectorCore.CLS_TEXT_FREE }) {
-            // A text_free box on artwork is repainted from the surrounding pixels; on a flat area the median
-            // ring colour is enough and much cheaper.
+        // 2) Koharu's onomatopoeia_text instances: use the actual model mask, not a filled rectangle.
+        // On a flat background the neighbouring median colour erases cleanly; over artwork, interpolate only
+        // the dilated text mask so a rectangular patch cannot wipe the surrounding drawing.
+        for (free in dets.filter {
+            it.label == BubbleDetectorCore.CLS_TEXT_FREE && it.mask != null
+        }) {
             val asBubble = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 1f, free.l, free.t, free.r, free.b)
             val ring = medianRingColour(bitmap, asBubble, free, width, height)
-            if (ring != null) {
-                changed += fillRect(bitmap, free.l, free.t, free.r, free.b, ring, width, height)
+            changed += if (ring != null) {
+                fillInstanceMask(bitmap, free, ring, width, height, padding = 2)
             } else {
-                changed += gradientFillRect(bitmap, free.l, free.t, free.r, free.b, width, height)
+                gradientFillInstanceMask(bitmap, free, width, height, padding = 2)
             }
+        }
+        // Older detectors may provide text boxes without instance masks; preserve their compatible fallback.
+        for (free in dets.filter {
+            it.label == BubbleDetectorCore.CLS_TEXT_FREE && it.mask == null
+        }) {
+            val asBubble = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_BUBBLE, 1f, free.l, free.t, free.r, free.b)
+            val ring = medianRingColour(bitmap, asBubble, free, width, height)
+            changed += if (ring != null) fillRect(bitmap, free.l, free.t, free.r, free.b, ring, width, height)
+            else gradientFillRect(bitmap, free.l, free.t, free.r, free.b, width, height)
         }
 
         // The replacement YOLO model predicts balloon masks only (it has no text_bubble/text_free classes). Manual
@@ -146,6 +168,109 @@ internal object WebModeTextRemover {
         }
         if (changed > 0) bitmap.setPixels(pixels, 0, w, x0, y0, w, h)
         return changed
+    }
+
+    /**
+     * Paint only the model's segmented text mask (plus a tiny anti-alias margin), not its whole rectangle.
+     * This is especially important for Japanese SFX rendered over artwork.
+     */
+    private fun fillInstanceMask(
+        bitmap: Bitmap,
+        instance: BubbleDetectorCore.Det,
+        colour: Int,
+        width: Int,
+        height: Int,
+        padding: Int
+    ): Int = editInstanceMask(bitmap, instance, width, height, padding) { pixels, w, h, globalL, globalT ->
+        var changed = 0
+        for (yy in 0 until h) for (xx in 0 until w) {
+            if (!instanceMaskNear(instance, globalL + xx + 0.5f, globalT + yy + 0.5f, padding)) continue
+            val idx = yy * w + xx
+            if (pixels[idx] != colour) { pixels[idx] = colour; changed++ }
+        }
+        changed
+    }
+
+    /**
+     * Local directional interpolation restricted to the model's text mask. It cannot remove the original drawing
+     * underneath text perfectly (that requires an inpainting model), but it avoids a solid rectangular patch.
+     */
+    private fun gradientFillInstanceMask(
+        bitmap: Bitmap,
+        instance: BubbleDetectorCore.Det,
+        width: Int,
+        height: Int,
+        padding: Int
+    ): Int = editInstanceMask(bitmap, instance, width, height, padding) { pixels, w, h, globalL, globalT ->
+        val source = pixels.copyOf()
+        var changed = 0
+        for (yy in 0 until h) for (xx in 0 until w) {
+            if (!instanceMaskNear(instance, globalL + xx + 0.5f, globalT + yy + 0.5f, padding)) continue
+            var sr = 0.0; var sg = 0.0; var sb = 0.0; var sw = 0.0
+            for ((dx, dy) in arrayOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)) {
+                var distance = 1
+                while (distance <= 32) {
+                    val nx = xx + dx * distance
+                    val ny = yy + dy * distance
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) break
+                    if (!instanceMaskNear(instance, globalL + nx + 0.5f, globalT + ny + 0.5f, padding)) {
+                        val colour = source[ny * w + nx]
+                        val weight = 1.0 / (distance * distance)
+                        sr += ((colour shr 16) and 0xFF) * weight
+                        sg += ((colour shr 8) and 0xFF) * weight
+                        sb += (colour and 0xFF) * weight
+                        sw += weight
+                        break
+                    }
+                    distance++
+                }
+            }
+            if (sw > 0.0) {
+                pixels[yy * w + xx] = 0xFF000000.toInt() or
+                    ((sr / sw).toInt().coerceIn(0, 255) shl 16) or
+                    ((sg / sw).toInt().coerceIn(0, 255) shl 8) or
+                    (sb / sw).toInt().coerceIn(0, 255)
+                changed++
+            }
+        }
+        changed
+    }
+
+    private inline fun editInstanceMask(
+        bitmap: Bitmap,
+        instance: BubbleDetectorCore.Det,
+        width: Int,
+        height: Int,
+        padding: Int,
+        edit: (pixels: IntArray, w: Int, h: Int, globalL: Int, globalT: Int) -> Int
+    ): Int {
+        if (instance.mask == null || instance.r <= instance.l || instance.b <= instance.t) return 0
+        val pad = padding.coerceIn(0, 4)
+        val left = (instance.l - pad).coerceIn(0, width - 1)
+        val top = (instance.t - pad).coerceIn(0, height - 1)
+        val right = (instance.r + pad).coerceIn(left + 1, width)
+        val bottom = (instance.b + pad).coerceIn(top + 1, height)
+        val w = right - left
+        val h = bottom - top
+        if (w <= 0 || h <= 0 || w.toLong() * h > 350_000L) return 0
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, left, top, w, h)
+        val changed = edit(pixels, w, h, left, top)
+        if (changed > 0) bitmap.setPixels(pixels, 0, w, left, top, w, h)
+        return changed
+    }
+
+    private fun instanceMaskNear(
+        instance: BubbleDetectorCore.Det,
+        x: Float,
+        y: Float,
+        padding: Int
+    ): Boolean {
+        if (instance.contains(x, y)) return true
+        if (padding <= 0) return false
+        // Test a cross of neighbouring samples; this dilates only the binary instance mask by a few pixels.
+        return instance.contains(x - padding, y) || instance.contains(x + padding, y) ||
+            instance.contains(x, y - padding) || instance.contains(x, y + padding)
     }
 
     /** Fraction of a text box that actually falls inside the instance mask. */
@@ -292,21 +417,28 @@ internal object WebModeTextRemover {
 
         try {
             if (maskOnly) {
-                val balloonMasks = dets.orEmpty().filter {
+                // Koharu returns three useful instance classes (dialogue_text, balloon, onomatopoeia_text).
+                // Pass the full model result to the existing eraser; filtering to balloon masks alone silently
+                // discarded the model's direct text/SFX masks, which is precisely the advantage of Koharu.
+                val allDetections = dets.orEmpty()
+                val balloonMasks = allDetections.filter {
                     it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
                 }
-                if (balloonMasks.isEmpty()) {
-                    OcrDiag.log("MASK_CLEAN", "skip: no balloon instance masks")
+                val textMasks = allDetections.filter {
+                    (it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE ||
+                        it.label == BubbleDetectorCore.CLS_TEXT_FREE) && it.mask != null
+                }
+                if (balloonMasks.isEmpty() && textMasks.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: model returned no balloon or text instance masks")
                     return false
                 }
-                if (recognizedLines.isEmpty()) {
-                    OcrDiag.log("MASK_CLEAN", "skip: OCR regions unavailable")
+                if (recognizedLines.isEmpty() && textMasks.isEmpty()) {
+                    OcrDiag.log("MASK_CLEAN", "skip: neither OCR regions nor model text masks are available")
                     return false
                 }
 
-                // Reuse eraseDetected's existing OCR-box + model-mask path rather than making a second mask
-                // or a second eraser. Only mark a translated bubble as cleaned when every OCR line mapped
-                // to it was actually erased; otherwise WebModeWriter keeps the normal opaque cover.
+                // Only mark an overlay bubble as cleaned when all of its OCR lines were really erased.
+                // Text masks can still clean artwork/SFX even when those regions have no speech-balloon cover.
                 val linesByBubble = LinkedHashMap<String, MutableList<OcrBlock>>()
                 for (line in recognizedLines) {
                     if (line.text.isBlank() || line.w < 2f || line.h < 2f) continue
@@ -329,25 +461,21 @@ internal object WebModeTextRemover {
                     val key = WebModeTextRemovalCache.bubbleKey(chosen)
                     linesByBubble.getOrPut(key) { ArrayList() }.add(line)
                 }
-                if (linesByBubble.isEmpty()) {
-                    OcrDiag.log("MASK_CLEAN", "skip: OCR regions did not map to overlay bubbles")
-                    return false
-                }
 
                 val erasedLines = java.util.Collections.newSetFromMap(
                     java.util.IdentityHashMap<OcrBlock, Boolean>()
                 )
-                val changedPixels = eraseDetected(bitmap, balloonMasks, recognizedLines) { erasedLines.add(it) }
+                val changedPixels = eraseDetected(bitmap, allDetections, recognizedLines) { erasedLines.add(it) }
                 val erasedKeys = LinkedHashSet<String>()
                 for ((key, lines) in linesByBubble) {
                     if (lines.isNotEmpty() && lines.all { erasedLines.contains(it) }) erasedKeys.add(key)
                 }
-                if (changedPixels < 4 || erasedKeys.isEmpty()) {
-                    OcrDiag.log("MASK_CLEAN", "skip: masks did not safely erase a complete OCR bubble")
+                if (changedPixels < 4 || (erasedKeys.isEmpty() && textMasks.isEmpty())) {
+                    OcrDiag.log("MASK_CLEAN", "skip: model masks did not safely erase text pixels")
                     return false
                 }
                 val stored = storeCleanedBitmap(context, sourceUrl, bitmap, erasedKeys)
-                OcrDiag.log("MASK_CLEAN", "ocrRegions=${recognizedLines.size} masks=${balloonMasks.size} erased=${erasedKeys.size} pixels=$changedPixels stored=$stored")
+                OcrDiag.log("MASK_CLEAN", "ocrRegions=${recognizedLines.size} balloonMasks=${balloonMasks.size} textMasks=${textMasks.size} erasedBubbles=${erasedKeys.size} pixels=$changedPixels stored=$stored")
                 return stored
             }
 
