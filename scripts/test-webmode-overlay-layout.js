@@ -181,6 +181,13 @@ function assertCollisionFree(items, message) {
 
 assert.ok(bodyMatch[1].includes("coverLayer") && bodyMatch[1].includes("textLayer"),
   "background fills and translated text must occupy separate z-layers");
+assert.ok(bodyMatch[1].includes("b.setAttribute('data-cv',it.cv.join(','))"),
+  "translation bubbles must carry the detector/pixel mask's safe interior bands");
+assert.ok(bodyMatch[1].includes("function fitWithinShape(preferWide)") &&
+          bodyMatch[1].includes("function staysInsideDetectedShape()"),
+  "text may widen only after line-by-line checks against the bubble's detected shape");
+assert.ok(bodyMatch[1].includes("b.__nsSafeBandsPx=safeBands"),
+  "mask bands must be mapped into the live image's viewport geometry");
 assert.ok(!bodyMatch[1].includes("overflowWrap='anywhere'") && !bodyMatch[1].includes("overflow-wrap:anywhere"),
   "words must never be split across lines: long words shrink the font instead");
 assert.ok(bodyMatch[1].includes("Words are never split"), "fit() must document the no-split rule");
