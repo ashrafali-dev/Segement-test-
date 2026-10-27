@@ -1770,7 +1770,16 @@ internal class WebModeExtractor(
             val u = p.src
             // Local / page-owned sources never need HTTP retry loops.
             if (u.startsWith("data:", true)) return try { decodeDataUrl(u) } catch (_: Exception) { null }
-            if (u.startsWith("blob:", true)) return try { fetchViaPage(u, timeoutMs = 7000L) } catch (_: Exception) { null }
+            if (u.startsWith("blob:", true)) {
+                return try {
+                    fetchViaPage(u, timeoutMs = 7000L).also {
+                        OcrDiag.log("BLOB_FETCH", "page export OK bytes=${it.size} panel=${p.w}x${p.h}")
+                    }
+                } catch (e: Exception) {
+                    OcrDiag.log("BLOB_FETCH", "page export failed panel=${p.w}x${p.h} reason=${(e.message ?: e.javaClass.simpleName).take(100)}")
+                    null
+                }
+            }
             // The WebView already downloaded this exact image for display (same headers, cookies, TLS):
             // reuse those bytes. No second download, so hotlink/CORS/Cloudflare rules cannot block it.
             ImageTap.get(u)?.let { return it }
