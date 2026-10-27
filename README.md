@@ -62,7 +62,7 @@ Designed for phones with limited RAM. Like Real-Time, it works with the visible 
 
 These screenshots show ToonSensei in use for text-based novels and image-based webtoons/manga.
 
-### Novel reading and translation
+### Novel reading,webtoon&manga translation
 
 <p align="center">
   <img src="docs/screenshots/Screenshot_20261025_052425.jpg" alt="Novel reading and translation 1" width="220" />
@@ -76,7 +76,6 @@ These screenshots show ToonSensei in use for text-based novels and image-based w
   <img src="docs/screenshots/Screenshot_20261025_201219.jpg" alt="Novel reading and translation 5" width="220" />
 </p>
 
-### Webtoon and manga translation
 
 <p align="center">
   <img src="docs/screenshots/Screenshot_20261026_210736.jpg" alt="Webtoon and manga translation 1" width="220" />
