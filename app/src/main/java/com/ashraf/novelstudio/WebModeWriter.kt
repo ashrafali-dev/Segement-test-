@@ -588,8 +588,9 @@ internal object WebModeWriter {
           // width of the speech balloon. If no safe balloon rectangle was found, let a word-wrapped
           // translation widen inside the available image lane instead of stacking Bengali glyphs.
           var textValue=String(RB.b.textContent||'');
-          var unshapedColumn=!RB.rot&&RB.b.getAttribute('data-mf')!=='1'&&
-            !RB.b.getAttribute('data-tb')&&RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\s/.test(textValue);
+          var hasAttrs=RB.b&&typeof RB.b.getAttribute==='function';
+          var unshapedColumn=!RB.rot&&(!hasAttrs||RB.b.getAttribute('data-mf')!=='1')&&
+            (!hasAttrs||!RB.b.getAttribute('data-tb'))&&RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\s/.test(textValue);
           var maxBoxW=unshapedColumn?Math.min(RB.rw*0.72,Math.max(RB.ow*3,Math.min(RB.oh*0.55,RB.rw*0.72))):RB.ow*1.35;
           RB.wideMaxW=maxBoxW;
           RB.w=Math.max(8,Math.min(wantW,room,maxBoxW));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
