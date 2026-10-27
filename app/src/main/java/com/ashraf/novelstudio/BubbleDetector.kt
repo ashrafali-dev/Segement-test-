@@ -710,14 +710,23 @@ internal object BubbleDetector {
                 val protoValue = result.get(prototypeName).orElse(null)
                 val proto = protoValue as? OnnxTensor
                     ?: throw IllegalStateException("Koharu output1 is not a tensor")
+                val predShape = pred.info.shape
+                val normalizedPredictions = KoharuSegCore.normalizePredictionRows(toFloats(pred), predShape)
                 val protoShape = proto.info.shape
-                require(protoShape.size == 4 && protoShape[1] == KoharuSegCore.PROTO_CHANNELS.toLong()) {
-                    "Koharu prototype output shape is invalid: ${protoShape.contentToString()}"
+                require(
+                    protoShape.size == 4 &&
+                        protoShape[0] == 1L &&
+                        protoShape[1] == KoharuSegCore.PROTO_CHANNELS.toLong() &&
+                        protoShape[2] == (inputHeight / 4).toLong() &&
+                        protoShape[3] == (inputWidth / 4).toLong()
+                ) {
+                    "Koharu output1 shape ${protoShape.contentToString()} is invalid for input ${inputWidth}x${inputHeight}; " +
+                        "expected [1,32,${inputHeight / 4},${inputWidth / 4}] (outputs: output0=${predShape.contentToString()}, output1=${protoShape.contentToString()})"
                 }
                 val protoHeight = protoShape[2].toInt()
                 val protoWidth = protoShape[3].toInt()
                 return KoharuSegCore.decode(
-                    toFloats(pred), toFloats(proto), protoWidth, protoHeight,
+                    normalizedPredictions, toFloats(proto), protoWidth, protoHeight,
                     inputWidth, inputHeight, tile, letterbox
                 )
             } finally {
