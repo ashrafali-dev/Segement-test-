@@ -202,6 +202,7 @@ internal object BubbleDetector {
         release()
         try { modelFile(c).delete() } catch (_: Throwable) {}
         try { File(modelFile(c).path + ".part").delete() } catch (_: Throwable) {}
+        try { File(modelFile(c).path + ".part.meta").delete() } catch (_: Throwable) {}
         try { legacyModelFile(c).delete() } catch (_: Throwable) {}
         try { File(legacyModelFile(c).path + ".part").delete() } catch (_: Throwable) {}
         verifiedStamp = Long.MIN_VALUE
@@ -229,6 +230,10 @@ internal object BubbleDetector {
             var conn: HttpURLConnection? = null
             val target = modelFile(app)
             val part = File(target.path + ".part")
+            val partMeta = File(part.path + ".meta")
+            // Bind resumable bytes to this exact model revision. A previous Koharu export may have
+            // used the same .part filename but a different URL/hash/size; never concatenate those bytes.
+            val thisModelStamp = "$MODEL_URL\n$MODEL_SHA256\n$MODEL_BYTES"
             var keepPartial = true
             try {
                 target.parentFile?.let {
@@ -245,7 +250,23 @@ internal object BubbleDetector {
                 if (existingBytes == MODEL_BYTES &&
                     !sha256(part).equals(MODEL_SHA256, ignoreCase = true)) {
                     try { part.delete() } catch (_: Throwable) {}
+                    try { partMeta.delete() } catch (_: Throwable) {}
                     existingBytes = 0L
+                }
+                if (existingBytes in 1 until MODEL_BYTES) {
+                    val oldStamp = try { if (partMeta.isFile) partMeta.readText(Charsets.UTF_8) else "" }
+                        catch (_: Throwable) { "" }
+                    if (oldStamp != thisModelStamp) {
+                        Log.i(TAG, "Discarding Koharu partial from an older/different model revision")
+                        try { part.delete() } catch (_: Throwable) {}
+                        try { partMeta.delete() } catch (_: Throwable) {}
+                        existingBytes = 0L
+                    }
+                }
+                if (existingBytes < MODEL_BYTES) {
+                    // Persist source identity before any bytes are appended; after a process kill this
+                    // lets the next attempt safely resume only the same model artifact.
+                    partMeta.writeText(thisModelStamp, Charsets.UTF_8)
                 }
                 Log.i(TAG, "Koharu download start: resumableBytes=$existingBytes of $MODEL_BYTES")
 
@@ -372,7 +393,10 @@ internal object BubbleDetector {
                 Log.w(TAG, "Koharu download/install failed: $error", e)
             } finally {
                 try { conn?.disconnect() } catch (_: Throwable) {}
-                if (!keepPartial) try { if (part.exists()) part.delete() } catch (_: Throwable) {}
+                if (!keepPartial) {
+                    try { if (part.exists()) part.delete() } catch (_: Throwable) {}
+                    try { if (partMeta.exists()) partMeta.delete() } catch (_: Throwable) {}
+                }
                 downloading.set(false)
                 try { onDone(error) } catch (callbackError: Throwable) {
                     Log.w(TAG, "Koharu completion callback failed", callbackError)
