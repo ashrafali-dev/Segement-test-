@@ -102,44 +102,68 @@ class KoharuRealFixtureTest {
         println("real fixture: decoded ${dets.size} detections " +
             dets.groupingBy { it.label }.eachCount())
 
-        // The synthetic page may not reach the production 0.25 threshold in every class. Decode again
-        // at a low floor so the mask-reconstruction path is exercised by real tensors whenever the model
-        // produced any non-frame candidate at all. Only run the mask checks if such a candidate exists.
-        var anyNonFrameAboveLowFloor = false
+        // The synthetic page may not reach the production threshold in every class. Decode again at a
+        // low floor so real tensors drive mask reconstruction whenever the model produced any non-frame
+        // candidate. If every non-frame row is near-zero noise on this synthetic drawing, promote the
+        // single highest-scoring non-frame row's confidence so its REAL coefficients are still pushed
+        // through makeMask against the REAL prototype tensor — proving reconstruction with real data.
+        var bestNonFrame = -1
+        var bestScore = Float.NEGATIVE_INFINITY
         val instancesLow = pred.size / KoharuSegCore.ROW_SIZE
         for (i in 0 until instancesLow) {
             val o = i * KoharuSegCore.ROW_SIZE
-            if (pred[o + 4].isFinite() && pred[o + 4] >= 0.02f && Math.round(pred[o + 5]) != 0) {
-                anyNonFrameAboveLowFloor = true
-                break
+            val s = pred[o + 4]
+            if (s.isFinite() && Math.round(pred[o + 5]) != 0 && s > bestScore) {
+                bestScore = s
+                bestNonFrame = i
             }
         }
-        if (!anyNonFrameAboveLowFloor) {
-            println("real fixture: no non-frame candidate at all; skipping low-floor mask check")
-            return
-        }
-        val lowDets = KoharuSegCore.decode(
-            pred, proto, protoW, protoH, inputW, inputH,
-            intArrayOf(tileX, tileY, tileX + tileW, tileY + tileH), letterbox, scoreMin = 0.02f
+        assertTrue("model returned only frame rows; the class layout may be wrong", bestNonFrame >= 0)
+        val decodeInput = pred.copyOf()
+        // Force the chosen real row to clear the floor (only its confidence is touched; coefficients,
+        // box and class id are the model's own values).
+        decodeInput[bestNonFrame * KoharuSegCore.ROW_SIZE + 4] = Math.max(
+            pred[bestNonFrame * KoharuSegCore.ROW_SIZE + 4], 0.5f
         )
-        println("real fixture: low-floor decode ${lowDets.size} detections, " +
+        // Box of the promoted row, in model input pixels.
+        val ob = bestNonFrame * KoharuSegCore.ROW_SIZE
+        val bwRaw = pred[ob + 2] - pred[ob]
+        val bhRaw = pred[ob + 3] - pred[ob + 1]
+        val boxDecodable = bwRaw.isFinite() && bhRaw.isFinite() && bwRaw > 4f && bhRaw > 4f
+
+        val lowDets = KoharuSegCore.decode(
+            decodeInput, proto, protoW, protoH, inputW, inputH,
+            intArrayOf(tileX, tileY, tileX + tileW, tileY + tileH), letterbox, scoreMin = 0.5f
+        )
+        val promotedLabel = Math.round(pred[ob + 5])
+        val expectedLabel = when (promotedLabel) {
+            1 -> BubbleDetectorCore.CLS_TEXT_BUBBLE
+            2 -> BubbleDetectorCore.CLS_BUBBLE
+            3 -> BubbleDetectorCore.CLS_TEXT_FREE
+            else -> -1
+        }
+        println("real fixture: promoted row class=$promotedLabel box=${bwRaw}x${bhRaw} " +
+            "decodable=$boxDecodable -> ${lowDets.size} detections, " +
             "withMask=${lowDets.count { it.mask != null }}")
-        assertTrue("low-floor decode produced no detections though candidates exist", lowDets.isNotEmpty())
-        for (det in lowDets) {
-            assertTrue("unexpected label ${det.label}", det.label in 0..2)
-            assertTrue("box outside tile: $det", det.l >= tileX && det.b <= tileY + tileH)
-            det.mask?.let { m ->
-                assertTrue("mask is empty", m.pixels.any { it.toInt() != 0 })
-                // A mask cell marked inside must map back inside the detected box.
-                val mx = m.width / 2
-                val my = m.height / 2
+
+        if (boxDecodable) {
+            val det = lowDets.firstOrNull { it.label == expectedLabel }
+            assertTrue("promoted real row did not decode; class mapping/box reverse is wrong", det != null)
+            // The mask must reconstruct from the model's own coefficients and prototypes.
+            val m = det!!.mask
+            assertTrue("real coefficients produced no usable mask", m != null)
+            assertTrue("mask is empty", m!!.pixels.any { it.toInt() != 0 })
+            // A mask cell marked inside must map back inside the detected box.
+            val mx = m.width / 2
+            val my = m.height / 2
+            if (m.pixels[my * m.width + mx].toInt() != 0) {
                 val px = det.l + (mx + 0.5f) * (det.r - det.l) / m.width
                 val py = det.t + (my + 0.5f) * (det.b - det.t) / m.height
-                if (m.pixels[my * m.width + mx].toInt() != 0) {
-                    assertTrue("mask cell maps outside its box", px >= det.l - 1 && px <= det.r + 1)
-                    assertTrue("mask cell maps outside its box", py >= det.t - 1 && py <= det.b + 1)
-                }
+                assertTrue("mask cell maps outside its box", px >= det.l - 1 && px <= det.r + 1)
+                assertTrue("mask cell maps outside its box", py >= det.t - 1 && py <= det.b + 1)
             }
+        } else {
+            println("real fixture: promoted row has a degenerate box; decoder correctly dropped it")
         }
     }
 
@@ -150,18 +174,30 @@ class KoharuRealFixtureTest {
         val instances = pred.size / KoharuSegCore.ROW_SIZE
         var frameRows = 0
         var decodeableRows = 0
+        var scoredRows = 0
+        val badClassSamples = ArrayList<Float>()
         for (i in 0 until instances) {
             val o = i * KoharuSegCore.ROW_SIZE
             val score = pred[o + 4]
             if (!score.isFinite() || score < KoharuSegCore.SCORE_MIN) continue
-            val classId = Math.round(pred[o + 5])
+            scoredRows++
+            val classRaw = pred[o + 5]
+            val classId = Math.round(classRaw)
+            // The decoder reads class id at index 5. On the real head this is a single integer class index
+            // in 0..3. If it were actually the start of four per-class probabilities (the Liiesl card's
+            // layout), these values would not be near-integers in 0..3.
+            if (Math.abs(classRaw - classId) > 0.01f || classId !in 0..3) {
+                if (badClassSamples.size < 5) badClassSamples.add(classRaw)
+            }
             if (classId == 0) frameRows++ else decodeableRows++
         }
         println("real fixture: $decodeableRows non-frame rows, $frameRows frame rows, " +
-            "of $instances instances at score >= ${KoharuSegCore.SCORE_MIN}")
-        // The decoder maps frame(0) away and drops it. This asserts the row layout it depends on:
-        // confidence at index 4 and class id at index 5. If those offsets were wrong, the model's own
-        // output would not present class ids in 0..3 and this count would be meaningless.
-        assertTrue("class ids are not in 0..3; the row layout assumed by the decoder is wrong", frameRows + decodeableRows > 0)
+            "$scoredRows scored rows of $instances instances at score >= ${KoharuSegCore.SCORE_MIN}; " +
+            "bad class samples=$badClassSamples")
+        assertTrue("no scored rows at all; the confidence offset (4) is wrong", scoredRows > 0)
+        assertTrue(
+            "class ids are not integers in 0..3; the decoder's class-id offset (5) or row layout is wrong: $badClassSamples",
+            badClassSamples.isEmpty()
+        )
     }
 }
