@@ -1424,16 +1424,15 @@ class MainActivity : Activity() {
             .joinToString("") { "%02x".format(it) }.take(24)
     }
 
-    /** Stable cross-quality identity: OCR models can shift bubble geometry by a few pixels. */
-    // The cache key is the bubble's TEXT only. Image URLs change between visits (signed/tokenised CDN
-    // links, different image hosts) and OCR box positions shift slightly between fast/detailed passes,
-    // so either of them used to cause cache misses for a bubble that was already translated.
-    // Punctuation/spacing are ignored so tiny OCR differences still hit the cache.
     /**
-     * Key for the realtime translation cache. It MUST include the bubble's position, not just its text:
-     * keying only on the OCR letters let two bubbles with identical lettering ("!", "...", a repeated
-     * name) share one entry, so bubble A's translation was drawn on bubble B. Delegating to the shared
-     * [WebModeLayout.bubbleIdentity] keeps this and [WebModeLayout.fingerprint] in lock-step.
+     * Key for the realtime translation cache.
+     *
+     * It MUST include the bubble's position, not just its text. OCR lettering is often identical across
+     * bubbles ("!", "?!", "...", a repeated name), and keying only on the text let two different bubbles
+     * collapse onto one entry: the translation produced for bubble A was then drawn over bubble B.
+     * Position is quantised (see [WebModeLayout.bubbleIdentity]) so a sub-pixel jitter of the same bubble
+     * still hits the cache, while two distinct bubbles never share a key. This is the same identity used
+     * by [WebModeLayout.fingerprint], so the two stay in lock-step.
      */
     private fun rtAheadBubbleCacheKey(bubble: WmBubble): String =
         WebModeLayout.bubbleIdentity(bubble)
