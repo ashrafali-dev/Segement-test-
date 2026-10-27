@@ -21,19 +21,26 @@ import com.ashraf.novelstudio.WmBubble
  */
 internal object ManualCropGeometry {
 
-    /** A crop rectangle in page-image fractions, plus the pixel size it decoded at. */
+    /**
+     * A crop rectangle in page-image fractions, plus the pixel size the crop decoded at.
+     *
+     * [cropW]/[cropH] are the crop's OWN pixels (what OCR measured in). [pageW]/[pageH] are the whole page
+     * image's pixels (what the detector works in). The two are different: dividing crop pixels by the page
+     * width mixes the units and puts every bubble in the wrong place.
+     */
     data class Crop(
         val x: Float, val y: Float, val w: Float, val h: Float,
-        val pxW: Int, val pxH: Int
+        val cropW: Int, val cropH: Int,
+        val pageW: Int = cropW, val pageH: Int = cropH
     ) {
-        fun fx(px: Float): Float = x + (px / pxW) * w
-        fun fy(py: Float): Float = y + (py / pxH) * h
-        fun fw(px: Float): Float = (px / pxW) * w
-        fun fh(py: Float): Float = (py / pxH) * h
+        fun fx(px: Float): Float = x + (px / cropW) * w
+        fun fy(py: Float): Float = y + (py / cropH) * h
+        fun fw(px: Float): Float = (px / cropW) * w
+        fun fh(py: Float): Float = (py / cropH) * h
 
-        /** Crop pixel rectangle -> page pixels (the detector works in page pixels). */
-        fun pageL(px: Float): Int = (x * pxW + px).toInt()
-        fun pageT(py: Float): Int = (y * pxH + py).toInt()
+        /** Crop pixel coordinate -> whole-page pixel coordinate (the detector's frame). */
+        fun pageL(px: Float): Int = (x * pageW + px).toInt()
+        fun pageT(py: Float): Int = (y * pageH + py).toInt()
     }
 
     /**
@@ -53,14 +60,14 @@ internal object ManualCropGeometry {
         sourceText: String,
         modelMaskFit: Boolean
     ): WmBubble? {
-        if (crop.pxW <= 0 || crop.pxH <= 0) return null
+        if (crop.cropW <= 0 || crop.cropH <= 0) return null
         if (sourceText.isBlank()) return null
         val cw = cover[2] - cover[0]
         val chh = cover[3] - cover[1]
         if (cw <= 0 || chh <= 0) return null
         if (fontPx <= 0f) return null
 
-        val hasSafe = safe != null && safe[2] > safe[0] && safe[3] > safe[1]
+        val s = safe?.takeIf { it[2] > it[0] && it[3] > it[1] }
         return WmBubble(
             src = src,
             cx = crop.fx((cover[0] + cover[2]) / 2f),
@@ -70,11 +77,11 @@ internal object ManualCropGeometry {
             angle = angle, font = crop.fw(fontPx).coerceIn(0.002f, 0.30f),
             bg = bg, fg = fg, fg2 = fg2, soft = soft, stroke = stroke,
             sourceText = sourceText.trim(),
-            tcx = if (hasSafe) crop.fx((safe!![0] + safe[2]) / 2f) else 0f,
-            tcy = if (hasSafe) crop.fy((safe!![1] + safe[3]) / 2f) else 0f,
-            tbw = if (hasSafe) crop.fw((safe!![2] - safe!![0]).toFloat()) else 0f,
-            tbh = if (hasSafe) crop.fh((safe!![3] - safe!![1]).toFloat()) else 0f,
-            modelMaskFit = hasSafe && modelMaskFit
+            tcx = if (s != null) crop.fx((s[0] + s[2]) / 2f) else 0f,
+            tcy = if (s != null) crop.fy((s[1] + s[3]) / 2f) else 0f,
+            tbw = if (s != null) crop.fw((s[2] - s[0]).toFloat()) else 0f,
+            tbh = if (s != null) crop.fh((s[3] - s[1]).toFloat()) else 0f,
+            modelMaskFit = s != null && modelMaskFit
         )
     }
 
@@ -96,20 +103,26 @@ internal object ManualCropGeometry {
         crop: Crop
     ): List<BubbleDetectorCore.Det>? {
         if (full.isNullOrEmpty()) return null
-        val cx0 = crop.x * crop.pxW
-        val cy0 = crop.y * crop.pxH
-        val cx1 = cx0 + crop.w * crop.pxW
-        val cy1 = cy0 + crop.h * crop.pxH
+        // The crop window in PAGE pixels (what the detector's boxes live in).
+        val px0 = crop.x * crop.pageW
+        val py0 = crop.y * crop.pageH
+        val px1 = px0 + crop.w * crop.pageW
+        val py1 = py0 + crop.h * crop.pageH
+        // Page pixels -> crop pixels. The crop may have been decoded/downscaled to a different pixel size, so
+        // the offset cannot be subtracted raw.
+        val kx = crop.cropW.toFloat() / crop.pageW.coerceAtLeast(1)
+        val ky = crop.cropH.toFloat() / crop.pageH.coerceAtLeast(1)
         val out = ArrayList<BubbleDetectorCore.Det>()
         for (d in full) {
-            val l = maxOf(d.l.toFloat(), cx0)
-            val t = maxOf(d.t.toFloat(), cy0)
-            val r = minOf(d.r.toFloat(), cx1)
-            val b = minOf(d.b.toFloat(), cy1)
+            val l = maxOf(d.l.toFloat(), px0)
+            val t = maxOf(d.t.toFloat(), py0)
+            val r = minOf(d.r.toFloat(), px1)
+            val b = minOf(d.b.toFloat(), py1)
             if (r - l < 2f || b - t < 2f) continue
             val box = BubbleDetectorCore.Det(
                 d.label, d.score,
-                (l - cx0).toInt(), (t - cy0).toInt(), (r - cx0).toInt(), (b - cy0).toInt()
+                ((l - px0) * kx).toInt(), ((t - py0) * ky).toInt(),
+                ((r - px0) * kx).toInt(), ((b - py0) * ky).toInt()
             )
             val m = d.mask
             if (m == null) { out.add(box); continue }

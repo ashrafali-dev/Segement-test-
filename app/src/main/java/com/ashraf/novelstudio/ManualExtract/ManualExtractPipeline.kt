@@ -168,7 +168,8 @@ internal class ManualExtractPipeline(
             val cropRect = ManualCropGeometry.Crop(
                 if (page == null) 0f else x, if (page == null) 0f else y,
                 if (page == null) 1f else w, if (page == null) 1f else h,
-                page?.first ?: cw, page?.second ?: ch
+                cropW = ocrBmp.width, cropH = ocrBmp.height,
+                pageW = page?.first ?: cw, pageH = page?.second ?: ch
             )
             val dets = detsFor(src, cropRect)
             // Erase the original lettering in the crop itself. cleanAndCache() is not used here: it is keyed by
