@@ -1053,11 +1053,16 @@ internal object WebModeTextRemover {
 
         val sides = listOfNotNull(left, right, top, bottom)
         if (sides.isEmpty()) return null
-        val uniform = sides.all { distance(it, sides[0]) <= 24f }
         val base = sides[0]
+        val l = left ?: base; val r = right ?: base
+        val tp = top ?: base; val bt = bottom ?: base
+        // "Uniform" must describe what the model will actually paint, not the side medians. A smooth gradient
+        // can leave every side's median near the middle while the top and bottom of the box still differ, and
+        // calling that flat is exactly the one-average-colour bug this model exists to avoid.
+        val uniform = distance(l, r) <= 24f && distance(tp, bt) <= 24f
         return BackgroundModel(
-            left = left ?: base, right = right ?: base,
-            top = top ?: base, bottom = bottom ?: base,
+            left = l, right = r,
+            top = tp, bottom = bt,
             uniform = uniform
         )
     }
