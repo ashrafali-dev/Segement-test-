@@ -2562,9 +2562,14 @@ internal class WebModeExtractor(
                     cx = (rb[0] + rb[2]) / 2f; cy = (rb[1] + rb[3]) / 2f
                     bw = (rb[2] - rb[0]) - 4f; bh = (rb[3] - rb[1]) - 4f
                 }
-                // Preserve the actual source glyph bounds BEFORE cx/cy/w/h may expand to the entire speech bubble.
-                // Cleaning must use these coordinates; the larger cover bounds are for overlay geometry only.
-                val ocrCx = cx; val ocrCy = cy; val ocrBw = bw; val ocrBh = bh
+                // Preserve the actual OCR/refined text rectangle, not WmBubbleStyle's expanded cover bounds.
+                // The text remover adds its own small antialias margin and uses the balloon mask as its hard clip.
+                // Cleaning must never reinterpret the full cover-bubble geometry as the original glyph region.
+                val sourceGlyphRect = refinedBox[i] ?: rects[i]
+                val ocrCx = (sourceGlyphRect[0] + sourceGlyphRect[2]) / 2f
+                val ocrCy = (sourceGlyphRect[1] + sourceGlyphRect[3]) / 2f
+                val ocrBw = (sourceGlyphRect[2] - sourceGlyphRect[0]).toFloat()
+                val ocrBh = (sourceGlyphRect[3] - sourceGlyphRect[1]).toFloat()
                 // Speech-bubble SHAPE (the Manga Translator idea): rebuild the bubble around the lettering and write the
                 // translation into the largest rectangle that fits INSIDE it. The cover box only has to hide the old
                 // lettering. Without this the text was fitted into the lettering's own tight box (a long translation got
