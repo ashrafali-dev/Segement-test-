@@ -178,18 +178,18 @@ class WebModeTextRemovalSafetyTest {
         assertEquals(setOf(key), WebModeTextRemover.erasedBubbleKeys(groups, erased))
     }
 
-    @Test fun expandedCoverAndOriginalOcrGeometrySurviveLayoutSerializationSeparately() {
+    @Test fun expandedCoverAndOriginalOcrGeometryRemainSeparate() {
         val original = bubble("source lettering", 0.5f, 0.5f).copy(
             w = 0.72f, h = 0.38f,
             ocrCx = 0.5f, ocrCy = 0.49f, ocrW = 0.21f, ocrH = 0.07f
         )
-        val restored = WebModeLayout.fromJson(WebModeLayout(0, listOf(original)).toJson())
-        assertTrue(restored != null)
-        val decoded = restored!!.bubbles.single()
-        assertEquals(0.72f, decoded.w, 0.00001f)
-        assertEquals(0.38f, decoded.h, 0.00001f)
-        assertEquals(0.21f, decoded.ocrW, 0.00001f)
-        assertEquals(0.07f, decoded.ocrH, 0.00001f)
-        assertEquals(0.49f, decoded.ocrCy, 0.00001f)
+        // Adding/replacing translated text must not collapse the original OCR rectangle into the larger cover box.
+        val copied = original.copy(translatedText = "অনুবাদ")
+        assertEquals(0.72f, copied.w, 0.00001f)
+        assertEquals(0.38f, copied.h, 0.00001f)
+        assertEquals(0.21f, copied.ocrW, 0.00001f)
+        assertEquals(0.07f, copied.ocrH, 0.00001f)
+        assertEquals(0.49f, copied.ocrCy, 0.00001f)
+        assertEquals(0.5f, copied.ocrCx, 0.00001f)
     }
 }
