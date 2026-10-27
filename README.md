@@ -92,6 +92,7 @@ These screenshots show ToonSensei in use for text-based novels and image-based w
 </p>
 <p align="center">
   <img src="docs/screenshots/Screenshot_20261027_161601_Video%20Player.jpg" alt="Webtoon and manga translation 7" width="220" />
+  <img src="docs/screenshots/Screenshot_20261027_162357.jpg" alt="Webtoon and manga translation 8" width="220" />
 </p>
 
 ## How it works
