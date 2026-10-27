@@ -58,6 +58,42 @@ ToonSensei-তে আলাদা কোনো সাধারণ অনুব�
 
 
 
+## স্ক্রিনশট
+
+এই স্ক্রিনশটগুলোতে টেক্সট-ভিত্তিক নভেল এবং ইমেজ-ভিত্তিক ওয়েবটুন/মাঙ্গা পড়ার সময় ToonSensei-এর ব্যবহার দেখানো হয়েছে।
+
+### Novel পড়া ও অনুবাদ
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_052425.jpg" alt="Novel পড়া ও অনুবাদ 1" width="220" />
+  <img src="docs/screenshots/Screenshot_20261025_065845.jpg" alt="Novel পড়া ও অনুবাদ 2" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_071827.jpg" alt="Novel পড়া ও অনুবাদ 3" width="220" />
+  <img src="docs/screenshots/Screenshot_20261025_100050.jpg" alt="Novel পড়া ও অনুবাদ 4" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_201219.jpg" alt="Novel পড়া ও অনুবাদ 5" width="220" />
+</p>
+
+### Webtoon ও Manga অনুবাদ
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261026_210736.jpg" alt="Webtoon ও Manga অনুবাদ 1" width="220" />
+  <img src="docs/screenshots/Screenshot_20261026_210830.jpg" alt="Webtoon ও Manga অনুবাদ 2" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261026_211501.jpg" alt="Webtoon ও Manga অনুবাদ 3" width="220" />
+  <img src="docs/screenshots/Screenshot_20261026_212350.jpg" alt="Webtoon ও Manga অনুবাদ 4" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261027_161510_Video%20Player.jpg" alt="Webtoon ও Manga অনুবাদ 5" width="220" />
+  <img src="docs/screenshots/Screenshot_20261027_161539_Video%20Player.jpg" alt="Webtoon ও Manga অনুবাদ 6" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261027_161601_Video%20Player.jpg" alt="Webtoon ও Manga অনুবাদ 7" width="220" />
+</p>
+
 ## কীভাবে কাজ করে
 
 **ওয়েব নভেলের ক্ষেত্রে:** ToonSensei রিডার পেজ থেকে পাওয়া অধ্যায়ের লেখা সংগ্রহ করে, নির্বাচিত চ্যাটবটে পাঠায়, তারপর অনুবাদটি পেজের ওয়ার্কফ্লোতে যুক্ত করে অথবা সংরক্ষণ করে।
