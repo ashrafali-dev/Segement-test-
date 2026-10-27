@@ -969,8 +969,12 @@ internal object WebModeTextRemover {
             if (candidate[at].toInt() == 0) continue
             val bgHere = model.at(rx, ry, ix0, ix1, iy0, iy1)
             if (distance(region[at], bgHere) < 30f) continue
-            if (min(distance(region[at], fg1), distance(region[at], fg2), distance(region[at], fg3)) >
-                max(96f, distance(bgHere, fg1) * 1.05f)) continue
+            val inkDist = minOf(
+                distance(region[at], fg1),
+                distance(region[at], fg2),
+                distance(region[at], fg3)
+            )
+            if (inkDist > max(96f, distance(bgHere, fg1) * 1.05f)) continue
             inkMask[at] = 1
             inkCount++
         }
@@ -1015,7 +1019,7 @@ internal object WebModeTextRemover {
         fg1: Int, fg2: Int
     ): BackgroundModel? {
         val band = max(2, ((ix1 - ix0) / 4).coerceAtMost(((iy1 - iy0) / 4)).coerceAtLeast(2))
-        val minInk = max(58f, min(distance(fg1, fg2) * 0.5f, 90f))
+        val minInk = max(58f, minOf(distance(fg1, fg2) * 0.5f, 90f))
 
         fun medianSide(pxs: (Int) -> Pair<Int, Int>, n: Int): Int? {
             val rs = ArrayList<Int>(n); val gs = ArrayList<Int>(n); val bs = ArrayList<Int>(n)
