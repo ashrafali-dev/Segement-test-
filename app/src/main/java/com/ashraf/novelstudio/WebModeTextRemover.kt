@@ -496,6 +496,104 @@ internal object WebModeTextRemover {
         return w * h
     }
 
+    /**
+     * Associate every recognized source line with exactly one output bubble.
+     * Bubble geometry may be larger than the original glyph box, so use spatial containment first and
+     * normalized source text to disambiguate overlapping balloon rectangles.
+     */
+    internal fun recognizedLinesByBubble(
+        bubbles: List<WmBubble>,
+        recognizedLines: List<OcrBlock>,
+        width: Int,
+        height: Int
+    ): Map<String, List<OcrBlock>> {
+        if (width <= 0 || height <= 0) return emptyMap()
+        val grouped = LinkedHashMap<String, MutableList<OcrBlock>>()
+        for (line in recognizedLines) {
+            if (line.text.isBlank() || line.w < 2f || line.h < 2f) continue
+            val nx = line.cx / width
+            val ny = line.cy / height
+            val covering = bubbles.filter { bb ->
+                nx >= bb.cx - bb.w / 2f && nx <= bb.cx + bb.w / 2f &&
+                    ny >= bb.cy - bb.h / 2f && ny <= bb.cy + bb.h / 2f
+            }
+            if (covering.isEmpty()) continue
+            val lineText = WebModeLayout.normalizeOcrText(line.text)
+            val textMatch = covering.filter { bb ->
+                val bText = WebModeLayout.normalizeOcrText(bb.sourceText)
+                bText.isNotBlank() && lineText.isNotBlank() &&
+                    (bText.contains(lineText) || lineText.contains(bText))
+            }
+            val chosen = (textMatch.ifEmpty { covering }).minByOrNull { bb ->
+                kotlin.math.abs(bb.cx * width - line.cx) + kotlin.math.abs(bb.cy * height - line.cy)
+            } ?: continue
+            grouped.getOrPut(WebModeTextRemovalCache.bubbleKey(chosen)) { ArrayList() }.add(line)
+        }
+        return grouped
+    }
+
+    /** A bubble is eligible for transparent rendering only when every source line assigned to it was erased. */
+    internal fun erasedBubbleKeys(
+        linesByBubble: Map<String, List<OcrBlock>>,
+        erasedLines: Set<OcrBlock>
+    ): Set<String> = linesByBubble.asSequence()
+        .filter { (_, lines) -> lines.isNotEmpty() && lines.all { erasedLines.contains(it) } }
+        .map { it.key }
+        .toSet()
+
+    /**
+     * Find the balloon instance associated with the original OCR box. This uses the detector's compact mask
+     * directly and does not rerun inference or build a second page-sized bitmap.
+     */
+    private fun speechBubbleMaskFor(
+        bubble: WmBubble,
+        dets: List<BubbleDetectorCore.Det>?,
+        width: Int,
+        height: Int,
+        cx: Float,
+        cy: Float,
+        bw: Float,
+        bh: Float
+    ): BubbleDetectorCore.Det? {
+        if (bubble.free || dets.isNullOrEmpty() || width <= 0 || height <= 0) return null
+        val l = (cx - bw / 2f).toInt().coerceIn(0, width - 1)
+        val t = (cy - bh / 2f).toInt().coerceIn(0, height - 1)
+        val r = kotlin.math.ceil(cx + bw / 2f).toInt().coerceIn(l + 1, width)
+        val b = kotlin.math.ceil(cy + bh / 2f).toInt().coerceIn(t + 1, height)
+        val textBox = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
+        return dets.asSequence()
+            .filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null && it.contains(cx, cy) }
+            .filter { BubbleDetectorCore.maskCoverage(it, textBox) >= 0.36f }
+            .minByOrNull { it.area }
+    }
+
+    /**
+     * Restrict speech-bubble cleaning to a known balloon silhouette/interior. FREE text is intentionally allowed
+     * outside balloons. When no trustworthy shape was detected, preserve the legacy local-text path; the overlay
+     * keeps an opaque fallback rather than treating uncertain cleanup as complete.
+     */
+    private fun insideSpeechBubbleShape(
+        bubble: WmBubble,
+        balloonMask: BubbleDetectorCore.Det?,
+        width: Int,
+        height: Int,
+        x: Float,
+        y: Float
+    ): Boolean {
+        if (bubble.free) return true
+        if (balloonMask?.mask != null) return balloonMask.contains(x, y)
+        if (bubble.cv.size < 4 || width <= 0 || height <= 0) return true
+        val nx = x / width
+        val ny = y / height
+        var i = 0
+        while (i + 3 < bubble.cv.size) {
+            if (nx >= bubble.cv[i] && nx <= bubble.cv[i + 2] &&
+                ny >= bubble.cv[i + 1] && ny <= bubble.cv[i + 3]) return true
+            i += 4
+        }
+        return false
+    }
+
     fun cleanAndCache(
         context: Context,
         sourceUrl: String,
@@ -1048,7 +1146,8 @@ internal object WebModeTextRemover {
         ix0: Int, iy0: Int, ix1: Int, iy1: Int,
         candidate: ByteArray, regionCount: Int,
         fg1: Int, fg2: Int, fg3: Int, fontPx: Float,
-        x0: Int, y0: Int, innerArea: Long
+        x0: Int, y0: Int, innerArea: Long,
+        bubble: WmBubble, balloonMask: BubbleDetectorCore.Det?, imageWidth: Int, imageHeight: Int
     ): Int {
         val model = estimateBackgroundModel(region, rw, rh, ix0, iy0, ix1, iy1, fg1, fg2) ?: return 0
         val paperRef = model.at((ix0 + ix1) / 2, (iy0 + iy1) / 2, ix0, ix1, iy0, iy1)
@@ -1083,6 +1182,8 @@ internal object WebModeTextRemover {
                 if (nx !in ix0 until ix1 || ny !in iy0 until iy1) continue
                 val ni = ny * rw + nx
                 if (mask[ni].toInt() != 0) continue
+                if (!insideSpeechBubbleShape(bubble, balloonMask, imageWidth, imageHeight,
+                        x0 + nx + 0.5f, y0 + ny + 0.5f)) continue
                 val bgHere = model.at(nx, ny, ix0, ix1, iy0, iy1)
                 // Only the anti-aliased edge of a glyph, never clean background.
                 if (distance(region[ni], bgHere) >= 20f &&
