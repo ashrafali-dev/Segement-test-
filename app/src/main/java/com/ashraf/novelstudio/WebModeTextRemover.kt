@@ -71,13 +71,31 @@ internal object WebModeTextRemover {
         }) {
             val outline = balloonMasks.asSequence()
                 .filter { maskCoverage(it, text) >= 0.40f }
-                .minByOrNull { it.area } ?: continue
+                .minByOrNull { it.area }
+
+            // Koharu's class-1 mask is its direct dialogue-text segmentation. Erase that glyph mask first,
+            // clipping to the balloon silhouette when known. Do not replace it with a broad rectangle or
+            // depend on a uniform ring colour; both can leave Korean strokes behind on shaded paper.
+            val modelMaskPixels = eraseTextInstance(
+                bitmap, text, width, height, padding = 2, clipTo = outline
+            )
+            changed += modelMaskPixels
+            if (modelMaskPixels >= 4) {
+                notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
+                continue
+            }
+
+            // Conservative fallback for a missing/degenerate text mask. It still detects only ink inside the
+            // actual balloon and never paints outside the model silhouette.
+            if (outline == null) continue
             val fill = medianRingColour(bitmap, outline, text, width, height) ?: continue
             val l = (text.l - 2).coerceAtLeast(0)
             val t = (text.t - 2).coerceAtLeast(0)
             val r = (text.r + 2).coerceAtMost(width)
             val b = (text.b + 2).coerceAtMost(height)
-            changed += fillMaskedRect(bitmap, outline, l, t, r, b, fill, width, height)
+            val fallbackPixels = fillMaskedRect(bitmap, outline, l, t, r, b, fill, width, height)
+            changed += fallbackPixels
+            if (fallbackPixels >= 4) notifyErasedOcrLines(text, recognizedLines, onOcrRegionErased)
         }
 
         // 2) Koharu's onomatopoeia_text instances: the mask here IS the lettering, so erase its shape and
@@ -85,7 +103,9 @@ internal object WebModeTextRemover {
         for (free in dets.filter {
             it.label == BubbleDetectorCore.CLS_TEXT_FREE && it.mask != null
         }) {
-            changed += eraseTextInstance(bitmap, free, width, height, padding = 2)
+            val pixels = eraseTextInstance(bitmap, free, width, height, padding = 2)
+            changed += pixels
+            if (pixels >= 4) notifyErasedOcrLines(free, recognizedLines, onOcrRegionErased)
         }
         // Older detectors may provide text boxes without instance masks; preserve their compatible fallback.
         for (free in dets.filter {
@@ -196,12 +216,18 @@ internal object WebModeTextRemover {
         instance: BubbleDetectorCore.Det,
         width: Int,
         height: Int,
-        padding: Int
+        padding: Int,
+        clipTo: BubbleDetectorCore.Det? = null
     ): Int = editInstanceMask(bitmap, instance, width, height, padding) { pixels, w, h, globalL, globalT ->
         val mask = ByteArray(w * h)
         var ink = 0
         for (yy in 0 until h) for (xx in 0 until w) {
-            if (instanceMaskNear(instance, globalL + xx + 0.5f, globalT + yy + 0.5f, padding)) {
+            val gx = globalL + xx + 0.5f
+            val gy = globalT + yy + 0.5f
+            // Padding removes antialiased fringe, but the detected balloon silhouette is a hard boundary.
+            // No cleaned pixel is allowed to damage its outline or nearby whisper/artwork.
+            if ((clipTo == null || clipTo.contains(gx, gy)) &&
+                instanceMaskNear(instance, gx, gy, padding)) {
                 mask[yy * w + xx] = 1
                 ink++
             }
@@ -216,6 +242,29 @@ internal object WebModeTextRemover {
             pixels[i] = restored[i]
         }
         changed
+    }
+
+    /**
+     * Mark a source OCR line as erased only when this model text-instance box covers a useful share of the line.
+     * This prevents a partial word mask from telling the overlay to remove its remaining cover.
+     */
+    private fun notifyErasedOcrLines(
+        instance: BubbleDetectorCore.Det,
+        recognizedLines: List<OcrBlock>,
+        callback: ((OcrBlock) -> Unit)?
+    ) {
+        if (callback == null) return
+        for (line in recognizedLines) {
+            if (line.w <= 0f || line.h <= 0f) continue
+            val l = line.cx - line.w / 2f
+            val t = line.cy - line.h / 2f
+            val r = line.cx + line.w / 2f
+            val b = line.cy + line.h / 2f
+            val iw = (minOf(r, instance.r.toFloat()) - maxOf(l, instance.l.toFloat())).coerceAtLeast(0f)
+            val ih = (minOf(b, instance.b.toFloat()) - maxOf(t, instance.t.toFloat())).coerceAtLeast(0f)
+            val lineArea = line.w * line.h
+            if (iw * ih >= lineArea * 0.35f) callback(line)
+        }
     }
 
     private inline fun editInstanceMask(

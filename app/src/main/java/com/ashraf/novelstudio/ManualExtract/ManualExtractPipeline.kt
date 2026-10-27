@@ -69,14 +69,12 @@ internal class ManualExtractPipeline(
         val m = ManualExtractMetrics()
         val tStart = SystemClock.elapsedRealtime()
         if (cancelled()) return fail(m, "cancelled")
-        // A crop that is only part of the source image means the user pointed somewhere; a full-panel crop
-        // (0,0,1,1 from the Extract button) means "read everything visible".
-        val hasTapPoint = !(x <= 0.001f && y <= 0.001f && w >= 0.999f && h >= 0.999f)
-
+        // The selected rectangle itself is the user's target. x/y are its page-normalized origin,
+        // not a tap point inside the cropped bitmap; never use them to discard OCR blocks within this selection.
         // 1) capture region only
         val raw = host.captureCrop(src, x, y, w, h) ?: return fail(m, "capture failed")
         m.mark("capture")
-        return ocrAndPlace(raw, src, x, y, w, h, hasTapPoint, m, tStart, script, cancelled)
+        return ocrAndPlace(raw, src, x, y, w, h, m, tStart, script, cancelled)
     }
 
     /**
@@ -89,11 +87,11 @@ internal class ManualExtractPipeline(
         if (cancelled()) { bitmap.recycle(); return fail(m, "cancelled") }
         m.cropW = bitmap.width; m.cropH = bitmap.height
         m.mark("capture")
-        return ocrAndPlace(bitmap, src, 0f, 0f, 1f, 1f, false, m, tStart, script, cancelled)
+        return ocrAndPlace(bitmap, src, 0f, 0f, 1f, 1f, m, tStart, script, cancelled)
     }
 
     private fun ocrAndPlace(
-        raw: Bitmap, src: String, x: Float, y: Float, w: Float, h: Float, hasTapPoint: Boolean,
+        raw: Bitmap, src: String, x: Float, y: Float, w: Float, h: Float,
         m: ManualExtractMetrics, tStart: Long, script: OcrScript, cancelled: () -> Boolean
     ): Result {
         var crop: Bitmap = raw
@@ -118,10 +116,8 @@ internal class ManualExtractPipeline(
             // 4) OCR crop only. A mark means "there IS text here", so read it as a deliberate recovery: first a
             //    padded, full-quality read of exactly what was marked.
             var outcome = readMarked(ocrBmp, script, ManualExtractConfig.OCR_PAD_FIRST)
-            // A crop can take in a neighbour bubble or a wide area selection. Without a tap position (Extract
-            // reads the whole visible panel) all blocks are correct; with one, keep only the text the user
-            // pointed at so the translation lands on the bubble they tapped.
-            if (hasTapPoint) outcome = outcome.narrowToTap(ocrBmp, x, y)
+            // The selected crop is the authoritative region. Keep every OCR block inside it, including missing
+            // lines near the top/left; x/y are not coordinates inside this cropped bitmap.
             m.mark("ocr")
             m.reads = 1
 
@@ -161,7 +157,7 @@ internal class ManualExtractPipeline(
                     m.reads++
                     if (local.blocks.isNotEmpty()) outcome = local
                 }
-                if (hasTapPoint) outcome = outcome.narrowToTap(ocrBmp, x, y)
+
                 m.mark("ocr_retry")
             }
             m.engine = outcome.engine

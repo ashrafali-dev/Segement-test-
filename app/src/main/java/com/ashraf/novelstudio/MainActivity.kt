@@ -8601,6 +8601,25 @@ return t.length>=40?'TXT:'+t:'';
         }
     }
 
+    /**
+     * Abort an image job before sending when OCR region identity is missing. Raw source text is not a valid
+     * fallback for Webtoon translation because it cannot be anchored to a bubble after the chatbot responds.
+     */
+    private fun abortImageTranslationWithoutRegions(tok: Int, ch: Chapter, reason: String) {
+        if (tok != runToken) return
+        OcrDiag.log("ALIGN_GUARD", "not sent: $reason page=${ch.url.take(90)}")
+        releaseDeepSeekHashBatch(ch)
+        if (isScanRegionBatch(ch)) {
+            scanRegionChapter = null
+            restoreChapterAfterBubbleJob(ch.url)
+        }
+        running = null
+        toast("❌ No valid OCR text regions were attached; nothing was sent. Reselect the missing area and run OCR again.")
+        updateProgressUi()
+        startNext()
+        handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
+    }
+
     private fun sendJob(tok: Int, ch: Chapter) {
         NovelStudioAnalytics.track(
             this, "translation_started",
@@ -8612,16 +8631,36 @@ return t.length>=40?'TXT:'+t:'';
         // the novel page and are removed from the final saved/clipboard translation.
         val host = Uri.parse(ch.url).host?.lowercase().orEmpty()
         val isWtrLab = host == "wtr-lab.com" || host.endsWith(".wtr-lab.com")
-        // Comic/manga chapters carry a bubble layout; number those by bubble index so marker N is bubble N.
-        // Novel chapters keep paragraph markers, which have nothing to do with bubbles.
-        val comicLayout = if (webModeOn() && ch.contentSel.isBlank())
+        val imageMode = webModeOn() && ch.contentSel.isBlank()
+        // An image translation is valid only when the OCR supplied positioned text regions. Never turn a missing
+        // layout into ordinary paragraph markers: that sends text with no coordinates and cannot be placed safely.
+        val storedLayout = if (imageMode)
             (WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)) else null
-        val marked = if (comicLayout != null && comicLayout.bubbles.isNotEmpty()) {
-            MarkerCodec.build(comicLayout.bubbles, comicLayout.titleOffset)
+        if (imageMode && (storedLayout == null || storedLayout.bubbles.isEmpty() ||
+                storedLayout.bubbles.none { it.sourceText.isNotBlank() })) {
+            abortImageTranslationWithoutRegions(tok, ch, "OCR returned no positioned text regions")
+            return
+        }
+        // Keep the marker offset and request body in sync. If a title marker is requested, include its body too;
+        // a bare titleOffset=1 used to shift all bubble markers while the prompt actually started at [001].
+        val comicLayout = if (imageMode && storedLayout != null) {
+            val offset = if (storedLayout.titleOffset > 0 && ch.title.isNotBlank()) 1 else 0
+            if (storedLayout.titleOffset == offset) storedLayout
+            else WebModeLayout(offset, storedLayout.bubbles).also { WebModeLayoutStore.setScan(ch.url, it) }
+        } else storedLayout
+        val markerTitle = if (imageMode && comicLayout?.titleOffset == 1) ch.title else ""
+        val marked = if (imageMode && comicLayout != null) {
+            MarkerCodec.build(comicLayout.bubbles, comicLayout.titleOffset, title = markerTitle)
         } else {
             addInternalMarkers(ch.text, splitSingleLines = isWtrLab)
         }
-        jobMarkers = Regex("(?m)^\\[\\d{3,}\\] ").findAll(marked).count()
+        val markerCount = Regex("(?m)^\\[\\d{3,}\\] ").findAll(marked).count()
+        if (imageMode && (comicLayout == null ||
+                markerCount != MarkerCodec.expectedMarkers(comicLayout.bubbles, comicLayout.titleOffset, markerTitle))) {
+            abortImageTranslationWithoutRegions(tok, ch, "OCR region markers did not match the bubble layout")
+            return
+        }
+        jobMarkers = markerCount
         val markerInstruction = """
 [Internal paragraph markers]
 Each paragraph starts with a marker such as [001], [002], [003].
@@ -8629,7 +8668,6 @@ Keep every marker exactly once, in the same order. Do not translate, remove,
 merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
-        val imageMode = webModeOn() && ch.contentSel.isBlank()
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
@@ -9087,13 +9125,31 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             handler.postDelayed({ pumpRealtimeAheadTranslation() }, 600L)
             return
         }
-        val manualText = promptWithGlossary(Prefs.activeTranslationPrompt(this), ch.text) + ch.text
+        val isImageRegionJob = webModeOn() && ch.contentSel.isBlank()
         val willRetry = retryList.isNotEmpty() && (failedRetryTries[keyOf(ch)] ?: 0) < 2
-        val retryNote = if (willRetry) "\n⏳ Retrying automatically in 15 s…" else ""
-        // The chapter goes straight into the chatbot box (just press Send); the clipboard is the fallback only.
+        if (isImageRegionJob) {
+            // A failed Send must not strand the OCR source text in the composer. Retry the exact marked,
+            // region-aware request instead; never ask the user to submit unanchored source paragraphs.
+            chatWv.evaluateJavascript(Js.clearSendState(), null)
+            chatWv.evaluateJavascript(Js.clearBox(), null)
+            if (willRetry) scheduleFailedRetry(retryList)
+            val recovery = if (willRetry) {
+                "The marked OCR request will retry automatically; no unanchored text was left in the composer."
+            } else {
+                "No unanchored text was left in the composer. Check the chatbot connection, then run OCR again."
+            }
+            toast("❌ $msg\n" + recovery)
+            updateProgressUi()
+            restoreChapterAfterBubbleJob()
+            handler.postDelayed({ pumpRealtimeAheadTranslation() }, 600L)
+            return
+        }
+        val manualText = promptWithGlossary(Prefs.activeTranslationPrompt(this), ch.text) + ch.text
+        // Non-image novels may expose paragraph text for a manual retry. Image/OCR jobs never do:
+        // without markers and their region map the source cannot be placed correctly.
         insertIntoChatBox(manualText) { ok ->
             if (!ok) copy(manualText)
-            toast("❌ $msg\n" + (if (ok) "✍️ Chapter text is in the chatbot box — press Send, then Copy → 💾." else "📋 Chapter copied. Paste it into the chatbot and tap Copy → 💾.") + retryNote)
+            toast("❌ $msg\n" + (if (ok) "✍️ Chapter text is in the chatbot box — press Send, then Copy → 💾." else "📋 Chapter copied. Paste it into the chatbot and tap Copy → 💾."))
         }
         if (retryList.isNotEmpty()) scheduleFailedRetry(retryList)
         updateProgressUi()
