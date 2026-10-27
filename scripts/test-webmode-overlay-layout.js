@@ -29,6 +29,18 @@ assert.equal(blockedTrackerUrl("https://cdn-ak-img.shonenjumpplus.com/public/upl
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
 assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
+const pollTrackerSource = extractFunction(mainActivity, "function blockedTracker(s)");
+const blockedPollTracker = new Function("document", pollTrackerSource + "; return blockedTracker;")({
+  baseURI: "https://shonenjumpplus.com/episode/test",
+});
+assert.equal(blockedPollTracker("https://cm.g.doubleclick.net/pixel?google_nid=treasuredata"), true,
+  "realtime viewport signatures must ignore DoubleClick beacons");
+assert.equal(blockedPollTracker("https://gum.criteo.com/sync?c=1"), true,
+  "realtime viewport signatures must ignore Criteo beacons");
+assert.equal(blockedPollTracker("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false,
+  "realtime viewport signatures must retain real comic pages");
+assert.ok(mainActivity.includes("!blockedTracker(s)"),
+  "realtime viewport image filtering must apply its tracker-host guard");
 assert.ok(extractor.includes("if (mo == null && !req.visibleOnly)"), "visible screen fallback must not abort before the first screenshot when DOM metadata JS times out");
 assert.ok(extractor.includes("FORCE_META_FALLBACK"), "missing visible metadata must be logged and continue through screenshot OCR");
 assert.ok(extractor.includes("!blockedTrackerUrl(s)"), "known ad/analytics image hosts must be filtered before panel-size heuristics");
