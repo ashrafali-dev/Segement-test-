@@ -171,7 +171,10 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                 OcrDiag.log("ALIGN_FALLBACK", "no=$no -> bubble=${targetIndex + 1} reason=$reason bubbles=$n")
             }
             if (MarkerCodec.hasPlacement(repaired)) return repaired
-            // Last resort for all-empty replies: paragraph alignment is accepted only when counts match.
+            // An explicit but malformed marker reply is NOT markerless prose. Never treat it as paragraphs:
+            // that could paint a marker body on the wrong bubble after its ID was rejected.
+            if (MarkerCodec.hasMarkers(text)) return null
+            // Markerless fallback is accepted only when paragraph count matches every bubble exactly.
             val byParas = MarkerCodec.alignByParagraphs(text, n) { _, reason ->
                 OcrDiag.log("ALIGN_SKIP", "positional fallback refused: $reason")
             }
