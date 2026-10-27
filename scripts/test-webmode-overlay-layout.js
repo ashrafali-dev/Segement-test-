@@ -85,8 +85,8 @@ assert.ok(remover.includes("val minimumErasedPixels = max(32, (innerArea * 0.06f
           remover.includes("val minimumTextEvidence = max(24, (text.w.toLong() * text.h * 6L / 100L).toInt())") &&
           remover.includes("selectedInsideCount < candidateInkCount * 0.55f"),
   "partial or ambiguous pixel changes must not remove the opaque cover or mark a source line fully erased");
-assert.ok(remover.includes("val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())"),
-  "a handful of changed pixels must not count as proof that all source glyphs disappeared");
+assert.ok(!remover.includes("val minimumErasedPixels = max(12, (innerArea * 0.01f).toInt())"),
+  "transparent rendering must not use the old permissive 1% erase threshold");
 assert.ok(bubbleCore.includes("maskBands(d, maxBands = 64)") &&
           bubbleCore.includes("(groupStart + 0.1)") && bubbleCore.includes("(endY - 0.1)"),
   "irregular bubble masks must retain an inset shape cover instead of falling back to a wide rectangle");
