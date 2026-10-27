@@ -76,18 +76,18 @@ class MarkerCodecTest {
         assertEquals("two", placed[1])
     }
 
-    @Test fun `out of range marker fills the empty spatial slot without overwriting valid markers`() {
-        val reply = "[001] one\n[999] two\n[003] three"
+    @Test fun `out of range marker is not reassigned to a different bubble`() {
+        val reply = "[001] one\\n[999] wrong bubble\\n[003] three"
         val firstPass = MarkerCodec.align(reply, 3)
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
-        assertEquals(listOf("one", "two", "three"), repaired)
+        assertEquals(listOf("one", null, "three"), repaired)
     }
 
-    @Test fun `duplicate marker body is recovered into the next empty spatial slot`() {
-        val reply = "[001] first\n[001] second\n[003] third"
+    @Test fun `duplicate marker body is not moved to the next bubble`() {
+        val reply = "[001] first\\n[001] ambiguous second\\n[003] third"
         val firstPass = MarkerCodec.align(reply, 3)
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
-        assertEquals(listOf("first", "second", "third"), repaired)
+        assertEquals(listOf("first", null, "third"), repaired)
     }
 
     @Test fun `empty body is never recovered as a translation`() {
@@ -99,12 +99,20 @@ class MarkerCodecTest {
         assertEquals("third", repaired[2])
     }
 
-    @Test fun `markerless paragraphs use actual spatial order even when counts differ`() {
+    @Test fun `markerless paragraph count mismatch is not spatially guessed`() {
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
-            "upper whisper\n\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
+            "upper whisper\\n\\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
+        )
+        assertEquals(listOf(null, null, null), repaired)
+    }
+
+    @Test fun `markerless paragraphs align spatially only with exact bubble count`() {
+        val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
+            "upper whisper\\n\\nmain bubble\\n\\nlower bubble", 3, 0,
+            listOf(null, null, null), listOf(2, 0, 1)
         )
         assertEquals("main bubble", repaired[0])
-        assertNull(repaired[1])
+        assertEquals("lower bubble", repaired[1])
         assertEquals("upper whisper", repaired[2])
     }
 
