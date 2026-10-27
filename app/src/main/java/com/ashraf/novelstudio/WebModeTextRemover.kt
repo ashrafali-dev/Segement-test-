@@ -887,6 +887,7 @@ internal object WebModeTextRemover {
 
                 val queue = IntArray(regionCount)
                 var selectedCount = 0
+                var selectedInsideCount = 0
                 for (start in 0 until regionCount) {
                     if (candidate[start].toInt() == 0 || seen[start].toInt() != 0) continue
                     var head = 0
@@ -936,6 +937,7 @@ internal object WebModeTextRemover {
                         componentPixels > maxComponentPixels) continue
                     for (i in 0 until tail) selected[queue[i]] = 1
                     selectedCount += componentPixels
+                    selectedInsideCount += insidePixels
                 }
 
                 // If the inferred mask covers too much of the OCR box, it is probably art rather than text.
@@ -950,7 +952,7 @@ internal object WebModeTextRemover {
                 // If most candidate ink was rejected as ambiguous/art, we cannot prove the whole source line
                 // has disappeared. Leave the original under an opaque shaped cover instead.
                 if (selectedCount < max(32, (innerArea * 0.06f).toInt()) ||
-                    candidateInkCount == 0 || selectedCount < candidateInkCount * 0.55f ||
+                    candidateInkCount == 0 || selectedInsideCount < candidateInkCount * 0.55f ||
                     selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
                 // Flat bubble: mop up the faint ghosts the strict glyph test leaves behind (anti-aliasing, JPEG
