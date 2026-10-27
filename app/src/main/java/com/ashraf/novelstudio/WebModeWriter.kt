@@ -477,7 +477,8 @@ internal object WebModeWriter {
         var shapeCap=Number(b.__nsShapeMaxW),pageW=Number(b.__nsShapePageW);
         if(!bands||!bands.length||b.__nsShapeFitBlocked||!isFinite(shapeCap)||shapeCap<8)return false;
         var oldPad=b.style.padding,oldW=availW,oldH=availH,oldTW=t.style.width,
-            oldMW=t.style.maxWidth,oldFS=t.style.fontSize,oldOverflow=t.style.overflow;
+            oldMW=t.style.maxWidth,oldFS=t.style.fontSize,oldOverflow=t.style.overflow,
+            oldMargin=t.style.margin,oldPosition=t.style.position,oldLeft=t.style.left,oldTransform=t.style.transform;
         // The parent is the source/cover box, not necessarily the full balloon. Allow a wider child up to
         // the widest real interior band; every candidate's rendered glyphs are checked against those bands.
         var upperW=Math.max(8,Math.min(shapeCap,isFinite(pageW)&&pageW>8?pageW-4:shapeCap));
@@ -485,6 +486,9 @@ internal object WebModeWriter {
         if(preferWide)startW=Math.min(upperW,Math.max(startW+6,startW*1.16));
         startW=Math.min(startW,upperW);
         b.style.padding='3px';
+        // A wider child must remain centred on the original OCR/bubble anchor instead of starting at the
+        // parent's left edge when its width exceeds the old source-text box.
+        t.style.margin='0';t.style.position='relative';t.style.left='50%';t.style.transform='translateX(-50%)';
         availH=Math.max(8,boxH*0.86);
         var chosen=null;
         for(var wi=0;wi<=8;wi++){
@@ -514,6 +518,7 @@ internal object WebModeWriter {
         }
         b.style.padding=oldPad;availW=oldW;availH=oldH;
         t.style.width=oldTW;t.style.maxWidth=oldMW;t.style.fontSize=oldFS;t.style.overflow=oldOverflow;
+        t.style.margin=oldMargin;t.style.position=oldPosition;t.style.left=oldLeft;t.style.transform=oldTransform;
         b.style.overflow='hidden';b.__nsShapeFitApplied=false;
         return false;
       }
