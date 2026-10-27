@@ -92,6 +92,7 @@ ToonSensei-তে আলাদা কোনো সাধারণ অনুব�
 </p>
 <p align="center">
   <img src="docs/screenshots/Screenshot_20261027_161601_Video%20Player.jpg" alt="Webtoon ও Manga অনুবাদ 7" width="220" />
+  <img src="docs/screenshots/Screenshot_20261027_162357.jpg" alt="Webtoon ও Manga অনুবাদ 8" width="220" />
 </p>
 
 ## কীভাবে কাজ করে
