@@ -2108,10 +2108,10 @@ internal class WebModeExtractor(
                         )
                         val cleanerMode = if (fullTextRemoverOn) "full" else "balloon-mask-only"
                         OcrDiag.log("CLEAN", "mode=$cleanerMode ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} masks=${panelDetections?.count { it.mask != null } ?: 0} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
-                        // The picture stays untouched when the cleaner declines (artwork, nothing found). The
-                        // overlay then has to cover the old lettering itself; these bands come from the model's
-                        // silhouette, so the cover follows the balloon instead of being its bounding box.
-                        if (!cleaned) shapeCoverBands(bytes, bubbles, panelDetections)
+                        // Keep safe cover geometry even when SOME pixels were cleaned: a stored cleaned image can
+                        // still contain an untranslated/partially erased bubble, which must retain an opaque fallback.
+                        // Geometry is separate from the per-bubble "all source ink erased" decision.
+                        shapeCoverBands(bytes, bubbles, panelDetections)
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
@@ -2562,6 +2562,9 @@ internal class WebModeExtractor(
                     cx = (rb[0] + rb[2]) / 2f; cy = (rb[1] + rb[3]) / 2f
                     bw = (rb[2] - rb[0]) - 4f; bh = (rb[3] - rb[1]) - 4f
                 }
+                // Preserve the actual source glyph bounds BEFORE cx/cy/w/h may expand to the entire speech bubble.
+                // Cleaning must use these coordinates; the larger cover bounds are for overlay geometry only.
+                val ocrCx = cx; val ocrCy = cy; val ocrBw = bw; val ocrBh = bh
                 // Speech-bubble SHAPE (the Manga Translator idea): rebuild the bubble around the lettering and write the
                 // translation into the largest rectangle that fits INSIDE it. The cover box only has to hide the old
                 // lettering. Without this the text was fitted into the lettering's own tight box (a long translation got
@@ -2652,7 +2655,11 @@ internal class WebModeExtractor(
                             lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
                         }
                     } else emptyList(),
-                    modelMaskFit = modelMaskFitUsed
+                    modelMaskFit = modelMaskFitUsed,
+                    ocrCx = (x0 + ocrCx * k) / fullW,
+                    ocrCy = (y0 + ocrCy * k) / fullH,
+                    ocrW = ocrBw * k / fullW,
+                    ocrH = ocrBh * k / fullH
                 )
                 // Same text seen by two overlapping slices: keep the bigger box once.
                 var dup = -1
