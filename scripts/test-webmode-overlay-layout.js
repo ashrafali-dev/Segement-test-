@@ -188,6 +188,14 @@ assert.ok(bodyMatch[1].includes("function fitWithinShape(preferWide)") &&
   "text may widen only after line-by-line checks against the bubble's detected shape");
 assert.ok(bodyMatch[1].includes("b.__nsSafeBandsPx=safeBands"),
   "mask bands must be mapped into the live image's viewport geometry");
+assert.ok(bodyMatch[1].includes("gx-gw/2+cl*gw") && bodyMatch[1].includes("gy-gh/2+ct*gh"),
+  "bubble-relative safe bands must be translated through the bubble's own image-space origin");
+assert.ok(bodyMatch[1].includes("b.__nsShapeMaxW=shapeMaxW"),
+  "the fitter must use the detected balloon's real safe-band width, not only the OCR box width");
+assert.ok(bodyMatch[1].includes("b.style.overflow='visible';b.__nsShapeFitApplied=true"),
+  "validated wide text must not be clipped by the narrower source/cover box");
+assert.ok(bodyMatch[1].includes("tw>bw+1.5&&!R.b.__nsShapeFitApplied"),
+  "post-layout verification must not shrink a shape-validated translation back into the old box");
 assert.ok(!bodyMatch[1].includes("overflowWrap='anywhere'") && !bodyMatch[1].includes("overflow-wrap:anywhere"),
   "words must never be split across lines: long words shrink the font instead");
 assert.ok(bodyMatch[1].includes("Words are never split"), "fit() must document the no-split rule");
