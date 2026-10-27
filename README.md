@@ -58,6 +58,42 @@ Designed for phones with limited RAM. Like Real-Time, it works with the visible 
 
 
 
+## Screenshots
+
+These screenshots show ToonSensei in use for text-based novels and image-based webtoons/manga.
+
+### Novel reading and translation
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_052425.jpg" alt="Novel reading and translation 1" width="220" />
+  <img src="docs/screenshots/Screenshot_20261025_065845.jpg" alt="Novel reading and translation 2" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_071827.jpg" alt="Novel reading and translation 3" width="220" />
+  <img src="docs/screenshots/Screenshot_20261025_100050.jpg" alt="Novel reading and translation 4" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_201219.jpg" alt="Novel reading and translation 5" width="220" />
+</p>
+
+### Webtoon and manga translation
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261026_210736.jpg" alt="Webtoon and manga translation 1" width="220" />
+  <img src="docs/screenshots/Screenshot_20261026_210830.jpg" alt="Webtoon and manga translation 2" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261026_211501.jpg" alt="Webtoon and manga translation 3" width="220" />
+  <img src="docs/screenshots/Screenshot_20261026_212350.jpg" alt="Webtoon and manga translation 4" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261027_161510_Video%20Player.jpg" alt="Webtoon and manga translation 5" width="220" />
+  <img src="docs/screenshots/Screenshot_20261027_161539_Video%20Player.jpg" alt="Webtoon and manga translation 6" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261027_161601_Video%20Player.jpg" alt="Webtoon and manga translation 7" width="220" />
+</p>
+
 ## How it works
 
 **For a web novel:** ToonSensei reads the chapter text available from the reader page, sends it to the selected chatbot, and then places or saves the translated result.
