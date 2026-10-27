@@ -77,6 +77,13 @@ versionName '1.7.1'
             if (fixture) {
                 t.systemProperty 'koharu.fixture', fixture.toString()
             }
+            // A bare "AssertionError at Foo.kt:42" in CI forces guessing at the actual and expected values.
+            // Print the failing test's own output and its exception message.
+            t.testLogging {
+                events "failed"
+                exceptionFormat "full"
+                showStandardStreams true
+            }
         }
     }
 }
