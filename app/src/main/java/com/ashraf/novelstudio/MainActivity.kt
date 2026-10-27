@@ -9491,10 +9491,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     return
                 }
                 val cumulative = WebModeLayoutStore.mergeTranslated(this, ch.url, wmLayout, wmPlaced)
+                val requiredPlacementKeys = wmLayout.bubbles.mapIndexedNotNull { index, bubble ->
+                    if (wmPlaced.getOrNull(index).isNullOrBlank()) null else WebModeLayout.bubbleIdentity(bubble)
+                }.toSet()
                 wmScript = WebModeWriter.bubbleScript(
                     cumulative,
                     cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-                    Prefs.fontFile(this), pageKey(ch.url)
+                    Prefs.fontFile(this), pageKey(ch.url),
+                    requiredBubbleKeys = requiredPlacementKeys
                 )
             } else if (wmLayout != null && wmPlaced != null) {
                 val translatedLayout = WebModeLayout.translated(wmLayout, wmPlaced)
@@ -9506,13 +9510,16 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 return
             }
             val placementId = beginTranslationPlacement()
-            novelWv.evaluateJavascript(wmScript) { r ->
+            var placementFinished = false
+            fun finishPlacement(ok: Boolean) {
+                if (placementFinished) return
+                placementFinished = true
                 finishTranslationPlacement(placementId)
                 if (lastChapter !== ch) {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
-                    return@evaluateJavascript
+                    return
                 }
-                if (r != null && r.contains("ok")) {
+                if (ok) {
                     if (livePanelBatch) {
                         val matched = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
                             if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else WebModeLayout.fingerprint(bubble)
@@ -9523,10 +9530,34 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     shownTranslated = true
                     updatePill()
                 } else {
-                    if (livePanelBatch) releaseDeepSeekHashBatch(ch)
-                    toast("⚠️ Could not show the translation on this page; it is saved in the library")
+                    if (livePanelBatch) {
+                        releaseDeepSeekHashBatch(ch)
+                        toast("⚠️ The translation could not be attached to the visible bubbles; they can be retried by the next scan")
+                    } else {
+                        toast("⚠️ Could not show the translation on this page; it is saved in the library")
+                    }
                 }
                 if (livePanelBatch) restoreChapterAfterBubbleJob(ch.url)
+            }
+            fun waitForRequiredPlacement(attemptsLeft: Int) {
+                if (lastChapter !== ch) { finishPlacement(false); return }
+                novelWv.evaluateJavascript(
+                    "(function(){var r=window.__nsLayoutReport;" +
+                        "return r&&r.requiredTotal>0&&r.requiredVisible>=r.requiredTotal?'ok':'pending';})()"
+                ) { status ->
+                    if (status != null && status.contains("ok")) finishPlacement(true)
+                    else if (attemptsLeft > 0) handler.postDelayed({ waitForRequiredPlacement(attemptsLeft - 1) }, 250L)
+                    else finishPlacement(false)
+                }
+            }
+            novelWv.evaluateJavascript(wmScript) { r ->
+                if (livePanelBatch && r != null && r.contains("pending")) {
+                    // The overlay will retry geometry binding as the canvas settles. Confirm a real placement
+                    // before marking these OCR hashes complete, otherwise the scanner silently skips them forever.
+                    waitForRequiredPlacement(6)
+                } else {
+                    finishPlacement(r != null && r.contains("ok"))
+                }
             }
             return
         }
