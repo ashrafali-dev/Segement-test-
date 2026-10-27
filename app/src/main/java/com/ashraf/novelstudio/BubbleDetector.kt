@@ -56,6 +56,7 @@ internal object BubbleDetector {
     private var session: Loaded? = null
     private var sessionStamp = 0L
     @Volatile private var forceLowMemoryUntilMs = 0L
+    @Volatile private var pressureInputSize = PRESSURE_INPUT_SIZE
     @Volatile private var trimReleaseQueued = false
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), MODEL_FILE_NAME)
@@ -111,7 +112,7 @@ internal object BubbleDetector {
      * smaller inputs and an unoptimised single-thread CPU session avoid a second activation-memory spike.
      */
     private fun recommendedInputSize(c: Context): Int {
-        if (SystemClock.elapsedRealtime() < forceLowMemoryUntilMs) return PRESSURE_INPUT_SIZE
+        if (SystemClock.elapsedRealtime() < forceLowMemoryUntilMs) return pressureInputSize
         val ram = ramSnapshot(c)
         val lowHardware = ram.lowRamDevice || ram.totalMb in 1..4600L
         if (lowHardware) {
@@ -144,7 +145,21 @@ internal object BubbleDetector {
      * current inference leaves the process-wide gate.
      */
     fun onMemoryPressure(level: Int) {
-        forceLowMemoryUntilMs = SystemClock.elapsedRealtime() + 60_000L
+        val now = SystemClock.elapsedRealtime()
+        // RUNNING_LOW (10) is common on the A13 while WebView is open. Forcing 256px for every
+        // low-pressure callback makes Japanese vertical text too tiny for useful segmentation.
+        // Use a stride-aligned 320px input at level 10; reserve 256px for CRITICAL (15+) pressure.
+        when {
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> {
+                pressureInputSize = PRESSURE_INPUT_SIZE
+                forceLowMemoryUntilMs = now + 60_000L
+            }
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> {
+                pressureInputSize = 320
+                forceLowMemoryUntilMs = now + 30_000L
+            }
+            else -> return
+        }
         if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || trimReleaseQueued) return
         trimReleaseQueued = true
         Thread({
