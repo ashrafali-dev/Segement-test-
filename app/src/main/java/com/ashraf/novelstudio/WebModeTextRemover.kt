@@ -709,6 +709,7 @@ internal object WebModeTextRemover {
                 }
                 val stored = storeCleanedBitmap(context, sourceUrl, bitmap, erasedKeys)
                 OcrDiag.log("MASK_CLEAN", "ocrRegions=${recognizedLines.size} balloonMasks=${balloonMasks.size} textMasks=${textMasks.size} erasedBubbles=0 pixels=$changedPixels stored=$stored opaqueCoverFallback=true")
+                return stored
             }
 
             var totalRemoved = 0
