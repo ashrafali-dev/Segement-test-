@@ -2157,30 +2157,33 @@ internal class WebModeExtractor(
             var ocrMs = 0L
             var fitMs = 0L
             var lineCount = 0
-            // Google Lens is a network wait; the bubble detector only needs the bitmap. Run them side by side
-            // instead of one after the other (the detector used to start only after Lens had answered).
+            // Run Koharu alongside OCR for BOTH visible and read-ahead panels. The old gate only started it
+            // on non-fast reads, and then waited after Lens had already returned; most visible Japanese panels
+            // therefore used the pixel fallback and never applied the segmentation masks to their first overlay.
             var detFuture: java.util.concurrent.Future<List<BubbleDetectorCore.Det>?>? = null
+            var detectorKey: String? = null
+            var cachedDetectorResult: List<BubbleDetectorCore.Det>? = null
+            var detectorAttempted = false
             try {
+            val detectorWanted = BubbleDetector.enabled(wv.context)
+            if (detectorWanted) {
+                detectorKey = try { md5Of(bmp) } catch (_: Throwable) { null }
+                detectorKey?.let { key ->
+                    cachedDetectorResult = synchronized(detectCache) { detectCache[key] }
+                }
+                if (cachedDetectorResult == null && detectorKey != null) {
+                    // Only one deep bitmap snapshot may be alive at once on this low-memory phone.
+                    // Key the async result by image content so a timed-out first pass can reuse it later.
+                    detFuture = submitDetectorSnapshot(wv.context, bmp, detectorKey)
+                    detectorAttempted = detFuture != null
+                } else {
+                    detectorAttempted = cachedDetectorResult != null
+                }
+            }
             // Audit raw lines BEFORE joining paragraphs. A merged paragraph rectangle hides skipped
             // middle rows from the ink detector. Never discard an edge reading on the assumption that
             // another slice will find it; the fuller overlapping reading can upgrade it below.
             val tOcr = android.os.SystemClock.elapsedRealtime()
-            // Realtime (fastMode) is latency-bound: the ONNX bubble detector takes ~1.9 s and is serialized on
-            // the process-wide OnnxHeavyGate lock, so blocking readSlice on it delayed every Lens reply by
-            // seconds (the "DETECT ~3.8 s" cycles). Geometry falls back cleanly to the pixel bubble finder when
-            // the detector is off, so skip it here and let the visible text reach the overlay immediately.
-            // The detector is also needed when the full Text Remover is OFF: its balloon masks
-            // are then the only cleaning geometry. Do not tie mask-only mode to the Bubble Fit toggle.
-            val modelDetectorWanted = Prefs.bool(wv.context, "wmBubbleFit", true) ||
-                !Prefs.bool(wv.context, "wmTextRemoval2", true)
-            val detectWanted = !fastMode && preRecognized == null &&
-                (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true &&
-                modelDetectorWanted && BubbleDetector.enabled(wv.context)
-            if (detectWanted) {
-                // This work can outlive readSlice (for example if OCR returns early), so do not give the
-                // worker a bitmap owned by this method: the caller recycles that source at slice completion.
-                detFuture = submitDetectorSnapshot(wv.context, bmp, null)
-            }
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
             val blocks = OcrPost.mergeNeighbours(
@@ -2212,35 +2215,27 @@ internal class WebModeExtractor(
                     ))
                 }
             }
-            // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
-            // It only adds information: which lines belong to different bubbles and which lettering is free text.
-            // In realtime we never wait on it: an unfinished detection is cancelled so the Lens text is emitted now.
+            // The detector has been running in parallel with OCR. Since Lens can take ~0.8–1.3 s, a short
+            // post-OCR wait usually gives the mask result with little extra latency. Crucially, this wait is on the
+            // OCR worker, never on Main/UI. If the result is late, the async job still fills detectCache by image hash.
             val earlyDet = detFuture
-            val dets: List<BubbleDetectorCore.Det>? =
-                if (earlyDet != null) {
-                    // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
-                    if (fastMode && !earlyDet.isDone) null
-                    else try { earlyDet.get() } catch (_: Exception) { null }
-                } else if (modelDetectorWanted) {
-                    // Realtime used to skip the detector entirely, so mask colour, bubble geometry and placement
-                    // all came from the pixel guess. It is now run, but with a short budget: if the model has not
-                    // answered yet the pixel path is used for THIS pass and the result is cached for the next
-                    // one, so a visible panel is never stalled by it.
-                    val det = if (fastMode) {
-                        // When Text Remover is OFF, the balloon mask is the selected erasing geometry.
-                        // Let the OCR worker wait for the model (not the UI thread); otherwise a 450 ms
-                        // timeout would return OCR first and permanently skip mask cleaning for this pass.
-                        val maskOnlyMode = !Prefs.bool(wv.context, "wmTextRemoval2", true)
-                        detectWithBudget(
-                            wv.context, bmp,
-                            waitMs = if (maskOnlyMode) DETECT_MASK_ONLY_WAIT_MS else DETECT_FAST_WAIT_MS
-                        )
-                    } else BubbleDetector.detect(wv.context, bmp)
-                    det
-                } else null
-            // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
-            // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
-            val detectRan = detectWanted || earlyDet != null || (modelDetectorWanted && dets != null)
+            val dets: List<BubbleDetectorCore.Det>? = cachedDetectorResult ?: if (earlyDet != null) {
+                try {
+                    if (fastMode) earlyDet.get(DETECT_FAST_WAIT_MS, TimeUnit.MILLISECONDS)
+                    else earlyDet.get()
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    null
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                // Another image may own the single-flight inference slot. Recheck cache in case it completed
+                // while Lens was running, instead of reporting a false "detector skipped".
+                detectorKey?.let { key -> synchronized(detectCache) { detectCache[key] } }
+            }
+            detectorAttempted = detectorAttempted || earlyDet != null || dets != null
+            // Keep status truthful: distinguish a model that is pending from a model that truly was disabled.
+            val detectRan = detectorAttempted
             // Preserve the detector's instance masks while mapping each local slice/tile box back to
             // native source-image pixels. Mask samples are normalized to their box, so the same mask
             // remains valid when the box is scaled and offset.
@@ -2265,9 +2260,16 @@ internal class WebModeExtractor(
                     synchronized(detectBySrc) { detectBySrc[src] = BubbleDetectorCore.merge(sourceDets) }
                 }
             }
+            val detectorState = when {
+                dets != null -> BubbleDetector.lastInfo.ifBlank { "ready" }
+                !detectorWanted -> BubbleDetector.disabledReason(wv.context) ?: "off"
+                earlyDet != null && !earlyDet.isDone -> "pending (cached when finished)"
+                detectorAttempted -> "attempted; no result"
+                else -> "busy: another image owns the single-flight slot"
+            }
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
-                "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
+                "lines=${blocks.size} status=$detectorState parallel=${earlyDet != null} fast=$fastMode")
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })
