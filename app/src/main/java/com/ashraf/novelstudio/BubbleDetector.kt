@@ -385,8 +385,9 @@ internal object BubbleDetector {
                 Log.i(TAG, "Koharu low-memory self-test passed")
 
                 release()
-                if (target.exists() && !target.delete()) throw IllegalStateException("Could not replace previous detector model")
-                if (!part.renameTo(target)) {
+                // Install without ever leaving the user with no model (see promoteVerifiedModel).
+                val promoted = promoteVerifiedModel(part, target)
+                if (!promoted) {
                     if (part.length() != MODEL_BYTES ||
                         !sha256(part).equals(MODEL_SHA256, ignoreCase = true)) {
                         throw IllegalStateException("Verified Koharu file was lost before installation")
@@ -418,6 +419,29 @@ internal object BubbleDetector {
                 }
             }
         }.apply { isDaemon = true; name = "ns-koharu-download" }.start()
+    }
+
+    /**
+     * Install the already-verified [part] as [target] without ever destroying a working model.
+     *
+     * `part` has passed the low-memory self-test, so it is the file we want. The previous [target] is
+     * moved aside to `<target>.bak` (a same-directory rename, effectively atomic) and only discarded
+     * once [part] is in place. If the final rename fails, the backup is put back, so a failed install
+     * leaves the existing model usable. Returns true on success. Kept file-only so it is JVM-testable.
+     */
+    internal fun promoteVerifiedModel(part: File, target: File): Boolean {
+        val backup = File(target.path + ".bak")
+        try { if (backup.exists()) backup.delete() } catch (_: Throwable) {}
+        val hadPrevious = target.isFile
+        if (hadPrevious && !target.renameTo(backup)) return false
+        if (!part.renameTo(target)) {
+            if (hadPrevious) {
+                try { if (backup.isFile && !target.exists()) backup.renameTo(target) } catch (_: Throwable) {}
+            }
+            return false
+        }
+        try { if (backup.isFile) backup.delete() } catch (_: Throwable) {}
+        return true
     }
 
     private fun sha256(file: File): String {
