@@ -566,10 +566,9 @@ internal object WebModeTextRemover {
         val t = (cy - bh / 2f).toInt().coerceIn(0, height - 1)
         val r = kotlin.math.ceil(cx + bw / 2f).toInt().coerceIn(l + 1, width)
         val b = kotlin.math.ceil(cy + bh / 2f).toInt().coerceIn(t + 1, height)
-        val textBox = BubbleDetectorCore.Det(BubbleDetectorCore.CLS_TEXT_BUBBLE, 1f, l, t, r, b)
         return dets.asSequence()
             .filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null && it.contains(cx, cy) }
-            .filter { BubbleDetectorCore.maskCoverage(it, textBox) >= 0.36f }
+            .filter { BubbleDetectorCore.maskCoverage(it, l, t, r, b) >= 0.36f }
             .minByOrNull { it.area }
     }
 
