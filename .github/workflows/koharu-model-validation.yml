@@ -1,0 +1,88 @@
+name: Validate Koharu ONNX model
+
+# Heavyweight validation that cannot run on the development phone:
+# downloads the pinned 42 MB model, verifies it, runs real CPU inference, then feeds the
+# captured tensors through the production Kotlin decoder. The digests and shapes printed
+# here are the evidence for the model contract documented in KoharuSegCore.kt.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/all-modes-markers-masking-20261026
+    paths:
+      - "scripts/koharu_model_check.py"
+      - "app/src/main/java/com/ashraf/novelstudio/KoharuSegCore.kt"
+      - "app/src/main/java/com/ashraf/novelstudio/BubbleDetector.kt"
+      - "app/src/test/java/com/ashraf/novelstudio/KoharuRealFixtureTest.kt"
+      - ".github/workflows/koharu-model-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  model-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ONNX toolchain
+        run: |
+          python -m pip install --upgrade pip
+          # Pin a range; these are the libraries the model card documents.
+          python -m pip install "onnx>=1.16,<1.20" "onnxruntime>=1.19,<1.22" "numpy>=1.26,<3"
+
+      - name: Download, verify, inspect and smoke-test the pinned model
+        run: |
+          python scripts/koharu_model_check.py \
+            --model "$RUNNER_TEMP/koharu-yolo26s.onnx" \
+            --fixture-dir "$RUNNER_TEMP/koharu-fixture" \
+            --input-w 384 --input-h 512 \
+            | tee "$RUNNER_TEMP/model-check.log"
+
+      - name: Upload model contract log
+        uses: actions/upload-artifact@v4
+        with:
+          name: koharu-model-contract-log
+          path: ${{ runner.temp }}/model-check.log
+          if-no-files-found: error
+          retention-days: 14
+
+  decoder-against-real-tensors:
+    needs: model-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ONNX toolchain
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "onnx>=1.16,<1.20" "onnxruntime>=1.19,<1.22" "numpy>=1.26,<3"
+
+      - name: Regenerate real-tensor fixture
+        run: |
+          python scripts/koharu_model_check.py \
+            --model "$RUNNER_TEMP/koharu-yolo26s.onnx" \
+            --fixture-dir "$RUNNER_TEMP/koharu-fixture" \
+            --input-w 384 --input-h 512
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Run the Kotlin decoder against the real model output
+        run: |
+          # Debug unit tests do not touch release signing, so no keystore is needed here.
+          gradle :app:testDebugUnitTest --no-daemon \
+            -Pkoharu.fixture="$RUNNER_TEMP/koharu-fixture"

@@ -67,6 +67,18 @@ versionName '1.7.1'
         targetCompatibility JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = '17' }
+
+    // The real-model decoder test reads tensors captured by scripts/koharu_model_check.py.
+    // Locally there is no fixture (the 42 MB model is never downloaded on the phone), so the
+    // test skips. CI passes -Pkoharu.fixture=<dir> and the path is forwarded to the test JVM.
+    testOptions {
+        unitTests.all { t ->
+            def fixture = project.findProperty('koharu.fixture')
+            if (fixture) {
+                t.systemProperty 'koharu.fixture', fixture.toString()
+            }
+        }
+    }
 }
 
 dependencies {
