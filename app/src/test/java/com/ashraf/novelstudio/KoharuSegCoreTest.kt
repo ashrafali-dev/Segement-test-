@@ -1,5 +1,6 @@
 package com.ashraf.novelstudio
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -74,6 +75,29 @@ class KoharuSegCoreTest {
         assertFalse(KoharuSegCore.validInputSize(96))
         assertFalse(KoharuSegCore.validInputSize(500))
         assertFalse(KoharuSegCore.validInputSize(2048))
+    }
+
+    @Test fun normalizesChannelFirstPredictionTensorByRuntimeShape() {
+        val instances = 3
+        val rowMajor = FloatArray(instances * KoharuSegCore.ROW_SIZE) { it.toFloat() }
+        val channelFirst = FloatArray(rowMajor.size)
+        for (i in 0 until instances) {
+            for (field in 0 until KoharuSegCore.ROW_SIZE) {
+                channelFirst[field * instances + i] = rowMajor[i * KoharuSegCore.ROW_SIZE + field]
+            }
+        }
+        val normalized = KoharuSegCore.normalizePredictionRows(
+            channelFirst, longArrayOf(1, KoharuSegCore.ROW_SIZE.toLong(), instances.toLong())
+        )
+        assertArrayEquals(rowMajor, normalized, 0f)
+    }
+
+    @Test fun keepsOfficialInstanceMajorPredictionTensorUnchanged() {
+        val values = FloatArray(2 * KoharuSegCore.ROW_SIZE) { it.toFloat() }
+        val normalized = KoharuSegCore.normalizePredictionRows(
+            values, longArrayOf(1, 2, KoharuSegCore.ROW_SIZE.toLong())
+        )
+        assertArrayEquals(values, normalized, 0f)
     }
 
     @Test fun rejectsOutputWithWrongRowContract() {
