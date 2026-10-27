@@ -9,14 +9,27 @@ import kotlin.math.roundToInt
 /**
  * Decoder for the dynamic-shape Koharu YOLO26s-seg ONNX export.
  *
- * Contract (ShiniShiho/koharu-yolo26s-onnx, pinned export):
+ * Contract (ShiniShiho/koharu-yolo26s-onnx, pinned revision
+ * e8d0110da6281b93ee6f6509c741931c49ace9fe, 41,604,574 bytes,
+ * SHA-256 25a0b06c4ce7ee7c247068a6b3633f98d0f5e913c26ef1cbd06bec3407e914f4):
  * input:  [1,3,H,W], RGB float 0..1, letterboxed with RGB 114; H/W multiples of 32.
  * output0:[1,instances,38], rows = x1,y1,x2,y2,confidence,class_id,32 mask coefficients.
- * output1:[1,32,H/4,W/4], shared mask prototypes.
+ * output1:[1,32,H/4,W/4], shared mask prototypes (sigmoid applied).
+ *
+ * Verified against the real graph (scripts/koharu_model_check.py + CI): a 512x384 input
+ * yields output0 [1,300,38] (instances-major) and output1 [1,32,128,96]. The rows are
+ * xyxy + (top-1 class score) + (that class index) + 32 mask logit coefficients — NOT four
+ * per-class probabilities. The head is end-to-end, so no NMS is required, but it re-emits a
+ * few same-class duplicates (deduped by IoU in decode()).
  *
  * Koharu classes are mapped into NovelStudio's existing detector contract:
  * 0 frame -> ignored, 1 dialogue_text -> CLS_TEXT_BUBBLE,
  * 2 balloon -> CLS_BUBBLE, 3 onomatopoeia_text -> CLS_TEXT_FREE.
+ *
+ * Limitation: Koharu has no dedicated "whisper" class. Whisper/narration lettering is
+ * classified as dialogue_text or onomatopoeia_text depending on its appearance; the pipeline
+ * keeps it separate from a neighbouring balloon using the instance mask (see freeAt/maskCoverage
+ * in WebModeExtractor), not a model class.
  */
 internal object KoharuSegCore {
     const val DEFAULT_SIZE = 512

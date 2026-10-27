@@ -101,6 +101,46 @@ class KoharuRealFixtureTest {
         }
         println("real fixture: decoded ${dets.size} detections " +
             dets.groupingBy { it.label }.eachCount())
+
+        // The synthetic page may not reach the production 0.25 threshold in every class. Decode again
+        // at a low floor so the mask-reconstruction path is exercised by real tensors whenever the model
+        // produced any non-frame candidate at all. Only run the mask checks if such a candidate exists.
+        var anyNonFrameAboveLowFloor = false
+        val instancesLow = pred.size / KoharuSegCore.ROW_SIZE
+        for (i in 0 until instancesLow) {
+            val o = i * KoharuSegCore.ROW_SIZE
+            if (pred[o + 4].isFinite() && pred[o + 4] >= 0.02f && Math.round(pred[o + 5]) != 0) {
+                anyNonFrameAboveLowFloor = true
+                break
+            }
+        }
+        if (!anyNonFrameAboveLowFloor) {
+            println("real fixture: no non-frame candidate at all; skipping low-floor mask check")
+            return
+        }
+        val lowDets = KoharuSegCore.decode(
+            pred, proto, protoW, protoH, inputW, inputH,
+            intArrayOf(tileX, tileY, tileX + tileW, tileY + tileH), letterbox, scoreMin = 0.02f
+        )
+        println("real fixture: low-floor decode ${lowDets.size} detections, " +
+            "withMask=${lowDets.count { it.mask != null }}")
+        assertTrue("low-floor decode produced no detections though candidates exist", lowDets.isNotEmpty())
+        for (det in lowDets) {
+            assertTrue("unexpected label ${det.label}", det.label in 0..2)
+            assertTrue("box outside tile: $det", det.l >= tileX && det.b <= tileY + tileH)
+            det.mask?.let { m ->
+                assertTrue("mask is empty", m.pixels.any { it.toInt() != 0 })
+                // A mask cell marked inside must map back inside the detected box.
+                val mx = m.width / 2
+                val my = m.height / 2
+                val px = det.l + (mx + 0.5f) * (det.r - det.l) / m.width
+                val py = det.t + (my + 0.5f) * (det.b - det.t) / m.height
+                if (m.pixels[my * m.width + mx].toInt() != 0) {
+                    assertTrue("mask cell maps outside its box", px >= det.l - 1 && px <= det.r + 1)
+                    assertTrue("mask cell maps outside its box", py >= det.t - 1 && py <= det.b + 1)
+                }
+            }
+        }
     }
 
     @Test fun everyNonFrameCandidateAboveThresholdDecodes() {

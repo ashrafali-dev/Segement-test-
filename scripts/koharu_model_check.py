@@ -117,14 +117,37 @@ def letterbox(rgb, size_hw):
 def run_inference(model_path, input_w, input_h, fixture_dir):
     import onnxruntime as ort
 
-    # Deterministic synthetic page: a white field with black rectangles that read as
-    # "panels". We do not require specific detections (the model was trained on manga),
-    # only that the *decoder contract* holds for whatever it returns.
+    # Deterministic synthetic page with manga-like structure so the model's own text/balloon classes
+    # fire above the decoder threshold. This is not a quality benchmark; it exists to drive the real
+    # tensors through decode() (including mask reconstruction). It also contains a large white area
+    # with dark bars so 'frame' predictions are present too.
     rng = np.random.default_rng(7)
-    page = np.full((512, 384, 3), 255, dtype=np.uint8)
-    page[40:200, 40:200] = 0
-    page[240:470, 60:330] = 20
-    page = (page.astype(np.int16) + rng.integers(-8, 8, page.shape, dtype=np.int16)).clip(0, 255).astype(np.uint8)
+    h, w = 512, 384
+    page = np.full((h, w, 3), 235, dtype=np.uint8)
+    # Two panel frames (black borders) so the 'frame' class has something real to detect.
+    def panel(x0, y0, x1, y1):
+        page[y0:y0 + 6, x0:x1] = 0
+        page[y1 - 6:y1, x0:x1] = 0
+        page[y0:y1, x0:x0 + 6] = 0
+        page[y0:y1, x1 - 6:x1] = 0
+    panel(12, 12, 372, 250)
+    panel(12, 262, 372, 500)
+    # A speech balloon: white ellipse with a dark outline inside the first panel.
+    yy, xx = np.mgrid[0:h, 0:w]
+    ellipse = (((xx - 120) / 80.0) ** 2 + ((yy - 120) / 55.0) ** 2) <= 1.0
+    ring = (((xx - 120) / 80.0) ** 2 + ((yy - 120) / 55.0) ** 2 <= 1.0) & \
+           (((xx - 120) / 78.0) ** 2 + ((yy - 120) / 53.0) ** 2 < 1.0)
+    page[ellipse] = 255
+    page[ring] = 0
+    # Lettering bars inside the balloon (dark strokes the model reads as text).
+    for dy in (-18, 0, 18):
+        page[120 + dy - 4:120 + dy + 4, 70:170] = 0
+    # A second balloon with onomatopoeia-like bold bars in the lower panel.
+    page[330:440, 200:340] = 250
+    page[330:336, 200:340] = 0; page[434:440, 200:340] = 0
+    page[330:440, 200:206] = 0; page[330:440, 334:340] = 0
+    page[370:400, 230:310] = 0
+    page = (page.astype(np.int16) + rng.integers(-4, 4, page.shape, dtype=np.int16)).clip(0, 255).astype(np.uint8)
 
     canvas, lb = letterbox(page, (input_h, input_w))
     chw = canvas.astype(np.float32).transpose(2, 0, 1)[None] / 255.0
