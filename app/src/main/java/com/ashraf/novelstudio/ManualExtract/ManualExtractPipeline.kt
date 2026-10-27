@@ -149,13 +149,17 @@ internal class ManualExtractPipeline(
                         }
                     }
                 }
-                // Still nothing usable: the same crop through the local engine, which is the app's existing
-                // fallback and often reads small CJK glyphs the remote engine dropped.
-                if (outcome.blocks.isEmpty() &&
+                // Final recovery: if the remote Lens pass still leaves unexplained ink, run local ML Kit too,
+                // even when Lens returned SOME text. A partial remote read is not success for a user-selected
+                // missing-text region. Keep whichever pass actually recognised more text; never downgrade a good read.
+                val needsLocalRecovery = outcome.blocks.isEmpty() ||
+                    (needsStrongerRead(outcome, ocrBmp) && !outcome.engine.contains("ML Kit", ignoreCase = true))
+                if (needsLocalRecovery &&
                     SystemClock.elapsedRealtime() - tStart < ManualExtractConfig.TOTAL_CAP_MS) {
+                    OcrDiag.log("MANUAL", "local recovery: blocks=${outcome.blocks.size} letters=${outcome.letters} engine=${outcome.engine}")
                     val local = ocr.readLocalOnly(ocrBmp, script, ManualExtractConfig.OCR_CAP_MS)
                     m.reads++
-                    if (local.blocks.isNotEmpty()) outcome = local
+                    if (local.isBetterThan(outcome)) outcome = local
                 }
 
                 m.mark("ocr_retry")
