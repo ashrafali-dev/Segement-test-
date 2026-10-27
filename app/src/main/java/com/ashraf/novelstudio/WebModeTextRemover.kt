@@ -36,6 +36,9 @@ internal object WebModeTextRemover {
 
     /** Bounded to one cleaning job at a time: concurrent jobs doubled peak memory on low-RAM phones. */
     private val cleanSlot = java.util.concurrent.locks.ReentrantLock()
+    /** Serializes lock ownership and erase-cache updates across foreground/read-ahead workers. */
+    private val cleanStateLock = Any()
+    @Volatile private var activeCleanSource: String = ""
 
     /**
      * Erase lettering using the DETECTOR's boxes instead of the pixel guess.
@@ -622,14 +625,29 @@ internal object WebModeTextRemover {
         // process into the memory sawtooth that made realtime stutter: the second job's allocation lands while
         // the first still holds its decoded bitmap and masks. Skipping (rather than queueing) is safe — the
         // panel stays uncleaned this pass, keeps its overlay cover box, and the next scan picks it up.
-        if (!cleanSlot.tryLock()) {
-            OcrDiag.log("CLEAN", "skip: another cleaner is running (bounded to one at a time)")
+        // Keep the bitmap working set bounded, and never reuse an old "erased" decision if this attempt
+        // is skipped or fails. A skipped panel uses its opaque shaped cover instead of stale transparency.
+        var acquired = false
+        synchronized(cleanStateLock) {
+            if (cleanSlot.tryLock()) {
+                activeCleanSource = sourceUrl
+                WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
+                acquired = true
+            } else if (activeCleanSource != sourceUrl) {
+                WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
+            }
+        }
+        if (!acquired) {
+            OcrDiag.log("CLEAN", "skip: another cleaner is running (bounded to one at a time); keep opaque cover")
             return false
         }
         try {
             return cleanAndCacheLocked(context, sourceUrl, encoded, bubbles, allowAi, dets, recognizedLines, maskOnly)
         } finally {
-            cleanSlot.unlock()
+            synchronized(cleanStateLock) {
+                activeCleanSource = ""
+                cleanSlot.unlock()
+            }
         }
     }
 
@@ -680,25 +698,17 @@ internal object WebModeTextRemover {
                     return false
                 }
 
-                // Only mark an overlay bubble as cleaned when all of its OCR lines were really erased.
-                // Text masks can still clean artwork/SFX even when those regions have no speech-balloon cover.
-                val linesByBubble = recognizedLinesByBubble(bubbles, recognizedLines, width, height)
-
-                val erasedLines = java.util.Collections.newSetFromMap(
-                    java.util.IdentityHashMap<OcrBlock, Boolean>()
-                )
-                val changedPixels = eraseDetected(
-                    bitmap, allDetections, recognizedLines,
-                    onOcrRegionErased = { erasedLines.add(it) }
-                )
-                val erasedKeys = erasedBubbleKeys(linesByBubble, erasedLines)
-                if (changedPixels < 4 || (erasedKeys.isEmpty() && textMasks.isEmpty())) {
+                // The mask-only path has no independent pixel-level verification against the original glyph ink.
+                // Preserve the cleaned pixels, but leave speech-bubble covers opaque to prevent leftover strokes
+                // from showing through a translation when the detector segmented only part of a line.
+                val changedPixels = eraseDetected(bitmap, allDetections, recognizedLines)
+                val erasedKeys = emptySet<String>()
+                if (changedPixels < 4 || textMasks.isEmpty()) {
                     OcrDiag.log("MASK_CLEAN", "skip: model masks did not safely erase text pixels")
                     return false
                 }
                 val stored = storeCleanedBitmap(context, sourceUrl, bitmap, erasedKeys)
-                OcrDiag.log("MASK_CLEAN", "ocrRegions=${recognizedLines.size} balloonMasks=${balloonMasks.size} textMasks=${textMasks.size} erasedBubbles=${erasedKeys.size} pixels=$changedPixels stored=$stored")
-                return stored
+                OcrDiag.log("MASK_CLEAN", "ocrRegions=${recognizedLines.size} balloonMasks=${balloonMasks.size} textMasks=${textMasks.size} erasedBubbles=0 pixels=$changedPixels stored=$stored opaqueCoverFallback=true")
             }
 
             var totalRemoved = 0
@@ -718,23 +728,8 @@ internal object WebModeTextRemover {
             // Every bubble whose lettering was really erased (flat AND artwork). The writer only drops its
             // opaque cover box for bubbles in this set; any other bubble keeps the safe box fallback.
             val erased = HashSet<String>()
-            // Detector erasure is tracked per source OCR line. A few changed pixels in ONE bubble must never
-            // mark every bubble in this image as fully erased: that made the overlay transparent over residual ink.
-            val linesByBubble = recognizedLinesByBubble(bubbles, recognizedLines, width, height)
-            val detectorErasedLines = java.util.Collections.newSetFromMap(
-                java.util.IdentityHashMap<OcrBlock, Boolean>()
-            )
-            val erasedByDetector = try {
-                eraseDetected(bitmap, dets, recognizedLines,
-                    onOcrRegionErased = { detectorErasedLines.add(it) })
-            } catch (_: Throwable) { 0 }
-            if (erasedByDetector > 0) {
-                totalRemoved += erasedByDetector
-                val detectorErasedKeys = erasedBubbleKeys(linesByBubble, detectorErasedLines)
-                erased.addAll(detectorErasedKeys)
-                OcrDiag.log("ERASE", "detector pass dets=${dets?.size ?: 0} pixels=$erasedByDetector " +
-                    "sourceLines=${detectorErasedLines.size}/${recognizedLines.size} erasedBubbles=${detectorErasedKeys.size}/${linesByBubble.size}")
-            }
+            // Pixel-level verification must inspect the ORIGINAL source ink before the detector reconstruction
+            // changes it. Detector masks are applied at the end, but may never authorize transparent rendering.
             val boundedBubbles = bubbles.asSequence()
                 .filter { it.sourceText.isNotBlank() && it.w > 0f && it.h > 0f }
                 .take(500)
@@ -1064,6 +1059,15 @@ internal object WebModeTextRemover {
                 bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
                 totalRemoved += selectedCount
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+            }
+            // Final reconstruction may improve the saved pixels but cannot add an erased key. Each transparent
+            // overlay key was earned by the pixel verifier above using the original image's ink candidates.
+            val erasedByDetector = try {
+                eraseDetected(bitmap, dets, recognizedLines)
+            } catch (_: Throwable) { 0 }
+            if (erasedByDetector > 0) {
+                totalRemoved += erasedByDetector
+                OcrDiag.log("ERASE", "detector reconstruction pixels=$erasedByDetector; verifiedTransparentBubbles=${erased.size}/${boundedBubbles.size}")
             }
             if (totalRemoved < 8) return false
 
