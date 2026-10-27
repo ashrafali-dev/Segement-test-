@@ -589,7 +589,7 @@ internal object WebModeWriter {
           // translation widen inside the available image lane instead of stacking Bengali glyphs.
           var textValue=String(RB.b.textContent||'');
           var unshapedColumn=!RB.rot&&RB.b.getAttribute('data-mf')!=='1'&&
-            !RB.b.getAttribute('data-tb')&&RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\\s/.test(textValue);
+            !RB.b.getAttribute('data-tb')&&RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\s/.test(textValue);
           var maxBoxW=unshapedColumn?Math.min(RB.rw*0.72,Math.max(RB.ow*3,Math.min(RB.oh*0.55,RB.rw*0.72))):RB.ow*1.35;
           RB.wideMaxW=maxBoxW;
           RB.w=Math.max(8,Math.min(wantW,room,maxBoxW));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
@@ -834,7 +834,8 @@ internal object WebModeWriter {
             bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);
             // A box that shares its row with neighbours may not take more width than the row gave it.
             var roomW=(Number.isFinite(R.freeR)&&Number.isFinite(R.freeL))?R.freeR-R.freeL-2:R.rw-4;
-            var wideCap=Number(R.wideMaxW)||R.ow*1.35;\n            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(wideCap,roomW));
+            var wideCap=Number(R.wideMaxW)||R.ow*1.35;
+            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(wideCap,roomW));
             bb.__nsMaxH=R.oh*1.8;
             if(cw<R.ow)bb.__nsMaxW=Math.max(8,cw);   // a box that had to be narrowed must not be re-widened by the text
             var prevW=Number(bb.__nsReqWRatio)||0;
