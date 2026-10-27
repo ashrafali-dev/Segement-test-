@@ -28,12 +28,19 @@ assert.ok(rescan.includes("MIN_REMOTE_AUDIT_HEIGHT = 12"), "Lens audit must allo
 assert.ok(rescan.includes("findUncovered(bmp, base.blocks, REMOTE_AUDIT_CANDIDATE_LIMIT)"), "Lens audit must inspect multiple candidates");
 assert.ok(rescan.includes("REMOTE_AUDIT_MAX_REGIONS = 2"), "Lens audit must retry up to two likely missed regions");
 assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed labels must be prioritized over partial re-reads");
-// No-AI text removal: stable local background should allow colour-mask erasure before conservative component checks.
-assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
+// No-AI text removal: the background is sampled from the ring around the OCR box (all four sides, so coloured
+// and gradient balloons keep their own colour) and only the lettering pixels are replaced.
+assert.ok(remover.includes("estimateBackgroundModel(region, rw, rh, ix0, iy0, ix1, iy1, fg1, fg2)"),
   "text remover must estimate local background outside the OCR box");
-assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI flat-background path");
-assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
-  "flat-background erasure must expand the mask to clear anti-aliased text edges");
+assert.ok(remover.includes("internal class BackgroundModel") && remover.includes("fun at(x: Int, y: Int"),
+  "text remover must interpolate the local background across the OCR box");
+assert.ok(remover.includes("Non-AI flat") || remover.includes("Background-driven erase"),
+  "text remover must have a non-AI background fill path");
+assert.ok(remover.includes("val grow = (fontPx * 0.05f).toInt().coerceIn(1, 3)"),
+  "background erasure must expand the mask to clear anti-aliased text edges");
+// The balloon must never be repainted wholesale again: wipeInterior painted the whole interior rectangle.
+assert.ok(!remover.includes("private fun wipeInterior("),
+  "text removal must not repaint the whole bubble interior");
 assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
