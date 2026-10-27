@@ -2565,7 +2565,9 @@ internal class WebModeExtractor(
                 // Preserve the actual OCR/refined text rectangle, not WmBubbleStyle's expanded cover bounds.
                 // The text remover adds its own small antialias margin and uses the balloon mask as its hard clip.
                 // Cleaning must never reinterpret the full cover-bubble geometry as the original glyph region.
-                val sourceGlyphRect = refinedBox[i] ?: rects[i]
+                // refinedBox may be the WHOLE bubble interior after line recovery; refinedSeed stays anchored
+                // to the original OCR rows. Cleaning/erase verification must never use the full interior as glyph bounds.
+                val sourceGlyphRect = refinedSeed[i] ?: refinedBox[i] ?: rects[i]
                 val ocrCx = (sourceGlyphRect[0] + sourceGlyphRect[2]) / 2f
                 val ocrCy = (sourceGlyphRect[1] + sourceGlyphRect[3]) / 2f
                 val ocrBw = (sourceGlyphRect[2] - sourceGlyphRect[0]).toFloat()
