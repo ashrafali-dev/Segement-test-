@@ -18,7 +18,7 @@
         android:label="Novel Studio"
         android:icon="@mipmap/novel_studio_icon"
         android:roundIcon="@mipmap/novel_studio_icon"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:hardwareAccelerated="true"
         android:theme="@style/AppTheme">
 
