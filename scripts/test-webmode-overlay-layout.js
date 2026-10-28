@@ -12,6 +12,10 @@ const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)
 const decorativeUrl = new Function(decorativeSource + "; return decorativeUrl;")();
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/link_slot_abc.jpg"), true, "link-slot promotional art must not be treated as a manga panel");
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false, "actual manga assets must remain eligible");
+const visibleHitSource = extractFunction(libMatch[1], "function candidateVisibleAt(panel,x,y)");
+assert.ok(visibleHitSource.includes("var outerHit=document.elementFromPoint(x,y);") &&
+  visibleHitSource.includes("if(outerHit!==frame)return false;"),
+  "a same-origin iframe image must also be visible at the outer page stacking layer, not just inside its own document");
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
 assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
