@@ -2186,16 +2186,11 @@ internal class WebModeExtractor(
             // middle rows from the ink detector. Never discard an edge reading on the assumption that
             // another slice will find it; the fuller overlapping reading can upgrade it below.
             val tOcr = android.os.SystemClock.elapsedRealtime()
-            // Realtime (fastMode) is latency-bound: the ONNX bubble detector takes ~1.9 s and is serialized on
-            // the process-wide OnnxHeavyGate lock, so blocking readSlice on it delayed every Lens reply by
-            // seconds (the "DETECT ~3.8 s" cycles). Geometry falls back cleanly to the pixel bubble finder when
-            // the detector is off, so skip it here and let the visible text reach the overlay immediately.
-            // Detection takes 4-10 s on a mid-range phone with everything else running. It must NEVER hold the
-            // reader's text: real-time only TAKES a finished result from the cache and, when there is none, starts the
-            // detector in the background on its own copy of the picture (the next pass over this panel then has masks).
-            // Only the thorough scan (not latency bound) waits for the detector here.
-            // Ahead OCR is latency-sensitive too, even if an upstream caller requests a thorough decode path.
-            // Reuse cached detections but never start 3-6 s RT-DETR/segmentation inference from realtime/read-ahead.
+            // Realtime viewport and speculative read-ahead share the latency-sensitive path. Reuse a completed
+            // detection-cache entry if one exists, but never schedule or wait for RT-DETR/mask inference here:
+            // these models can take several seconds and contend with the Lens request, image cleaning and scrolling.
+            // Their geometry is an optional enhancement, so realtime falls back to OCR-derived bubble grouping.
+            // Thorough scan mode remains separate and can opt into detector inference via wmDetectInScan.
             val realtimePriority = fastMode || req.ahead > 0
             if (realtimePriority) BubbleDetector.noteActivity()
             val detOk = Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
