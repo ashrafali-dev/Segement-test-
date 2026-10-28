@@ -1164,6 +1164,9 @@ class MainActivity : Activity() {
     // Slots confirmed to contain Japanese glyphs in a synthetic canvas OCR result. This is page-local
     // and bounded; only these slots use spatial cache identity instead of the general text-only cache.
     private val rtJapaneseCanvasSources = linkedSetOf<String>()
+    // After one targeted retry, keep empty/noise replies out of automatic read-ahead until navigation.
+    // This is separate from translation cache state and is not consulted by the visible/manual selection path.
+    private val rtAheadSkippedBubbleHashes = LinkedHashSet<String>()
 
     // The ahead translator uses its own invisible WebView so it never overwrites the visible chat
     // conversation or blocks the foreground panel's send/poll callbacks.
@@ -1450,6 +1453,14 @@ class MainActivity : Activity() {
         return if (letters.isNotEmpty()) letters else text
     }
 
+    private fun rememberSkippedAheadBubbles(bubbles: List<WmBubble>) {
+        bubbles.forEach { rtAheadSkippedBubbleHashes.add(WebModeLayout.fingerprint(it)) }
+        while (rtAheadSkippedBubbleHashes.size > 600) {
+            val iterator = rtAheadSkippedBubbleHashes.iterator()
+            if (iterator.hasNext()) { iterator.next(); iterator.remove() } else break
+        }
+    }
+
     /**
      * Put already-cached bubble translations straight onto the page overlay (no chatbot request)
      * and mark them as translated so they are not selected again.
@@ -1575,7 +1586,7 @@ class MainActivity : Activity() {
                     fp in deepSeekInFlightTextHashes || fp in deepSeekTranslatedTextHashes
                 }
                 if (cacheKey in rtAheadTranslationCache ||
-                    cacheKey in pendingBubbleKeys || isTextReserved) continue
+                    cacheKey in pendingBubbleKeys || fp in rtAheadSkippedBubbleHashes || isTextReserved) continue
                 batch.add(bubble)
                 batchTop.add(panel.top)
                 pendingBubbleKeys.add(cacheKey)
@@ -2216,6 +2227,10 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 layout = retryLayout,
                 attempts = task.attempts + 1
             ), front = true)
+            OcrDiag.log("ALIGN_RETRY", "retrying only missing/noise bubbles count=${missing.size} once")
+        } else if (missing.isNotEmpty()) {
+            rememberSkippedAheadBubbles(missing)
+            OcrDiag.log("ALIGN_SKIP", "left untranslated count=${missing.size}; manual region selection remains available")
         }
         val cooldownUntil = System.currentTimeMillis() + chatbotRequestGapMs
         nextChatbotRequestAtMs = maxOf(nextChatbotRequestAtMs, cooldownUntil)
@@ -2238,6 +2253,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
         rtAheadTranslationCache.clear()
         rtAheadTranslationSuppressedIds.clear()
         rtJapaneseCanvasSources.clear()
+        rtAheadSkippedBubbleHashes.clear()
         rtAheadHold.clear()
     }
 
