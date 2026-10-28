@@ -1,7 +1,13 @@
-name: UI CI (debug)
+name: UI CI
 
 # UI redesign verification for the ui/toon-sensei branch only.
-# No release signing, no secrets, no releases/tags/packages are created here.
+#
+# Produces TWO APKs:
+#  - app-release.apk  signed with the SAME permanent key as the installed Novel Studio release,
+#                     so it installs over the real app (an update, not a second app).
+#  - app-debug.apk    debug-key build, for reference only.
+# It never creates a release, tag, package, PR or page. Signing secrets are only read here;
+# they are never printed and never written to the repository.
 on:
   push:
     branches:
@@ -36,6 +42,53 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
+      # Same key material and validation the owner's existing build.yml uses, so the UI APK is
+      # signature-compatible with the app already installed on his phone.
+      - name: Validate permanent release signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for variable in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!variable:-}" ]; then
+              echo "::error::$variable GitHub Secret is missing. Refusing to create an incompatible APK."
+              exit 1
+            fi
+          done
+          KEYSTORE_PATH="$RUNNER_TEMP/novelstudio-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          echo "Permanent release keystore and alias validated."
+
+      - name: Build signed release APK (installs over the real app)
+        env:
+          KEYSTORE_FILE: ${{ runner.temp }}/novelstudio-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK uses the permanent release certificate
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER" && test -x "$APKSIGNER"
+          REPORT="$("$APKSIGNER" verify --verbose --print-certs "$APK")"
+          ACTUAL="$(printf '%s\n' "$REPORT" | awk '/certificate SHA-256 digest:/ {print tolower($NF); exit}')"
+          EXPECTED="3e783739eb6e9aadf8bd9f5b23f8fb99a65c4cfabdcb8ec8fb09c2921dcbb44b"
+          echo "cert SHA-256: $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Signing certificate does not match the established Novel Studio certificate."
+            exit 1
+          fi
+          echo "PASS: signature-compatible with the installed app."
+
       - name: Unit tests
         # Recorded separately so a pre-existing test failure does not hide the build result.
         # Baseline on the untouched code: 70 tests, 1 pre-existing failure
@@ -47,6 +100,16 @@ jobs:
         # Always runs so lint is measured even when the pre-existing unit test fails.
         if: always()
         run: gradle :app:lintDebug --no-daemon --stacktrace
+
+      - name: Upload signed release APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: toon-sensei-SIGNED-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload debug APK
         if: always()
