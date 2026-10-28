@@ -328,6 +328,9 @@ internal class WebModeExtractor(
                         refs.add(PanelRef(s, top, p.optInt("l"), p.optInt("w"), p.optInt("h")))
                     }
                     if (req.fullChapterLinks) refs.sortBy { it.top }
+                    // Banners, promo tiles and avatars are not panels: never spend Lens/ML Kit calls on them.
+                    val realRefs = WebModeLogic.dropChromeImages(refs)
+                    if (realRefs.size != refs.size) { refs.clear(); refs.addAll(realRefs) }
                     while (refs.size > aheadN) refs.removeAt(refs.size - 1)
                     if (refs.isEmpty()) { aheadFinished(); return@evaluateJavascript }
                     aheadWorker.execute {
@@ -613,7 +616,8 @@ internal class WebModeExtractor(
                     else if (panel.w * panel.h > old.w * old.h) merged[key] = panel
                 }
                 val refs = merged.values.toList()
-                val allPanels = WebModeLogic.dedupeAndOrder(refs)
+                val allPanels = WebModeLogic.dedupeAndOrder(
+                    if (req.forceOcrSrc.isNullOrBlank()) WebModeLogic.dropChromeImages(refs) else refs)
                 val targetSrc = req.forceOcrSrc
                 val panels = if (targetSrc.isNullOrBlank()) allPanels else allPanels.filter {
                     WebModeLogic.normalizeUrl(it.src) == WebModeLogic.normalizeUrl(targetSrc)
@@ -858,7 +862,10 @@ internal class WebModeExtractor(
                     // Lens is a remote OCR request; submit each panel now and collect in source order below.
                     // Requests overlap (bounded by LENS_SLICE_SLOTS inside the engine), so a full chapter's
                     // network time is shared instead of added up. The downstream chat batch is unchanged.
-                    progress("Google Lens OCR ${i + 1}/$total", 10 + i * 89 / total)
+                    // Submitting is NOT progress: every panel is queued within seconds while Lens is still working,
+                    // which filled the bar to ~99% long before any text had been read. Queueing only moves the bar
+                    // through the first 10 points; the rest is reported as each Lens reply really arrives (below).
+                    progress("Google Lens OCR: queued ${i + 1}/$total", 10 + i * 9 / total)
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
@@ -930,6 +937,8 @@ internal class WebModeExtractor(
             if (lensParallel) {
                 val batchStartedAt = SystemClock.elapsedRealtime()
                 var submitted = 0
+                val lensTotal = lensOcrFutures.count { it != null }.coerceAtLeast(1)
+                var lensDone = 0
                 for (i in lensOcrFutures.indices) {
                     val future = lensOcrFutures[i] ?: continue
                     submitted++
@@ -949,6 +958,8 @@ internal class WebModeExtractor(
                         LensPanelOcrAttempt(null, e)
                     }
                     val error = attempt.error
+                    lensDone++
+                    progress("Google Lens OCR: read $lensDone/$lensTotal", 20 + lensDone * 79 / lensTotal)
                     when (error) {
                         is OcrUnavailableException -> {
                             fail(WebModeError.OCR_MODEL_UNAVAILABLE, error.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label)
@@ -2042,6 +2053,16 @@ internal class WebModeExtractor(
                     if (cropped.width < 16 || cropped.height < 16) throw DecodeException()
                     readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
                         firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh)
+                    // The user dragged a frame over this spot: there IS text here. When the normal read found nothing,
+                    // read the crop again the hard way (enlarged, contrast-stretched, every recogniser, every script).
+                    if (bubbles.isEmpty() && forceFresh) {
+                        val hard = hardRecognize(cropped, st)
+                        if (hard != null) {
+                            readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
+                                firstSlice = true, lastSlice = true, x0 = originX, fastMode = false,
+                                preRecognized = hard, forceFresh = true)
+                        }
+                    }
                 } finally { cropped.recycle() }
                 return finishResult()
             }
@@ -2215,7 +2236,9 @@ internal class WebModeExtractor(
                 val grp = BubbleGrouping.groupContaining(blocks, i, pool.filter { !consumed[it] }) { x, y ->
                     // The detector saw two different bubble outlines around the two lines: never one sentence.
                     BubbleDetectorCore.inDifferentBubbles(dets, x.cx, x.cy, y.cx, y.cy) ||
-                    OcrPost.outlineBetween(bmp, x, y) || run {
+                    OcrPost.outlineBetween(bmp, x, y) ||
+                    // A whisper / note beside or under a bubble: a bubble border crosses the path between the two texts.
+                    OcrPost.outlineCrossing(bmp, x, y, blocks) || run {
                         // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
                         // never one sentence. Unknown shape (null) keeps the geometry decision.
                         val ix = blocks.indexOf(x); val iy = blocks.indexOf(y)
@@ -2285,8 +2308,18 @@ internal class WebModeExtractor(
                 val inside = blocks.indices.filter { j ->
                     val cxj = blocks[j].cx
                     val cyj = blocks[j].cy
-                    cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3] &&
-                        (j == i || !BubbleDetectorCore.inDifferentBubbles(dets, b.cx, b.cy, cxj, cyj))
+                    if (!(cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3])) return@filter false
+                    if (j == i) return@filter true
+                    if (BubbleDetectorCore.inDifferentBubbles(dets, b.cx, b.cy, cxj, cyj)) return@filter false
+                    // The interior is a bounding RECTANGLE: a whisper written beside / under an oval bubble, or the
+                    // lettering of a second bubble that overlaps this one, has its centre inside that rectangle too.
+                    // A line of THIS bubble lies (almost) completely inside it; the neighbour sticks out.
+                    if (BubbleDetectorCore.shareInside(rects[j][0], rects[j][1], rects[j][2], rects[j][3], inter) < 0.72f) return@filter false
+                    // ...and no bubble border may run between it and the line we started from.
+                    if (OcrPost.outlineCrossing(bmp, b, blocks[j], blocks)) return@filter false
+                    // Lettering of a clearly different size that sits beside (not under) the seed is a note, not a line.
+                    if (BubbleGrouping.sideNote(b, blocks[j])) return@filter false
+                    true
                 }
                 if (i !in inside) continue
                 val members = inside.filter { !consumed[it] }
@@ -2593,6 +2626,67 @@ internal class WebModeExtractor(
                 OcrDiag.log("OCR_ERR", "script=${st.current.name} ms=${SystemClock.elapsedRealtime() - t0} ${e.javaClass.simpleName}: ${e.message?.take(140)}")
                 throw e
             }
+        }
+
+        /**
+         * "Hard OCR" for a frame the user marked by hand. Tries, in order: the crop enlarged 2x, enlarged 2x with
+         * stretched contrast, enlarged 3x with stretched contrast; each with the normal engine and then with every
+         * local recogniser for every script. Returns the first reading with real letters (coordinates mapped back to
+         * the crop), or null when nothing at all can be read.
+         */
+        private fun hardRecognize(crop: Bitmap, st: ScriptState): OcrResult? {
+            fun letters(r: OcrResult) = r.text.count { it.isLetterOrDigit() }
+            val longest = maxOf(crop.width, crop.height).coerceAtLeast(1)
+            val plans = listOf(2f to false, 2f to true, 3f to true)
+            for ((want, contrast) in plans) {
+                if (cancelled.get()) return null
+                val u = minOf(want, 3200f / longest).coerceAtLeast(1f)
+                var scaled: Bitmap? = null
+                var prepared: Bitmap? = null
+                try {
+                    scaled = Bitmap.createScaledBitmap(crop, (crop.width * u).toInt().coerceAtLeast(1),
+                        (crop.height * u).toInt().coerceAtLeast(1), true)
+                    prepared = if (contrast) stretchContrast(scaled) else scaled
+                    val first = recognize(prepared, st, false, true)
+                    if (letters(first) >= 2) return scaleBack(first, u)
+                    val scripts = listOf(st.current) + WebModeLogic.fallbackScripts(st.current)
+                    for (script in scripts) {
+                        val alt = try { engine.recognizeFallback(prepared, script) } catch (_: Exception) { OcrResult(emptyList()) }
+                        if (letters(alt) >= 2) { st.current = script; return scaleBack(alt, u) }
+                    }
+                } catch (_: OutOfMemoryError) {
+                } catch (_: Exception) {
+                } finally {
+                    if (prepared != null && prepared !== scaled) prepared.recycle()
+                    scaled?.recycle()
+                }
+            }
+            return null
+        }
+
+        private fun stretchContrast(src: Bitmap): Bitmap {
+            val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+            val paint = android.graphics.Paint()
+            paint.colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix(floatArrayOf(
+                1.7f, 0f, 0f, 0f, -70f,
+                0f, 1.7f, 0f, 0f, -70f,
+                0f, 0f, 1.7f, 0f, -70f,
+                0f, 0f, 0f, 1f, 0f)))
+            android.graphics.Canvas(out).drawBitmap(src, 0f, 0f, paint)
+            return out
+        }
+
+        private fun scaleBack(r: OcrResult, u: Float): OcrResult {
+            if (u == 1f) return r
+            val blocks = r.blocks.map { b ->
+                b.copy(
+                    left = (b.left / u).toInt(), top = (b.top / u).toInt(),
+                    cx = b.cx / u, cy = b.cy / u, w = b.w / u, h = b.h / u,
+                    fontPx = b.fontPx / u,
+                    polygon = b.polygon.map { (x, y) -> Pair(x / u, y / u) }
+                )
+            }
+            return OcrResult(blocks).also { it.engineLabel = r.engineLabel }
         }
 
         private fun recognizeInner(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false, forceFresh: Boolean = false): OcrResult {

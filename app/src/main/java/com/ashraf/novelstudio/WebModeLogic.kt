@@ -27,6 +27,38 @@ internal object WebModeLogic {
         return out
     }
 
+    private fun hostOfUrl(u: String): String =
+        u.substringAfter("://", "").substringBefore('/').substringBefore('?').substringBefore(':').lowercase()
+
+    /**
+     * Page furniture that is not a comic panel (promo banners, avatars of the comment section, UI sprites). The log
+     * showed 220x202, 420x86, 420x420 and 34x34 images from other hosts being "read" again and again: each one cost
+     * Lens + ML Kit calls, produced garbage such as "아 하c YO P" and made the read-ahead reply fail its alignment
+     * check. A picture is dropped only when the page also has a clearly bigger picture from ANOTHER host that
+     * dominates it (the real panels) and this one is much smaller; then it cannot be a panel of the chapter.
+     */
+    fun dropChromeImages(refs: List<PanelRef>): List<PanelRef> {
+        if (refs.size < 2) return refs
+        val byHost = refs.groupBy { hostOfUrl(it.src) }
+        if (byHost.size < 2) return refs
+        val dominantHost = byHost.maxByOrNull { (_, v) -> v.sumOf { it.w.toLong() * it.h } }?.key ?: return refs
+        val dom = byHost[dominantHost].orEmpty()
+        if (dominantHost.isEmpty() || dom.isEmpty()) return refs
+        val areas = dom.map { it.w.toLong() * it.h }.sorted()
+        val medianDom = areas[areas.size / 2]
+        if (medianDom <= 0L) return refs
+        val domWidth = dom.maxOf { it.w }
+        return refs.filter { r ->
+            if (hostOfUrl(r.src) == dominantHost) return@filter true
+            val area = r.w.toLong() * r.h
+            val tiny = r.w < 120 || r.h < 100
+            val smallerThanPanels = area < medianDom * 0.6
+            val narrowerThanPanels = r.w < domWidth * 0.9
+            // keep it when it is as big as a panel (a chapter that really mixes CDNs)
+            !(tiny || (smallerThanPanels && (narrowerThanPanels || r.h < 0.5 * dom.minOf { it.h })) || r.h < r.w * 0.3)
+        }
+    }
+
     private val KO = Regex("naver\\.com|kakao|webtoons\\.com/ko|comic\\.naver", RegexOption.IGNORE_CASE)
     private val JA = Regex("webtoons\\.com/ja|comic-walker|piccoma|pixiv|shonenjump", RegexOption.IGNORE_CASE)
     private val ZH = Regex("webtoons\\.com/zh|bilibili|kuaikan|ac\\.qq|manhuagui|dmzj|manhuaren", RegexOption.IGNORE_CASE)

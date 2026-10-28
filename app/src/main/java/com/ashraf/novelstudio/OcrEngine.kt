@@ -290,6 +290,65 @@ internal object OcrPost {
         }
     }
 
+    /**
+     * Walks the straight line between the centres of two text blocks and reports whether a thin outline (a bubble
+     * border) crosses it OUTSIDE every recognised text box. Lines of one bubble only have bubble fill between them; a
+     * whisper / note written beside or under a bubble is separated from it by the bubble's outline, even when the two
+     * boxes touch or the detector's rectangle around the bubble also covers the note.
+     * Returns false (= keep the geometry decision) whenever the path cannot be sampled reliably.
+     */
+    fun outlineCrossing(img: Bitmap, a: OcrBlock, b: OcrBlock, all: List<OcrBlock>): Boolean {
+        try {
+            val dx = b.cx - a.cx
+            val dy = b.cy - a.cy
+            val dist = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+            if (dist < 16f) return false
+            val fa = if (a.fontPx > 0f) a.fontPx else Math.min(a.w, a.h)
+            val fb = if (b.fontPx > 0f) b.fontPx else Math.min(b.w, b.h)
+            val font = Math.max(8f, Math.max(fa, fb))
+            val infl = font * 0.30f
+            val steps = (dist / 2f).toInt().coerceIn(10, 500)
+            val lum = IntArray(steps + 1) { -1 }          // -1 = inside a text box (not evidence)
+            for (s in 0..steps) {
+                val t = s.toFloat() / steps
+                val x = a.cx + dx * t
+                val y = a.cy + dy * t
+                var inText = false
+                for (c in all) {
+                    if (x >= c.cx - c.w / 2f - infl && x <= c.cx + c.w / 2f + infl &&
+                        y >= c.cy - c.h / 2f - infl && y <= c.cy + c.h / 2f + infl) { inText = true; break }
+                }
+                if (inText) continue
+                val xi = x.toInt()
+                val yi = y.toInt()
+                if (xi < 0 || yi < 0 || xi >= img.width || yi >= img.height) continue
+                lum[s] = luma(img.getPixel(xi, yi))
+            }
+            val free = lum.filter { it >= 0 }
+            if (free.size < 8) return false
+            val med = free.sorted()[free.size / 2]
+            val stepPx = dist / steps
+            val maxRun = Math.max(2, Math.ceil((font * 0.40f / stepPx).toDouble()).toInt())
+            var s = 0
+            while (s <= steps) {
+                if (lum[s] < 0 || Math.abs(lum[s] - med) <= 70) { s++; continue }
+                var e = s
+                while (e + 1 <= steps && lum[e + 1] >= 0 && Math.abs(lum[e + 1] - med) > 70) e++
+                val run = e - s + 1
+                // background on BOTH sides inside the same free stretch (not the edge of a text box)
+                var before = 0; var k = s - 1
+                while (k >= 0 && lum[k] >= 0 && Math.abs(lum[k] - med) <= 70 && before < 3) { before++; k-- }
+                var after = 0; k = e + 1
+                while (k <= steps && lum[k] >= 0 && Math.abs(lum[k] - med) <= 70 && after < 3) { after++; k++ }
+                if (run <= maxRun && before >= 2 && after >= 2) return true
+                s = e + 1
+            }
+            return false
+        } catch (_: Exception) {
+            return false
+        }
+    }
+
     private fun luma(p: Int): Int = (((p shr 16) and 255) * 3 + ((p shr 8) and 255) * 6 + (p and 255)) / 10
 
     /**

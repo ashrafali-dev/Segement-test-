@@ -146,9 +146,9 @@ internal object WebModeWriter {
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
       // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
-      // overflow:hidden is what keeps a long translation inside its mask. fit() still shrinks the font to
-      // avoid clipping, so this is a hard backstop rather than the normal path.
-      b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:hidden;'
+      // overflow stays VISIBLE: a long translation in a narrow (vertical Japanese) bubble used to be clipped by the box
+      // edge. fit() shrinks / widens first; if a last line still does not fit it is shown, never cut.
+      b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
         +'background:transparent;color:'+it.fg+';font-family:'+fam+';font-weight:600;border-radius:0;box-shadow:none;';
       var t=document.createElement('div'); t.textContent=it.t;

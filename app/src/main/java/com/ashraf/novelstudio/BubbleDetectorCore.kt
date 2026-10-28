@@ -187,6 +187,16 @@ internal object BubbleDetectorCore {
         )
     }
 
+    /** Share (0..1) of the rectangle [l,t,r,b] that lies inside the box [box] = (l,t,r,b). */
+    fun shareInside(l: Int, t: Int, r: Int, b: Int, box: IntArray): Float {
+        val area = (r - l).toLong() * (b - t)
+        if (area <= 0L) return 0f
+        val iw = Math.min(r, box[2]) - Math.max(l, box[0])
+        val ih = Math.min(b, box[3]) - Math.max(t, box[1])
+        if (iw <= 0 || ih <= 0) return 0f
+        return (iw.toLong() * ih).toFloat() / area
+    }
+
     /** Smallest bubble-like box (bubble / text_bubble) around the point, or null. */
     fun bubbleAt(dets: List<Det>?, x: Float, y: Float): Det? {
         if (dets == null) return null
