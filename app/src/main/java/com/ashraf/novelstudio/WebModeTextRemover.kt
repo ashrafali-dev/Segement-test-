@@ -1167,8 +1167,8 @@ internal object WebModeTextRemover {
     private fun lerp(a: Int, b: Int, t: Float): Float = a + (b - a) * t
 
     /**
-     * Erase the lettering inside one OCR box using a locally sampled background, and return the number of pixels
-     * restored (0 when it declined to act).
+     * Erase the lettering inside one OCR box using a locally sampled background. Return restored pixels,
+     * 0 when the candidate mask is insufficient, or -1 when the box is unsafe and ALL erase paths must be skipped.
      *
      * Only pixels that are clearly different from the background *at their own position* count as glyphs, and each
      * is rewritten with that position's background colour. A flat, coloured, dark or gradient balloon is therefore
