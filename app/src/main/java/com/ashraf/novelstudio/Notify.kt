@@ -153,7 +153,8 @@ object Notify {
         }
 
         val close = TextView(c).apply {
-            text = ""
+            // Icon-only button; inside apply{} `text` would resolve to the banner's text parameter.
+            setText("")
             compoundDrawablePadding = 0
             contentDescription = Strings.DISMISS
             gravity = Gravity.CENTER

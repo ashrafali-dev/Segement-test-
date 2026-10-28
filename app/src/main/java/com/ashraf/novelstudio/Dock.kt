@@ -86,7 +86,7 @@ class Dock(context: Context) : LinearLayout(context) {
             setOnLongClickListener { onChatLong(); true }
         }
 
-        addView(modeChip, LinearLayout.LayoutParams(WRAP, dpx(44)))
+        addView(modeChip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dpx(44)))
         addView(prevBtn, LinearLayout.LayoutParams(dpx(48), dpx(48)))
         addView(mainBtn, LinearLayout.LayoutParams(dpx(120), dpx(44)).also {
             it.weight = 0f
@@ -283,5 +283,4 @@ class Dock(context: Context) : LinearLayout(context) {
     }
 
     private fun dpx(dp: Int) = (dp * resources.displayMetrics.density + 0.5f).toInt()
-    private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 }

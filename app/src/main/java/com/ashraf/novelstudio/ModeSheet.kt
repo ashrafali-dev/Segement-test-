@@ -67,16 +67,16 @@ object ModeSheet {
                 setPadding(dpx(2), dpx(2), dpx(2), dpx(2))
             }
             row.addView(icon, LinearLayout.LayoutParams(dpx(24), dpx(24)).also { it.marginEnd = dpx(14) })
-            val text = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
-            text.addView(TextView(c).apply {
+            val textBox = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
+            textBox.addView(TextView(c).apply {
                 text = title; textSize = Tokens.SP_BODY; typeface = Tokens.medium(c)
                 setTextColor(if (selected) p.onAccentTint else p.ink)
             })
-            text.addView(TextView(c).apply {
+            textBox.addView(TextView(c).apply {
                 text = desc; textSize = Tokens.SP_SECONDARY; setTextColor(p.dim)
                 setLineSpacing(0f, 1.4f)
             })
-            row.addView(text, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(textBox, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             card.addView(row, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ))

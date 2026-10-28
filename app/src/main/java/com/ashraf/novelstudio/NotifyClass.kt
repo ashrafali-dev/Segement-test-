@@ -26,8 +26,8 @@ object NotifyClass {
     )
 
     fun classify(message: String): Kind {
-        val m = message.trim().trimStart('⏹', '⚡', '✅', '❌', '⚠', '⏳', '🔄', '📋', '✍', '🔤', '📐', '💾', '🎧', '🔗', '📑', '🧩', '🗂', '🗑', 'ℹ', '⏸', '▶')
-            .trim()
+        // Leading emoji carry no meaning for the decision and clean() strips them for display anyway.
+        val m = message.trim()
         if (m.isEmpty()) return Kind.LOG
         // A leading "could not" that is actually "Translation stopped" style is rare; the success list wins
         // only for short, clearly-positive messages, so "Could not save" still becomes a banner.
