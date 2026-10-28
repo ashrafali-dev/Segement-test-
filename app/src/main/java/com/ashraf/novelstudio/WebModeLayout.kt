@@ -131,12 +131,17 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
          * quantized to 1% of the image to tolerate small OCR-box jitter between scan passes.
          */
         fun canvasBubbleCacheIdentity(b: WmBubble): String? {
-            val slot = WebModeLayoutStore.canvasSourceSlot(b.src) ?: return null
+            val normalizedSrc = WebModeLogic.normalizeUrl(b.src)
+            // Synthetic canvas crops use a stable document slot even when dimensions change. Some readers instead
+            // expose each panel as a blob: URL; keep that exact source identity so adjacent blob panels never collide.
+            val sourceIdentity = WebModeLayoutStore.canvasSourceSlot(normalizedSrc)
+                ?: normalizedSrc.takeIf { it.startsWith("blob:", ignoreCase = true) }
+                ?: return null
             val text = normalizeOcrText(b.sourceText)
             val geometry = listOf(b.cx, b.cy, b.w, b.h).joinToString(",") {
                 Math.round(it * 100f).toInt().toString()
             }
-            val material = "$slot|$geometry|$text"
+            val material = "$sourceIdentity|$geometry|$text"
             val bytes = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(material.toByteArray(Charsets.UTF_8))
             return "jcanvas:" + bytes.joinToString("") { "%02x".format(it) }
