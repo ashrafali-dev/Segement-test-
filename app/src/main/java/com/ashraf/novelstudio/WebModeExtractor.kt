@@ -400,7 +400,8 @@ internal class WebModeExtractor(
                         if ((aheadFails.merge(key, 1) { x, y -> x + y } ?: 1) >= 2) aheadBlank.add(key)
                         null
                     } ?: continue
-                    // Full-quality OCR (not the fast one-pass reading): this runs in the background.
+                    // Read one whole panel at native resolution using the latency-bound path. Cached detections may
+                    // still be reused, but speculative read-ahead never starts new detector or MI-GAN work.
                     progress("Read-ahead OCR: reading text ${index + 1}/$total", index * 99 / total)
                     val po = ocrBytes(bytes, script, p.src, fastMode = true) ?: run { aheadBlank.add(key); null } ?: continue
                     // Do not poison the read-ahead cache with an empty OCR result; the visible scan
@@ -625,7 +626,7 @@ internal class WebModeExtractor(
                 diag.discovered = panels.size
                 diag.duplicates = (rawPanelCount - allPanels.size).coerceAtLeast(0)
                 OcrDiag.log("PANELS", "raw=$rawPanelCount afterDedupe=${allPanels.size} used=${panels.size} :: " +
-                    panels.take(10).joinToString(" | ") { (if (it.src.startsWith("data:")) "CANVAS" else hostOf(it.src).ifBlank { it.src.take(10) }) + " ${it.w}x${it.h}@${it.top}" })
+                    panels.take(10).joinToString(" | ") { (if (it.src.startsWith("data:")) "CANVAS" else hostOf(it.src).ifBlank { it.src.take(10) }) + " ${it.w}x${it.h}@${it.top}(x=${it.left})" })
                 if (panels.isEmpty()) {
                     if (req.visibleOnly && targetSrc.isNullOrBlank()) {
                         // Some manga readers paint panels in canvas/iframes or expose unusable image URLs.
@@ -2229,10 +2230,10 @@ internal class WebModeExtractor(
                 } else if (!realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
-            val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !fastMode && Prefs.bool(wv.context, "wmBubbleFit", true))
+            val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true))
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
-                "masks=${dets?.count { it.seg != null } ?: 0} source=${if (cachedDets != null) "cache" else if (earlyDet != null) "scan-run" else if (fastMode && detOk) "none(background started/busy)" else "none"} " +
+                "masks=${dets?.count { it.seg != null } ?: 0} source=${if (cachedDets != null) "cache" else if (earlyDet != null) "scan-run" else if (realtimePriority && detOk) "skipped-realtime" else "none"} " +
                 "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
@@ -3439,7 +3440,7 @@ var title=q('.subj_episode')||q('h1')||(og&&og.content)||document.title||'';
 var novel=q('.detail_header .subj')||q('a.subj')||q('.series-title')||q('.comic-title')||'';
 var xf=0,ifs=document.querySelectorAll('iframe');for(var xi=0;xi<ifs.length;xi++){try{if(!ifs[xi].contentDocument)xf++;}catch(e0){xf++;}}
 var ncv=0,cvl=[];var cvs0=document.querySelectorAll('canvas');for(var cj=0;cj<cvs0.length&&cj<8;cj++){var rr=cvs0[cj].getBoundingClientRect();cvl.push(cvs0[cj].width+'x'+cvs0[cj].height+'@'+Math.round(rr.top)+'/'+Math.round(rr.width)+'x'+Math.round(rr.height));}
-var cands2=c.map(function(x){return (x.cv?'CANVAS ':'')+x.w+'x'+x.h+' '+String(x.s).slice(0,60);}).slice(0,12);
+var cands2=c.map(function(x){return (x.cv?'CANVAS ':'')+x.w+'x'+x.h+'@x'+Math.round(Number(x.vl)||0)+',y'+Math.round(Number(x.vt)||0)+' '+String(x.s).slice(0,60);}).slice(0,12);
 var dbg=document.images.length+' img, '+ifs.length+' iframe('+xf+' cross-origin), '+cvs0.length+' canvas, visibleHit='+rawVisibleCandidates+'->'+c.length+' found | canvasErr='+(window.__nsWmCanvasErr||'-')+' | canvases=['+cvl.join(', ')+'] | cands=['+cands2.join(' ;; ')+'] | vp='+(window.innerWidth||0)+'x'+(window.innerHeight||0)+' | ready='+document.readyState;
 return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,title:title,novel:novel,next:link('next'),prev:link('prev'),imgs:c.slice(0,600),dbg:dbg});
 """
