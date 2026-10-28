@@ -321,6 +321,13 @@ internal class WebModeExtractor(
                         val p = arr.optJSONObject(i) ?: continue
                         val s = p.optString("s")
                         if (s.isBlank()) continue
+                        val normalizedSource = s.lowercase()
+                        // Cross-origin iframe image collection can bypass the page-script chrome filter.
+                        // Promo/link-slot images are not upcoming manga panels and must never enter read-ahead OCR.
+                        if (normalizedSource.contains("/link-slot-") || normalizedSource.contains("/link_slot_")) {
+                            OcrDiag.log("AHEAD_FILTER", "skipped promo/link-slot image: ${s.take(100)}")
+                            continue
+                        }
                         val top = p.optInt("t")
                         // Must match the cache key used by processAhead/rememberVisibleRead (URL + offset).
                         val nk = panelKey(s, top)
@@ -609,7 +616,8 @@ internal class WebModeExtractor(
                     val s = p.optString("s").trim()
                     if (s.isBlank()) continue
                     // Banner/ad slides (e.g. shonenjumpplus /public/link-slot-series) are not manga pages.
-                    if (s.contains("/link-slot-", ignoreCase = true)) continue
+                    if (s.contains("/link-slot-", ignoreCase = true) ||
+                        s.contains("/link_slot_", ignoreCase = true)) continue
                     val panel = PanelRef(s, p.optInt("t"), p.optInt("l"), p.optInt("w"), p.optInt("h"))
                     val key = WebModeLogic.normalizeUrl(s).ifBlank { s }
                     val old = merged[key]
