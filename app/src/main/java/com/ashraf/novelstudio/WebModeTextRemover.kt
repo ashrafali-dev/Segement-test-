@@ -411,6 +411,25 @@ internal object WebModeTextRemover {
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
             panelRemovedForLog = totalRemoved
+            // Compact Japanese-script audit: show whether Lens/OCR found a bubble but the local cleaner
+            // skipped it. This distinguishes OCR geometry/color-mask misses from MI-GAN timing without
+            // logging the dialogue itself or emitting a separate line for every bubble.
+            val japaneseBubbles = boundedBubbles.filter { bubble ->
+                bubble.sourceText.any { ch ->
+                    ch.code in 0x3040..0x30FF || ch.code in 0x3400..0x9FFF
+                }
+            }
+            if (japaneseBubbles.isNotEmpty()) {
+                val erasedJapanese = japaneseBubbles.count {
+                    WebModeTextRemovalCache.bubbleKey(it) in erased
+                }
+                OcrDiag.log(
+                    "CLEAN_JP_AUDIT",
+                    "src=${sourceUrl.take(80)} detected=${japaneseBubbles.size} erased=$erasedJapanese " +
+                        "unmatched=${japaneseBubbles.size - erasedJapanese} " +
+                        "soft=${japaneseBubbles.count { it.soft }} allowAi=$allowAi aiPolicy=$aiPolicy"
+                )
+            }
             if (totalRemoved < 8) return false
 
             val bytesOut = ByteArrayOutputStream()
