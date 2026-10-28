@@ -757,13 +757,27 @@ internal class WebModeExtractor(
             val futures = arrayOfNulls<java.util.concurrent.Future<ByteArray?>>(total)
             val lensOcrFutures = arrayOfNulls<java.util.concurrent.Future<LensPanelOcrAttempt>>(total)
             val panelFetchStartedAt = LongArray(total)
-            fun submitFetch(i: Int) {
+            fun submitFetch(i: Int, skipKnownAhead: Boolean = true) {
                 if (pool == null || i < 0 || i >= total || futures[i] != null) return
+                val panel = panels[i]
+                if (skipKnownAhead && req.visibleOnly && req.forceOcrSrc.isNullOrBlank() && !req.forceFreshOcr) {
+                    val key = panelKey(panel.src, panel.top)
+                    val hasAheadResult = synchronized(aheadCache) { aheadCache.containsKey(key) }
+                    val alreadyReadingAhead = aheadBusyKey == key
+                    val blankAt = blankSeenAt[key]
+                    val recentlyBlank = blankAt != null &&
+                        SystemClock.elapsedRealtime() - blankAt < BLANK_MEMO_MS
+                    // Cached/ahead-owned panels are checked before this function in the main loop.
+                    // Do not speculatively download their bytes while fetching a different visible panel.
+                    if (hasAheadResult || alreadyReadingAhead || recentlyBlank) return
+                }
                 futures[i] = pool.submit(java.util.concurrent.Callable<ByteArray?> {
-                    try { fetchWithRetry(panels[i], meta.url) } catch (_: Throwable) { null }
+                    try { fetchWithRetry(panel, meta.url) } catch (_: Throwable) { null }
                 })
             }
-            for (k in 0 until minOf(FETCH_AHEAD, total)) submitFetch(k)
+            // Do not eagerly prefetch the first N panels here: many real-time viewports are already
+            // populated by read-ahead cache hits. Start the bounded fetch pipeline only after the main
+            // loop confirms that a panel actually needs a fresh download/OCR.
             val texts = arrayOfNulls<String>(total)
             val layouts = arrayOfNulls<List<WmBubble>>(total)
             val seen = HashSet<String>()
@@ -810,7 +824,9 @@ internal class WebModeExtractor(
                 }
                 val tFetch = SystemClock.elapsedRealtime()
                 progress("Loading image ${i + 1}/$total", 10 + i * 89 / total)
-                submitFetch(i)
+                // The current panel passed the cache check above, so fetch it even if its ahead read
+                // only just missed its completion deadline. Future look-ahead slots remain cache-aware.
+                submitFetch(i, skipKnownAhead = false)
                 submitFetch(i + FETCH_AHEAD)
                 val bytes = if (pool != null) {
                     val fetchWaitMs = when {
@@ -2006,7 +2022,9 @@ internal class WebModeExtractor(
                         // available to thorough scan mode, but must not consume CPU/RAM while the reader is scrolling
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
-                        val cleaned = WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode)
+                        val cleaned = WebModeTextRemover.cleanAndCache(
+                            wv.context, src, bytes, bubbles, allowAi = !realtimePriority && req.ahead <= 0
+                        )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
@@ -2167,20 +2185,22 @@ internal class WebModeExtractor(
             // reader's text: real-time only TAKES a finished result from the cache and, when there is none, starts the
             // detector in the background on its own copy of the picture (the next pass over this panel then has masks).
             // Only the thorough scan (not latency bound) waits for the detector here.
-            // Every real-time read counts as "the reader is busy": the background model only starts after 2.5 s of quiet.
-            if (fastMode) BubbleDetector.noteActivity()
+            // Ahead OCR is latency-sensitive too, even if an upstream caller requests a thorough decode path.
+            // Reuse cached detections but never start 3-6 s RT-DETR/segmentation inference from realtime/read-ahead.
+            val realtimePriority = fastMode || req.ahead > 0
+            if (realtimePriority) BubbleDetector.noteActivity()
             val detOk = Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
             val cachedDets: List<BubbleDetectorCore.Det>? = if (detOk) BubbleDetector.cached(bmp) else null
             val remoteDet = (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true
             // A whole-chapter scan (100+ pictures) must finish in about a minute: the two models need 4-10 s PER picture on a
             // mid-range phone, one after the other, so the scan does not run them unless wmDetectInScan is switched on.
             val scanDetect = Prefs.bool(wv.context, "wmDetectInScan", false)
-            val detectWanted = preRecognized == null && cachedDets == null && !fastMode && remoteDet && detOk && scanDetect
+            val detectWanted = preRecognized == null && cachedDets == null && !realtimePriority && remoteDet && detOk && scanDetect
             if (detectWanted) {
                 detFuture = try {
                     DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
                 } catch (_: Throwable) { null }
-            } else if (fastMode && cachedDets == null && remoteDet && detOk) {
+            } else if (realtimePriority && cachedDets == null && remoteDet && detOk) {
                 // A 3-6 s RT-DETR run in a "background" thread still steals CPU and native memory from the reader,
                 // and the model often starts in the quiet gap just before the user scrolls again. Realtime consumes
                 // an already-cached result when available; it must not launch new speculative detector inference.
@@ -2206,7 +2226,7 @@ internal class WebModeExtractor(
                 else if (earlyDet != null) {
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
                     try { if (fastMode) earlyDet.get(9, java.util.concurrent.TimeUnit.SECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
-                } else if (!fastMode && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+                } else if (!realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
             val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !fastMode && Prefs.bool(wv.context, "wmBubbleFit", true))
