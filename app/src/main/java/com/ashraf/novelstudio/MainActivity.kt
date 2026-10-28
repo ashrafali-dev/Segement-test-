@@ -1267,7 +1267,10 @@ class MainActivity : Activity() {
                     // Clear stale visible text immediately, even while the chatbot is busy.
                     clearCanvasTransitionOverlay(novelWv.url.orEmpty())
                     for (panel in panels) {
-                        val key = WebModeLogic.normalizeUrl(panel.src)
+                        val source = WebModeLogic.normalizeUrl(panel.src)
+                        // The same URL can appear at multiple document offsets on virtualized readers.
+                        // Match WebModeExtractor's ahead-cache key (URL + top), so one panel cannot hide another.
+                        val key = if (source.isBlank()) "" else "$source@${panel.top}"
                         if (key.isNotBlank()) collectedPanels.putIfAbsent(key, panel)
                     }
                     // Full batches go immediately; a smaller batch gets only one 300 ms chance
