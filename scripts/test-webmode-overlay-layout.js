@@ -70,6 +70,17 @@ assert.ok(mainActivity.includes("nextChatbotRequestAtMs = minOf(nextChatbotReque
 assert.ok(mainActivity.includes("rtAheadSkippedBubbleHashes") &&
   mainActivity.includes("rememberSkippedAheadBubbles"),
   "unresolved read-ahead noise must not create an endless retry loop");
+const bubbleSeg = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleSegDetector.kt", "utf8");
+assert.ok(bubbleSeg.includes('Thread(r, "ns-mask-release")') &&
+  bubbleSeg.includes("releaseExecutor.execute"),
+  "idle mask-session release must not block the Android main thread");
+assert.ok(bubbleSeg.includes("expectedGeneration == releaseGeneration"),
+  "a queued idle cleanup must not release a mask session that was used again");
+assert.ok(remover.includes('"AI_PAINT"') && remover.includes('"AI_PANEL"') &&
+  remover.includes("aiCallsAttempted") && remover.includes("aiTotalMs"),
+  "MI-GAN diagnostics must distinguish actual region calls and per-panel elapsed time");
+assert.ok(remover.includes('"CLEAN_JP_AUDIT"'),
+  "Japanese text-cleaning outcomes must be measurable without logging dialogue content");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
