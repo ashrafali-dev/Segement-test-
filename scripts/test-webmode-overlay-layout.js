@@ -128,6 +128,11 @@ assert.ok(extractor.includes("shapeCoverBands(bytes, bubbles, panelDetections)")
   "missing cover bands must be rebuilt even when another region made the image cleaner report success");
 assert.ok(remover.includes("val grow = (fontPx * 0.05f).toInt().coerceIn(1, 3)"),
   "background erasure must expand the mask to clear anti-aliased text edges");
+assert.ok(writer.includes("else{t.style.overflow='visible';b.style.overflow='visible';b.__nsShapeFitApplied=false;}"),
+  "a translation that still does not fit inside a model-locked box must overflow visibly instead of being clipped");
+assert.ok(writer.includes("!RB.b.getAttribute('data-tb')||!RB.b.getAttribute('data-cv')") &&
+          writer.includes("var unresolvedArt=bb.getAttribute('data-sf')==='1'&&!bb.getAttribute('data-cl')"),
+  "narrow pixel-only Japanese columns must be widened when no shape bands exist, and uncleaned artwork translations need a tight text-sized fallback card");
 // The balloon must never be repainted wholesale again: wipeInterior painted the whole interior rectangle.
 assert.ok(!remover.includes("private fun wipeInterior("),
   "text removal must not repaint the whole bubble interior");
