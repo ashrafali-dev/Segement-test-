@@ -2,7 +2,7 @@ name: Build APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, fix/whole-bubble-translation-context, feature/stylized-multilingual-comic-ocr, fix/realtime-batch-page-identity]
+    branches: [main, master, fix/whole-bubble-translation-context, feature/stylized-multilingual-comic-ocr, fix/realtime-batch-page-identity, experiment/migan-inpainting-rt-ocr-20261028]
 
 permissions:
   contents: write
@@ -109,6 +109,34 @@ jobs:
               --latest=false \
               --target "$GITHUB_SHA"
           fi
+
+      - name: Publish signed APK to MI-GAN + RT OCR candidate Release
+        if: github.ref == 'refs/heads/experiment/migan-inpainting-rt-ocr-20261028'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          ASSET="ToonSensei-MI-GAN-RT-OCR-CANDIDATE.apk"
+          TAG="ci-migan-rt-ocr"
+          test -s "$APK"
+          cp "$APK" "$ASSET"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Updating the MI-GAN + real-time OCR candidate APK..."
+            gh release upload "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "Creating the MI-GAN + real-time OCR candidate APK release..."
+            gh release create "$TAG" "$ASSET" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "ToonSensei - MI-GAN + Real-time OCR Candidate APK" \
+              --notes "Automatically updated from the latest successful build of experiment/migan-inpainting-rt-ocr-20261028. This is a candidate APK for testing and does not replace the main ci-latest release." \
+              --prerelease \
+              --latest=false \
+              --target "$GITHUB_SHA"
+          fi
+
+          echo "Candidate APK release page: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
 
       - name: Publish signed APK to rolling GitHub Release
         if: github.ref == 'refs/heads/main'
