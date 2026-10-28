@@ -84,6 +84,12 @@ assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDet
 assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
   mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0"),
   "ahead OCR must be reduced to one panel on low-heap devices and paused under memory pressure");
+assert.ok(extractor.includes('normalizedSource.contains("/link-slot-")') &&
+  extractor.includes('normalizedSource.contains("/link_slot_")'),
+  "promotional link-slot images must be excluded even when iframe collection bypasses page-script filtering");
+assert.ok(mainActivity.includes("Use surrounding dialogue as context to resolve pronouns, omitted subjects") &&
+  mainActivity.includes("Context is for understanding, not for copying"),
+  "realtime translation should resolve pronouns from nearby context without copying another bubble's words");
 assert.ok(extractor.includes("Number(x.vl)") && extractor.includes("(x=${it.left})"),
   "panel diagnostics must report viewport coordinates to investigate overlapping iframe/image candidates");
 const bubbleSeg = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleSegDetector.kt", "utf8");
