@@ -719,6 +719,42 @@ internal object WebModeTextRemover {
         return out
     }
 
+
+    /** True only when the original OCR glyph area is now clear enough for a transparent overlay. */
+    private fun ocrRegionLooksClean(
+        bitmap: Bitmap,
+        bubble: WmBubble,
+        width: Int,
+        height: Int,
+        paper: Int
+    ): Boolean {
+        val hasOcrBox = bubble.ocrW > 0f && bubble.ocrH > 0f
+        val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width
+        val cy = (if (hasOcrBox) bubble.ocrCy else bubble.cy) * height
+        val bw = (if (hasOcrBox) bubble.ocrW else bubble.w) * width
+        val bh = (if (hasOcrBox) bubble.ocrH else bubble.h) * height
+        if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite() || bw < 3f || bh < 3f) {
+            return false
+        }
+        val fontPx = (bubble.font * width).takeIf { it.isFinite() && it > 0f }?.coerceIn(3f, 400f)
+            ?: max(3f, min(bw, bh) * 0.5f)
+        val pad = (fontPx * 0.25f).toInt().coerceIn(2, 12)
+        val x0 = (cx - bw / 2f - pad).toInt().coerceIn(0, width - 1)
+        val y0 = (cy - bh / 2f - pad).toInt().coerceIn(0, height - 1)
+        val x1 = ceil(cx + bw / 2f + pad).toInt().coerceIn(x0 + 1, width)
+        val y1 = ceil(cy + bh / 2f + pad).toInt().coerceIn(y0 + 1, height)
+        val rw = x1 - x0
+        val rh = y1 - y0
+        val area = rw.toLong() * rh.toLong()
+        if (area !in 16L..MAX_REGION_PIXELS) return false
+        val pixels = IntArray(area.toInt())
+        bitmap.getPixels(pixels, 0, rw, x0, y0, rw, rh)
+        var strongInk = 0L
+        for (p in pixels) if (distance(p, paper) >= 45f) strongInk++
+        // One or two noisy/JPEG pixels are tolerated; a visible glyph or stroke is not.
+        return strongInk * 100L <= area * 2L
+    }
+
     fun cleanAndCache(
         context: Context,
         sourceUrl: String,
@@ -1215,10 +1251,20 @@ internal object WebModeTextRemover {
                 if (changed <= 0) continue
 
                 totalRemoved += changed
-                // One model mask can own multiple OCR rows. Mark every owner only after its entire verified
-                // flat interior has actually been reconstructed, so the writer can safely use a transparent overlay.
-                owners.forEach { erased.add(WebModeTextRemovalCache.bubbleKey(it)) }
-                OcrDiag.log("FLAT_INTERIOR", "pixels=$changed bands=${bands.size / 4} related=${owners.size} paperCheck=passed")
+                // One model mask can own multiple OCR rows. A successful flat fill is not by itself proof
+                // that every glyph's antialiased rim was inside the bands; recheck each OCR box before allowing
+                // transparent rendering. Anything that still looks like ink keeps the existing opaque cover.
+                var transparentReady = 0
+                for (owner in owners) {
+                    val key = WebModeTextRemovalCache.bubbleKey(owner)
+                    if (ocrRegionLooksClean(bitmap, owner, width, height, paper)) {
+                        erased.add(key)
+                        transparentReady++
+                    } else {
+                        erased.remove(key)
+                    }
+                }
+                OcrDiag.log("FLAT_INTERIOR", "pixels=$changed bands=${bands.size / 4} related=${owners.size} transparentReady=$transparentReady paperCheck=passed")
             }
 
             // The detector's balloon mask can occasionally cover a whole illustrated panel (for example a
