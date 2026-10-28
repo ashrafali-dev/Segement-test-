@@ -10,7 +10,7 @@ import com.ashraf.novelstudio.WmBubble
  * One manual-extract run, on the calling worker thread:
  *   capture(region) → crop → downscale → OCR (crop only) → build bubble (built-in mask) → translate → place
  *
- * Never takes a full-screen shot, never upscales, never retries on a wider image, and recycles every bitmap it
+ * Consumes only captured region pixels; bounded OCR recovery may enlarge/adjust them, and recycles every bitmap it
  * allocates on every path.
  */
 internal class ManualExtractPipeline(
@@ -53,13 +53,14 @@ internal class ManualExtractPipeline(
      * Same pipeline, on pixels the caller already captured (the 6-dot frame drawn by the user).
      * Takes ownership of [bitmap] and recycles it. There is no tap point: the frame IS the selection.
      */
-    fun runOnBitmap(bitmap: Bitmap, src: String, script: OcrScript, cancelled: () -> Boolean = { false }): Result {
+    fun runOnBitmap(bitmap: Bitmap, src: String, script: OcrScript,
+        x: Float = 0f, y: Float = 0f, w: Float = 1f, h: Float = 1f, cancelled: () -> Boolean = { false }): Result {
         val m = ManualExtractMetrics()
         val tStart = SystemClock.elapsedRealtime()
         if (cancelled()) { bitmap.recycle(); return fail(m, "cancelled") }
         m.cropW = bitmap.width; m.cropH = bitmap.height
         m.mark("capture")
-        return ocrAndPlace(bitmap, src, 0f, 0f, 1f, 1f, false, m, tStart, script, cancelled)
+        return ocrAndPlace(bitmap, src, x, y, w, h, false, m, tStart, script, cancelled)
     }
 
     private fun ocrAndPlace(
@@ -119,7 +120,7 @@ internal class ManualExtractPipeline(
             if (bubbles.isEmpty()) return fail(m, "no text")
             val paragraph = bubbles.joinToString("\n\n") { it.sourceText }
             val cacheKey = ManualExtractCache.key(paragraph, script.name)
-            val cached = ManualExtractCache.get(cacheKey)
+            val cached = if (ManualExtractConfig.USE_TRANSLATION_CACHE) ManualExtractCache.get(cacheKey) else null
             m.mark("build")
             if (cancelled()) return fail(m, "cancelled")
             if (cached != null) {
@@ -130,7 +131,7 @@ internal class ManualExtractPipeline(
             }
             // Translation is asynchronous on the Activity side; this call starts it and records the step.
             host.translateAndPlace(bubbles, paragraph, script) { translated ->
-                if (translated.isNotBlank()) ManualExtractCache.put(cacheKey, translated)
+                if (ManualExtractConfig.USE_TRANSLATION_CACHE && translated.isNotBlank()) ManualExtractCache.put(cacheKey, translated)
             }
             m.mark("translate_started")
             m.log(true, "started")
