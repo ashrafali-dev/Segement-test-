@@ -61,7 +61,9 @@ internal fun Context.dpf(v: Number): Float = v.toFloat() * resources.displayMetr
 
 enum class Ic {
     BACK, FORWARD, RELOAD, HOME, GRID, DOTS, PLUS, CLOSE, SHARE, SEARCH, BOLT, BOOKMARK, BOOK,
-    CHAT, SPLIT, SPARK, SAVE, STOP, GLOBE, CHECK, LOCK, CLOCK, SLIDERS, MOON, SHIELD, TEXT, CHEVRON
+    CHAT, SPLIT, SPARK, SAVE, STOP, GLOBE, CHECK, LOCK, CLOCK, SLIDERS, MOON, SHIELD, TEXT, CHEVRON,
+    // Added for the Toon Sensei UI (additive; nothing above changed):
+    CHEVRON_DOWN, PAUSE, PLAY, STOP_SQUARE, LIBRARY, LIST, EYE, TRASH, STAR, ZOOM, LINK
 }
 
 /** 24x24 stroke icons, drawn at any size. */
@@ -233,6 +235,13 @@ class IconDrawable(private val ic: Ic, private var color: Int, private val strok
                 fill.textAlign = Paint.Align.CENTER
                 fill.textSize = 13f
                 canvas.drawText("Aa", 12f, 16.4f, fill)
+            }
+            else -> {
+                // New Toon Sensei icons live in ToonIcons.kt so this legacy file stays untouched.
+                // Any name that ToonIcons does not know yet draws a quiet dot instead of crashing.
+                if (!ToonIcons.draw(canvas, ic, stroke, fill)) {
+                    canvas.drawCircle(12f, 12f, 2.2f, fill)
+                }
             }
         }
         canvas.restore()

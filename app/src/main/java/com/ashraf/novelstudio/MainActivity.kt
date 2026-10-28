@@ -2721,20 +2721,6 @@ return t.length>=40?'TXT:'+t:'';
         override fun run() {
             if (::scanDot.isInitialized) {
                 val statuses = activityDotStatuses()
-                val statusKeys = statuses.joinToString("|") { it.key }
-                val now = System.currentTimeMillis()
-                if (statusKeys != indicatorCycleKey) {
-                    indicatorCycleKey = statusKeys
-                    // Prefer read-ahead OCR immediately when it starts; frequent visible-panel
-                    // changes must not keep resetting the cycle before its blue state appears.
-                    indicatorCycleIndex = statuses.indexOfFirst { it.key == "read-ahead-ocr" }
-                        .takeIf { it >= 0 } ?: 0
-                    indicatorCycleAtMs = now
-                } else if (statuses.size > 1 && now - indicatorCycleAtMs >= 1400L) {
-                    indicatorCycleIndex = (indicatorCycleIndex + 1) % statuses.size
-                    indicatorCycleAtMs = now
-                }
-                val status = statuses[indicatorCycleIndex.coerceIn(0, statuses.lastIndex)]
                 val jobBusy = statuses.any { it.key != "idle" }
                 // Keep chatbot timers alive while any OCR, queue, translation, placement or prefetch work exists.
                 ScanKeepAlive.sync(this@MainActivity, jobBusy)
@@ -2742,25 +2728,292 @@ return t.length>=40?'TXT:'+t:'';
                     try { chatWv.resumeTimers() } catch (_: Exception) { }
                 }
 
-                // The large button badge and the older tiny in-content dot mirror the same live stage.
-                if (::extractBtn.isInitialized) {
-                    extractBtn.setActivityIndicator(status.color, status.blinking, status.label)
-                }
-                scanDot.visibility = View.VISIBLE
-                scanDot.contentDescription = status.label
-                (scanDot.background as? GradientDrawable)?.setColor(status.color)
-                if (::modeChipDot.isInitialized) (modeChipDot.background as? GradientDrawable)?.setColor(status.color)
+                // Toon Sensei UI: no cycling, no blinking, no chip. StatusModel is the single source of
+                // truth; the dock ring, the Tasks tray and the banners read only from it.
+                retireLegacyStatusViews()
                 refreshModeChip()
-                updateActivityChip(statuses)
-                if (status.blinking) {
-                    scanDotPhase = !scanDotPhase
-                    scanDot.alpha = if (scanDotPhase) 1f else 0.22f
-                } else {
-                    scanDot.alpha = 1f
+                refreshDockStatus()
+            }
+            handler.postDelayed(this, 1000L)
+        }
+    }
+
+    /** Hide the old animated status dots for good (they are still built, just never shown). */
+    private fun retireLegacyStatusViews() {
+        if (::scanDot.isInitialized && scanDot.visibility != View.GONE) scanDot.visibility = View.GONE
+        if (::extractBtn.isInitialized) extractBtn.setActivityIndicator(0, false, "")
+        activityChip?.let { if (it.visibility != View.GONE) it.visibility = View.GONE }
+    }
+
+    /** The mode chip under the new dock: "Novel" / "Scan" / "Live" / "Lite". */
+    private fun currentDockModeLabel(): String = when (currentReadMode()) {
+        ReadMode.NOVEL -> Strings.MODE_NOVEL
+        ReadMode.SCAN -> Strings.MODE_SCAN
+        ReadMode.REALTIME -> if (manualRealtimeExtractEnabled()) Strings.MODE_LITE else Strings.MODE_LIVE
+    }
+
+    /** Provider shown in the Tasks tray ("ChatGPT" from "chatgpt.com"). */
+    private fun chatbotDisplayName(): String {
+        val a = bots()
+        for (i in 0 until a.length()) {
+            val o = a.optJSONObject(i) ?: continue
+            if (botKey(o.optString("u", "")) == currentBotKey) return o.optString("n", currentBotKey)
+        }
+        return currentBotKey.removePrefix("www.").substringBefore('.')
+    }
+
+    private fun aheadReadyCount(): Int {
+        val ch = lastChapter ?: return 0
+        val key = keyOf(ch)
+        var n = 0
+        for (adj in listOf(ch.next, ch.prev)) {
+            if (adj.isNullOrBlank()) continue
+            val m = prefetchNextOf.values.firstOrNull { pageKey(it.url) == pageKey(adj) } ?: continue
+            if (keyOf(m) == key) continue
+            if (Store.find(this, m) != null) n++
+        }
+        return n
+    }
+
+    /**
+     * Only conditions that really need the user. A failed whole-chapter job sets lastFailedChapter
+     * (it stops retrying after two tries); real-time panel misses retry themselves and must NOT raise
+     * an amber banner, so failedChapters alone is deliberately ignored here.
+     */
+    private fun attentionText(): String? {
+        if (lastFailedChapter != null) return "Could not translate this chapter. Tap Retry."
+        return null
+    }
+
+    /**
+     * Rebuild StatusModel from the existing lanes (at most once per second; also on demand).
+     * Reads only fields that already exist, so no feature logic changes.
+     */
+    fun refreshDockStatus() {
+        val dock = newDock ?: return
+        val ch = lastChapter
+        val key = ch?.let { keyOf(it) } ?: ""
+        // The job clock starts when a job starts and stops when it ends (no drifting counter).
+        val jobRunning = running != null
+        if (key != chatJobKey || (jobRunning && chatJobStartedMs == 0L)) {
+            chatJobKey = key
+            chatJobStartedMs = if (key.isNotEmpty() && jobRunning) android.os.SystemClock.elapsedRealtime() else 0L
+        }
+        if (!jobRunning && chatJobStartedMs != 0L) chatJobStartedMs = 0L
+        val elapsed = if (chatJobStartedMs > 0L)
+            ((android.os.SystemClock.elapsedRealtime() - chatJobStartedMs) / 1000L).toInt() else 0
+        // Real determinate progress: the app counts paragraph markers in the reply against the
+        // markers it sent (jobMarkers). "progress" already holds that percentage; no faking.
+        val total = if (chatPhase > 0) jobMarkers else 0
+        val found = if (total > 0) (progress * total / 100).coerceIn(0, total) else 0
+
+        val pairs = activityDotStatuses().map { Pair(it.key, it.label) }
+        val snap = statusModel.build(
+            statuses = pairs,
+            chatFound = found,
+            chatTotal = total,
+            chatPhase = chatPhase,
+            chatElapsedSec = elapsed,
+            chatProvider = chatbotDisplayName(),
+            queueSize = queue.size,
+            aheadOn = Prefs.bool(this, "prefetchNextChapter"),
+            aheadReady = aheadReadyCount(),
+            attentionText = attentionText(),
+            detailLine = chipDetailLine()
+        )
+        statusSnap = snap
+
+        dock.setModeLabel(currentDockModeLabel())
+        dock.setMain(dockMainState())
+        dock.setNextReady(nextChapterReady())
+        dock.setChat(
+            snap.needsAttention,
+            snap.chatCount,
+            if (snap.chatTotal > 0) snap.chatCount.toFloat() / snap.chatTotal.toFloat() else 0f,
+            statusDescription(snap)
+        )
+        tasksTray?.takeIf { it.isOpen() }?.render(snap, Prefs.bool(this, "prefetchNextChapter"))
+        syncAttentionBanner(snap)
+        newTopBar?.setTabCount(browserTabs.size)
+        novelWv.url?.let { newTopBar?.setUrl(it) }
+    }
+
+    private fun statusDescription(s: StatusModel.Snapshot): String {
+        if (s.needsAttention) return "Needs you: " + (s.attentionText ?: "check the chatbot")
+        val lane = s.chatLane ?: return Strings.CHATBOT + ": " + Strings.IDLE
+        val right = if (lane.hasProgress) Strings.count(lane.n!!, lane.total) else ""
+        return Strings.statusLine(lane.stateText, lane.elapsedSec, lane.n ?: 0, lane.total) + (if (right.isNotEmpty()) " ($right)" else "")
+    }
+
+    private fun dockMainState(): Dock.Main {
+        if (running != null || queue.isNotEmpty() || webModeHandle != null) return Dock.Main.STOP
+        return when (currentReadMode()) {
+            ReadMode.NOVEL -> Dock.Main.TRANSLATE
+            ReadMode.SCAN -> Dock.Main.SCAN
+            // Real-time auto on = Pause/Resume; auto off (Manual Lite) = one-shot Read.
+            ReadMode.REALTIME -> if (manualRealtimeExtractEnabled()) Dock.Main.READ
+                else if (Prefs.bool(this, "rtAutoOcrEnabled", true)) Dock.Main.PAUSE else Dock.Main.RESUME
+        }
+    }
+
+    /** Main dock button. Every branch calls an existing function; no new behaviour. */
+    private fun onDockMain() {
+        when (dockMainState()) {
+            Dock.Main.STOP -> cancelAll()
+            Dock.Main.TRANSLATE, Dock.Main.SCAN -> extractCopy()
+            Dock.Main.READ -> extractCopy()
+            Dock.Main.PAUSE -> setRealtimeAutoOcrEnabled(false)
+            Dock.Main.RESUME -> setRealtimeAutoOcrEnabled(true)
+        }
+    }
+
+    private fun openModeSheet() {
+        val cur = when (currentReadMode()) {
+            ReadMode.NOVEL -> ModeSheet.Choice.NOVEL
+            ReadMode.SCAN -> ModeSheet.Choice.SCAN
+            ReadMode.REALTIME -> if (manualRealtimeExtractEnabled()) ModeSheet.Choice.LITE else ModeSheet.Choice.REALTIME
+        }
+        ModeSheet.show(findViewById(android.R.id.content) as? ViewGroup ?: return, cur) { pick ->
+            when (pick) {
+                ModeSheet.Choice.NOVEL -> setReadMode(ReadMode.NOVEL)
+                ModeSheet.Choice.SCAN -> setReadMode(ReadMode.SCAN)
+                ModeSheet.Choice.REALTIME -> {
+                    if (DeepSeekRealtimeTranslation.isEnabled(this) && !Prefs.bool(this, "rtAutoOcrEnabled", true))
+                        setRealtimeAutoOcrEnabled(true)
+                    else setReadMode(ReadMode.REALTIME)
+                }
+                ModeSheet.Choice.LITE -> {
+                    if (DeepSeekRealtimeTranslation.isEnabled(this) && Prefs.bool(this, "rtAutoOcrEnabled", true))
+                        setRealtimeAutoOcrEnabled(false)
+                    else setReadMode(ReadMode.REALTIME)
                 }
             }
-            handler.postDelayed(this, 450L)
+            refreshDockStatus()
         }
+    }
+
+    /**
+     * Dock Chat tap. Phase 1 keeps the existing, proven behaviour (Novel <-> Split <-> Chatbot) so
+     * nothing regresses; the Peek/Full/Half/Site cycle arrives in phase 4 once the pane sizing is
+     * validated on the phone.
+     */
+    private fun cycleChatPane() {
+        if (homeVisible()) return
+        cycleMode()
+        refreshDockStatus()
+    }
+
+    private fun openTasksTray() {
+        val tray = tasksTray ?: TasksTray(
+            this,
+            findViewById(android.R.id.content) as? ViewGroup ?: return
+        ).apply {
+            onStopAll = { cancelAll(); tasksTray?.close() }
+            onResend = { onDockMain(); tasksTray?.close() }
+            onOpenChatbot = {
+                if (mode != Mode.CHAT) setMode(Mode.CHAT)
+                tasksTray?.close()
+            }
+            onAheadToggle = { setPrefetchEnabled(it); refreshDockStatus() }
+            onClosed = { refreshDockStatus() }
+        }
+        tasksTray = tray
+        val snap = statusSnap ?: run { refreshDockStatus(); statusSnap }
+        tray.show(Prefs.bool(this, "prefetchNextChapter"), snap ?: return)
+    }
+
+    /**
+     * A failed chapter retries itself every ~15 s, so its failure is a "wait" condition, not a
+     * "needs you" one: showing an amber banner for it would repeat every retry. It goes to the log;
+     * the Retry banner appears only when a job stops retrying (lastFailedChapter cleared).
+     */
+    private fun showAttentionBannerFromToast(text: String): Boolean {
+        val t = text.lowercase()
+        val selfRetrying = lastFailedChapter != null ||
+            t.contains("retrying automatically") || t.contains("retrying in") || t.contains("try again by itself")
+        if (selfRetrying) {
+            Notify.log(text)
+            return true
+        }
+        return false
+    }
+
+    // ---- slow connection notice: one amber inline line if a page is still loading after ~8 s
+    private var slowLoadUrl = ""
+    private var slowLoadShown = false
+
+    private fun startSlowLoadNotice(url: String) {
+        slowLoadUrl = url
+        slowLoadShown = false
+        handler.removeCallbacks(slowLoadRunnable)
+        handler.postDelayed(slowLoadRunnable, 8000L)
+    }
+
+    private fun endSlowLoadNotice() {
+        handler.removeCallbacks(slowLoadRunnable)
+        slowLoadUrl = ""
+        if (slowLoadShown && Notify.currentText() == Strings.SLOW_LOAD) Notify.dismiss()
+        slowLoadShown = false
+    }
+
+    private val slowLoadRunnable = Runnable {
+        // Only while the same URL is still loading; a finished page cancels this runnable.
+        if (slowLoadUrl.isNotEmpty() && !isFinishing && novelWv.url == slowLoadUrl && novelWv.progress < 100 &&
+            Notify.currentText() == null) {
+            slowLoadShown = true
+            Notify.banner(this, Strings.SLOW_LOAD, actionLabel = null, onAction = null)
+        }
+    }
+
+    private fun showAttentionBanner(text: String) {
+        val retryable = lastFailedChapter != null || failedChapters.isNotEmpty() || queue.isNotEmpty()
+        Notify.banner(
+            this,
+            text,
+            actionLabel = if (retryable) "Retry" else null,
+            onAction = if (retryable) ({ retryFailedChapters(); refreshDockStatus() }) else null
+        )
+    }
+
+    private fun backFromTopBar() {
+        when {
+            homeVisible() -> showHome()
+            activeWv.canGoBack() -> activeWv.goBack()
+            else -> showHome()
+        }
+    }
+
+    /** True when the very next chapter already has a saved translation (Ahead). Cached per URL. */
+    private fun nextChapterReady(): Boolean {
+        val ch = lastChapter
+        val key = (ch?.url ?: "") + "|" + prefetchNextOf.size + "|" + (ch?.next ?: "")
+        if (key == nextReadyCacheKey) return nextReadyCacheVal
+        val nextUrl = ch?.next?.takeIf { it.isNotBlank() }
+            ?: prefetchNextOf[keyOf(ch ?: return false)]?.url
+        val ready = if (nextUrl.isNullOrBlank()) false else {
+            val m = prefetchNextOf.values.firstOrNull { pageKey(it.url) == pageKey(nextUrl!!) }
+            m != null && Store.find(this, m) != null
+        }
+        nextReadyCacheKey = key
+        nextReadyCacheVal = ready
+        return ready
+    }
+
+    /**
+     * Type-C banner for conditions that need the user. Never auto-hides. Raised once per condition:
+     * while it is on screen, or after the user dismissed it, the 1 s tick does not raise it again.
+     */
+    private fun syncAttentionBanner(s: StatusModel.Snapshot) {
+        val text = s.attentionText
+        if (text.isNullOrBlank()) {
+            // Condition resolved: let a future, fresh condition raise a new banner.
+            bannerAttentionKey = ""
+            return
+        }
+        if (text == bannerAttentionKey) return
+        bannerAttentionKey = text
+        if (Notify.currentText() == text) return
+        showAttentionBanner(text)
     }
     private lateinit var modeTransitionCover: ImageView
     private lateinit var novelBox: FrameLayout
@@ -2782,6 +3035,21 @@ return t.length>=40?'TXT:'+t:'';
     private lateinit var dockWrapView: FrameLayout
     private lateinit var chromeTopView: LinearLayout
     private lateinit var floatBoltHost: FrameLayout
+
+    // ---- Toon Sensei UI (phase 1): the visible dock, top bar, status model and Tasks tray.
+    // The old views above stay alive and keep their state; only their visibility is switched off,
+    // so every existing code path (tour, mode capsule, progress card, chip) still works.
+    private var newDock: Dock? = null
+    private var newTopBar: TopBar? = null
+    private val statusModel = StatusModel()
+    @Volatile private var statusSnap: StatusModel.Snapshot? = null
+    private var tasksTray: TasksTray? = null
+    private var chatJobStartedMs = 0L
+    private var chatJobKey = ""
+    private var nextReadyCacheKey = ""
+    private var nextReadyCacheVal = false
+    private var bannerAttentionKey = ""
+    private lateinit var statusBannerHost: FrameLayout
     private var barsHidden = false
     private var barsAnimating = false
     // True while WebToon Realtime or Scanning is active (Web Mode on). Read on every touch-move, so it is
@@ -3312,11 +3580,16 @@ return t.length>=40?'TXT:'+t:'';
         lastToastMessage = m
         lastToastElapsedMs = now
 
-        var text = m
-        if (Regex("[\\u0980-\\u09FF]").containsMatchIn(text)) {
-            text = "Action completed or failed. Please check the page and try again."
+        // NOTHING appears at the bottom any more. A message that asks the user to act becomes a
+        // type-C banner under the top bar; everything else is written quietly to the Tasks log.
+        // (Ambiguous leftovers are listed in the phase report for hand conversion.)
+        val text = NotifyClass.clean(m)
+        if (text.isEmpty()) return
+        if (showAttentionBannerFromToast(text)) return
+        when (NotifyClass.classify(m)) {
+            NotifyClass.Kind.BANNER -> showAttentionBanner(text)
+            NotifyClass.Kind.LOG -> Notify.log(text)
         }
-        showSnack(text)
     }
 
     // ================================================================== UI building blocks
@@ -3373,22 +3646,14 @@ return t.length>=40?'TXT:'+t:'';
 
     // ---- floating message (replaces the system Toast, which cannot be styled)
     private fun showSnack(msg: String) {
-        runOnUiThread {
-            if (!::snackView.isInitialized || !hasWindowFocus()) {
-                // a dialog/sheet is on top of the app window: the system toast is still visible there
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                return@runOnUiThread
-            }
-            snackHide?.let { handler.removeCallbacks(it) }
-            snackView.animate().cancel()
-            snackView.text = msg
-            snackView.visibility = View.VISIBLE
-            snackView.alpha = 0f
-            snackView.translationY = dp(16).toFloat()
-            snackView.animate().alpha(1f).translationY(0f).setDuration(190).start()
-            val r = Runnable { hideSnack() }
-            snackHide = r
-            handler.postDelayed(r, (2200L + msg.length * 28L).coerceAtMost(6500L))
+        // Toon Sensei: the bottom snackbar is retired. Everything that used to call showSnack goes
+        // through the same classifier as toast(), so no message is ever lost or shown at the bottom.
+        val text = NotifyClass.clean(msg)
+        if (text.isEmpty()) return
+        if (showAttentionBannerFromToast(text)) return
+        when (NotifyClass.classify(msg)) {
+            NotifyClass.Kind.BANNER -> runOnUiThread { showAttentionBanner(text) }
+            NotifyClass.Kind.LOG -> Notify.log(text)
         }
     }
 
@@ -3706,7 +3971,9 @@ return t.length>=40?'TXT:'+t:'';
             setOnEditorActionListener { _, _, _ -> go(this.text.toString()); true }
             onFocusChangeListener = View.OnFocusChangeListener { _, has ->
                 searchShortcutsVisible = has
-                shortcutScroll.visibility = if (has) View.VISIBLE else View.GONE
+                // The legacy address bar is hidden in the Toon Sensei UI; its shortcut strip must stay
+                // hidden too, or focusing this view would reveal a strip nobody can position.
+                shortcutScroll.visibility = View.GONE
                 addressBox.background = Glass.field(this@MainActivity, 19, has)
             }
             addTextChangedListener(object : TextWatcher {
@@ -3788,8 +4055,21 @@ return t.length>=40?'TXT:'+t:'';
             addView(shortcutStrip, ViewGroup.LayoutParams(WC, dp(42)))
         }
 
+        // ---- Toon Sensei top bar (phase 1). The old topWrap is kept alive but hidden: the web-mode
+        // floating-bar logic still measures it, and nothing else breaks if a feature reads urlBar.
+        topWrap.visibility = View.GONE
+        shortcutScroll.visibility = View.GONE // the old address-bar shortcut strip goes with it
+        val bar = TopBar(this).apply {
+            onBack = { backFromTopBar() }
+            onUrlTap = { showTabGrid() }
+            onReloadOrStop = { if (novelWv.progress < 100) novelWv.stopLoading() else reloadPage() }
+            onTabs = { showTabGrid() }
+            onMore = { menu() }
+        }
+        newTopBar = bar
         val browserChrome = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            addView(bar.rootWithProgress(), LinearLayout.LayoutParams(MP, WC))
             addView(topWrap, LinearLayout.LayoutParams(MP, WC))
             addView(shortcutScroll, LinearLayout.LayoutParams(MP, WC))
         }
@@ -3816,6 +4096,16 @@ return t.length>=40?'TXT:'+t:'';
             addView(stripDivider, LinearLayout.LayoutParams(MP, dp(1)))
             addView(chatWv, LinearLayout.LayoutParams(MP, 0, 1f))
         }
+
+        // ================= Toon Sensei banner layer (type-C "needs you" messages), just under the bar
+        statusBannerHost = FrameLayout(this).apply {
+            // Wrap-height host: the banner floats over the page but never covers the top bar, and
+            // touches outside its own bounds pass through to the WebView below. Screen readers can
+            // still reach the banner and its buttons (no accessibility hiding here).
+            clipChildren = false
+            isClickable = false
+        }
+        Notify.attachHost(statusBannerHost)
 
         // ================= translation status card (floats over the page)
         progressBar = BookwormProgress(this)
@@ -3911,8 +4201,16 @@ return t.length>=40?'TXT:'+t:'';
             addView(chatBox, FrameLayout.LayoutParams(MP, MP))
             addView(modeTransitionCover, FrameLayout.LayoutParams(MP, MP))
             addView(progressBox, FrameLayout.LayoutParams(MP, WC, Gravity.TOP).also { it.setMargins(dp(10), dp(10), dp(10), 0) })
+            // The Bookworm progress card (and its animated row) is retired in the Toon Sensei UI:
+            // progress now lives in the dock's Chat ring and the Tasks tray. The view stays built so
+            // updateProgressUi() keeps running unchanged, it is just never shown.
+            progressBox.visibility = View.GONE
             addView(togglePill, FrameLayout.LayoutParams(WC, dp(38), Gravity.BOTTOM or Gravity.END).also { it.setMargins(0, 0, dp(12), dp(12)) })
             addView(prefetchChip, FrameLayout.LayoutParams(WC, dp(28), Gravity.BOTTOM or Gravity.START).also { it.setMargins(dp(12), 0, 0, dp(12)) })
+            // Legacy floating controls are retired for the Toon Sensei UI (they come back as the
+            // right-edge tools pill in phase 4); their views stay built so their click logic is intact.
+            togglePill.visibility = View.GONE
+            prefetchChip.visibility = View.GONE
             scanDot = View(this@MainActivity).apply {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.OVAL
@@ -4055,12 +4353,24 @@ return t.length>=40?'TXT:'+t:'';
             addView(dockBtn(Ic.FORWARD, "Next chapter") { step("next") })
             addView(dockBtn(Ic.GRID, "Menu") { menu() }.also { menuBtnView = it })
         }
+        // ---- Toon Sensei dock (phase 1). The legacy dock above stays built (and keeps its state) but is
+        // hidden: it is what Web Mode / tours still measure, and its Extract button still drives every
+        // existing gesture path. The new dock only *reports* taps into those same functions.
+        dock.visibility = View.GONE
+        val nd = Dock(this).apply {
+            onModeTap = { openModeSheet() }
+            onPrev = { step("prev") }
+            onNext = { step("next") }
+            onMain = { onDockMain() }
+            onChatTap = { cycleChatPane() }
+            onChatLong = { openTasksTray() }
+        }
+        newDock = nd
         val dockWrap = FrameLayout(this).apply {
             clipChildren = false
             clipToPadding = false
-            // Top padding >= the button's overhang (~11dp) + badge: hardware layers / elevation clip anything outside this view.
-            setPadding(dp(14), dp(18), dp(14), dp(12))
             addView(dock, FrameLayout.LayoutParams(MP, dp(68)))
+            addView(nd, FrameLayout.LayoutParams(MP, WC))
         }
         dockBar = dock
         dockWrapView = dockWrap
@@ -4116,6 +4426,7 @@ return t.length>=40?'TXT:'+t:'';
             addView(modeOverlay, FrameLayout.LayoutParams(dp(230), dp(230), Gravity.CENTER))
             addView(floatBoltHost, FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = dp(20) })
             addView(snackView, FrameLayout.LayoutParams(WC, WC, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = dp(106) })
+            addView(statusBannerHost, FrameLayout.LayoutParams(MP, WC, Gravity.TOP).also { it.topMargin = dp(57) })
             addView(tourOverlay, FrameLayout.LayoutParams(MP, MP))
         }
         setContentView(root)
@@ -4128,6 +4439,8 @@ return t.length>=40?'TXT:'+t:'';
         setMode(Mode.SPLIT)
         refreshModeChip()
         refreshAutoBtn()
+        newTopBar?.setTabCount(browserTabs.size)
+        refreshDockStatus()
         applyDark()
         if (browserTabs.firstOrNull()?.url.isNullOrBlank()) {
             novelWv.loadUrl(Prefs.get(this, "lastNovelUrl", "https://www.google.com/"))
@@ -4756,7 +5069,8 @@ return t.length>=40?'TXT:'+t:'';
                         browserTabs.add(BrowserTab("New Tab", url))
                         renderTabs()
                         persistBrowserTabs()
-                        toast("Opened in background tab (${browserTabs.size})")
+                        // Message class B: no popup, the tab counter fills for a moment and shows the new count.
+                        newTopBar?.flashTabCount(browserTabs.size)
                     }
                     2 -> { copy(url); toast("Link copied") }
                 }
@@ -5392,18 +5706,22 @@ return t.length>=40?'TXT:'+t:'';
             val first = !modeCapsuleSeeded
             val changed = modeCapsule.setSelectedIndex(idx, !first)
             modeCapsuleSeeded = true
-            // Any mode change (capsule tap, menu row, ...) gets the little scanner animation in the page centre.
-            if (changed && !first && ::modeOverlay.isInitialized) modeOverlay.play(idx)
+            // Toon Sensei: no looping scanner animation on mode changes. The mode chip text itself is
+            // the confirmation (messages class A). The capsule's selection state is still updated above
+            // so any legacy caller that reads it stays correct.
         }
         if (::extractBtn.isInitialized) extractBtn.modeIndex = idx
+        // The visible mode control is the new dock's chip ("Novel" / "Scan" / "Live" / "Lite").
+        newDock?.setModeLabel(currentDockModeLabel())
         refreshPrefetchChip()
     }
 
     /** Shown in Novel and Scanning mode only; Real-time never prefetches whole chapters. */
     private fun refreshPrefetchChip() {
         if (!::prefetchChip.isInitialized) return
-        val show = currentReadMode() != ReadMode.REALTIME && mode != Mode.CHAT && !homeVisible()
-        prefetchChip.visibility = if (show) View.VISIBLE else View.GONE
+        // Toon Sensei: the floating "Ahead ON/OFF" chip is gone; the switch now lives in the Tasks tray.
+        // Keep the view's text/state in sync for anything that still reads it, but never show it.
+        prefetchChip.visibility = View.GONE
         val on = Prefs.bool(this, "prefetchNextChapter")
         prefetchChip.text = if (on) "Ahead ON" else "Ahead OFF"
         prefetchChip.background = GradientDrawable().apply {
@@ -5705,12 +6023,16 @@ return t.length>=40?'TXT:'+t:'';
                     chromeTopView.setLayerType(View.LAYER_TYPE_NONE, null)
                     dockWrapView.setLayerType(View.LAYER_TYPE_NONE, null)
                     // The bolt stays reachable: it floats over the page while the bars are away.
-                    (extractBtn.parent as? ViewGroup)?.removeView(extractBtn)
-                    extractBtn.translationY = 0f
-                    floatBoltHost.addView(extractBtn, FrameLayout.LayoutParams(dp(60), dp(60)))
-                    floatBoltHost.alpha = 0f
-                    floatBoltHost.visibility = View.VISIBLE
-                    floatBoltHost.animate().alpha(1f).setDuration(140L).start()
+                    // In the Toon Sensei UI the legacy dock (and the Extract button inside it) is hidden,
+                    // so nothing is promoted — otherwise a stray bolt would float over the page alone.
+                    if (dockBar.visibility == View.VISIBLE) {
+                        (extractBtn.parent as? ViewGroup)?.removeView(extractBtn)
+                        extractBtn.translationY = 0f
+                        floatBoltHost.addView(extractBtn, FrameLayout.LayoutParams(dp(60), dp(60)))
+                        floatBoltHost.alpha = 0f
+                        floatBoltHost.visibility = View.VISIBLE
+                        floatBoltHost.animate().alpha(1f).setDuration(140L).start()
+                    }
                     barsAnimating = false
                 }.start()
             }
@@ -6230,6 +6552,10 @@ return t.length>=40?'TXT:'+t:'';
                 AdBlock.pageHost = Uri.parse(url).host?.lowercase()
                 // Processed images belong to the current page only; never reuse them on another chapter.
                 WebModeTextRemovalCache.clear(this@MainActivity)
+                // Toon Sensei top bar: show the address and start the 2dp load line.
+                newTopBar?.setUrl(url)
+                newTopBar?.setLoading(true)
+                startSlowLoadNotice(url)
             }
             if (view === novelWv && url != null && !restoringTab) {
                 browserTabs.getOrNull(activeTabIndex)?.url = url
@@ -6269,6 +6595,13 @@ return t.length>=40?'TXT:'+t:'';
                 }, 2500)
             }
             if (darkMode() == 2) view?.evaluateJavascript(Js.DARK_ON, null)
+            if (view === novelWv) {
+                // Toon Sensei top bar: stop the load line and dismiss the "slow connection" notice.
+                newTopBar?.setLoading(false)
+                if (url != null) newTopBar?.setUrl(url)
+                endSlowLoadNotice()
+                refreshDockStatus()
+            }
             if (url != null) {
                 Prefs.put(this@MainActivity, "lastNovelUrl", url)
                 if (view === novelWv && !restoringTab) {
@@ -9569,6 +9902,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     }
 
     private fun setProgressVisible(v: Boolean) {
+        // Single guard for the retired Bookworm card: no branch of updateProgressUi() can show it again.
+        if (v) { progressShown = false; progressBox.visibility = View.GONE; return }
         if (v == progressShown) return
         progressShown = v
         progressBox.animate().cancel()

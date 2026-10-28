@@ -187,10 +187,13 @@ Priority: Use the full chapter context to translate each sentence accurately, bu
     fun adblock(c: Context): Boolean = !bool(c, "noAdblock")
     fun auto(c: Context): Boolean = !bool(c, "noAuto")
 
-    // Bengali font for the translated text: 0 = normal, 1..3 = bundled fonts in assets/fonts
-    val FONT_FILES = arrayOf("", "tiro", "hind", "galada")
-    val FONT_NAMES = arrayOf("Default", "Tiro Bangla (serif)", "Hind Siliguri (clean)", "Galada (stylish)")
-    fun fontIdx(c: Context): Int = (get(c, "trFont", "1").toIntOrNull() ?: 1).coerceIn(0, FONT_FILES.size - 1)
+    // Bengali font for the translated text: 0 = the page's own font, 1..4 = bundled fonts in assets/fonts.
+    // 4 (Noto Serif Bengali) is the Toon Sensei default; older installs keep whatever index they saved.
+    val FONT_FILES = arrayOf("", "tiro", "hind", "galada", "noto_serif_bengali")
+    val FONT_NAMES = arrayOf("Page font", "Tiro Bangla (serif)", "Hind Siliguri (clean)", "Galada (stylish)", "Noto Serif Bengali (default)")
+    const val DEFAULT_FONT_IDX = 4
+    fun fontIdx(c: Context): Int =
+        (get(c, "trFont", DEFAULT_FONT_IDX.toString()).toIntOrNull() ?: DEFAULT_FONT_IDX).coerceIn(0, FONT_FILES.size - 1)
     /** Bengali uses the bundled fonts; every other target language uses its downloaded font (or the page's own font). */
     fun fontFile(c: Context): String {
         val t = Langs.target(c)
