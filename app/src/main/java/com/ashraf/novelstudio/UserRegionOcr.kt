@@ -126,7 +126,10 @@ internal class UserRegionOcrEngine(
                         (crop.height * k).toInt().coerceAtLeast(8), true) else crop
                 } else work = crop
                 // Contrast-stretched copy only for rung 4; the toggle keeps the chain testable off-device.
-                val sent = UserRegionPreprocess.apply(work, plan.contrast).also { if (it !== work) stretched = it }
+                val w0 = work
+                val prepared = UserRegionPreprocess.apply(w0, plan.contrast)
+                if (prepared !== w0) stretched = prepared
+                val sent = prepared
                 val r = when (plan.engine) {
                     UserRegionEngine.LENS_FULL_2X, UserRegionEngine.LENS_FULL_4X_CONTRAST -> lensFull(sent, script)
                     UserRegionEngine.LENS_FAST -> lensFast(sent, script)
@@ -144,8 +147,11 @@ internal class UserRegionOcrEngine(
             } catch (e: Throwable) {
                 log.append(plan.engine.label).append(":err=").append(e.javaClass.simpleName).append("; ")
             } finally {
-                if (stretched != null && stretched !== work && !stretched.isRecycled) stretched.recycle()
-                if (work != null && work !== crop && !work.isRecycled) work.recycle()
+                // Local copies so the captured variables are read once (the contrast copy may alias the upscale).
+                val up = work
+                val st = stretched
+                if (st != null && st !== up && !st.isRecycled) st.recycle()
+                if (up != null && up !== crop && !up.isRecycled) up.recycle()
             }
         }
         val trace = "chain=FAILED ${log}totalMs=${android.os.SystemClock.elapsedRealtime() - t0}"

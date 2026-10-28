@@ -214,7 +214,9 @@ internal object WebModeWriter {
       if(it.a0){
         b.setAttribute('data-ap0',it.a0);b.setAttribute('data-ap1',it.a1);
         b.setAttribute('data-atc',it.atc);b.setAttribute('data-ao',it.ao||'');
-        t.style.color=it.atc;
+        // A gradient text fill (original lettering was a gradient) keeps its own colours; everything else gets
+        // the contrast-solved colour from the WCAG table.
+        if(t.style.webkitTextFillColor!=='transparent') t.style.color=it.atc;
         if(it.ao){
           var osh=[];
           for(var ok=0;ok<16;ok++){var oan=ok*Math.PI/8,orr=(ok%2?0.030:0.045);osh.push((Math.cos(oan)*orr).toFixed(3)+'em '+(Math.sin(oan)*orr).toFixed(3)+'em 0 '+it.ao);}

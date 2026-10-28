@@ -529,7 +529,7 @@ class MainActivity : Activity() {
         val url = novelWv.url.orEmpty()
         if (!url.startsWith("http", ignoreCase = true) || src.isBlank()) return false
         val panelBytes = ImageTap.get(src)
-            ?: WebModeTextRemovalCache.readCachedPanel(this, src)
+            ?: WebModeTextRemovalCache.readCachedPanel(src)
             ?: return false
         val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
         android.graphics.BitmapFactory.decodeByteArray(panelBytes, 0, panelBytes.size, bounds)
@@ -600,7 +600,8 @@ class MainActivity : Activity() {
         }
         // Defect C: a marked region is read by the must-succeed chain, not by the scanning pipeline (which
         // would apply the prefilter, the dedupe cache and fast mode to exactly the box the user is looking at).
-        // Full-panel force (0,0,1,1) and the internal re-OCR/re-read paths keep the old pipeline.
+        // Full-panel force (0,0,1,1) and the internal re-OCR/re-read paths keep the old pipeline; so does a run
+        // with no readable panel bytes at start (the return value is false and the old path continues below).
         val isUserMark = !fromReOcr && onFinished == null && !(x <= 0.001f && y <= 0.001f && w >= 0.999f && h >= 0.999f)
         if (isUserMark && startUserRegionOcr(src, x, y, w, h)) return
         if (!fromReOcr && (webModeHandle != null || running != null || queue.isNotEmpty())) {
@@ -4668,11 +4669,9 @@ return t.length>=40?'TXT:'+t:'';
         super.onTrimMemory(level)
         if (level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) {
             CrashLog.note("memory pressure level=$level")
-            // Defect F: the process itself is under pressure (WebViewClient.onTrimMemory covers the renderer
-            // side). Drop the OCR-side caches and hand the ONNX models back to the system, off the UI thread.
-            try { LensCache.clear() } catch (_: Throwable) {}
-            try { BubbleDetector.releaseForMemoryPressure() } catch (_: Throwable) {}
-            try { BubbleSegDetector.releaseForMemoryPressure() } catch (_: Throwable) {}
+            // Defect F: drop page caches, the WebView heap and the OCR-side models/caches. Model release is
+            // background-threaded (Defect E), so a trim can never freeze the UI.
+            try { trimWebViewMemory(level) } catch (_: Throwable) {}
         }
     }
 
@@ -6298,25 +6297,27 @@ return t.length>=40?'TXT:'+t:'';
         urlBar.clearFocus()
     }
 
+    /**
+     * Memory pressure (Defect F). On a 192 MB device the WebView renderer is killed while the app keeps its own
+     * OCR models and caches alive. Answer the trim by dropping what can be rebuilt: page caches, WebView heap, the
+     * Lens LRU and the optional ONNX models (released on their background threads, see Defect E).
+     *
+     * WebViewClient has no trim callback (only WebView does), so this is called from the Activity's own
+     * onTrimMemory, which Android delivers to the process that also owns the renderer.
+     */
+    private fun trimWebViewMemory(level: Int) {
+        if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
+        OcrDiag.log("MEMORY", "TRIM level=$level -> clearing WebView caches")
+        try { novelWv.clearCache(false) } catch (_: Throwable) {}
+        try { novelWv.freeMemory() } catch (_: Throwable) {}
+        LensCache.clear()
+        BubbleDetector.releaseForMemoryPressure()
+        BubbleSegDetector.releaseForMemoryPressure()
+    }
+
     private inner class NovelClient : WebViewClient() {
         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
             handleRendererGone(detail)
-
-        /**
-         * Memory pressure (Defect F). On a 192 MB device the WebView renderer is killed while the app keeps
-         * its own OCR models and caches alive. Answer the trim by dropping what can be rebuilt: page caches,
-         * WebView heap, the Lens LRU and the optional ONNX models (their release is background-threaded and
-         * bounded, see Defect E).
-         */
-        override fun onTrimMemory(level: Int) {
-            if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
-            OcrDiag.log("MEMORY", "TRIM level=$level -> clearing WebView caches")
-            try { novelWv.clearCache(false) } catch (_: Throwable) {}
-            try { novelWv.freeMemory() } catch (_: Throwable) {}
-            LensCache.clear()
-            BubbleDetector.releaseForMemoryPressure()
-            BubbleSegDetector.releaseForMemoryPressure()
-        }
 
         override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
             super.doUpdateVisitedHistory(view, url, isReload)
