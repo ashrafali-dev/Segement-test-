@@ -150,3 +150,49 @@ class WebModePartialAlignmentTest {
         assertNull(WebModeLayout.align("[001]\\n\\n[002]\\n\\n[003] ~", layout()))
     }
 }
+
+
+/** Stable identities for Japanese canvas caching must distinguish repeated dialogue at different positions. */
+class WebModeCanvasBubbleCacheIdentityTest {
+    private fun bubble(src: String, text: String, cx: Float, cy: Float) = WmBubble(
+        src = src, cx = cx, cy = cy, w = 0.2f, h = 0.08f,
+        angle = 0f, font = 0.02f, bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
+        sourceText = text
+    )
+
+    @Test fun repeatedTextInDifferentBubblePositionsHasDifferentIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.3f, 0.2f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.3f, 0.7f)
+        )
+        assertTrue(first != null && second != null && first != second)
+    }
+
+    @Test fun resizeAndSmallBoxJitterKeepCanvasIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.301f, 0.202f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,900x1280", "待って!", 0.304f, 0.204f)
+        )
+        assertEquals(first, second)
+    }
+
+    @Test fun differentCanvasSlotsDoNotShareIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.3f, 0.2f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,647,420x597", "待って！", 0.3f, 0.2f)
+        )
+        assertTrue(first != second)
+    }
+
+    @Test fun ordinaryImageDoesNotUseCanvasIdentity() {
+        assertNull(WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("https://cdn.example.test/panel.jpg", "待って！", 0.3f, 0.2f)
+        ))
+    }
+}
