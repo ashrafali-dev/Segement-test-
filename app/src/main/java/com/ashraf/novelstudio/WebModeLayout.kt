@@ -135,46 +135,63 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         private val NL = Regex("\\s*\\n\\s*")
 
         /**
-         * Align only a complete, ordered marker sequence to the current OCR scan. Partial, duplicate,
-         * out-of-order or extra markers are ambiguous: returning a partial list can put text into the
-         * wrong bubble, so the caller must retry/show the reader view instead of painting it.
+         * Align translations by their explicit marker number, not by response position.
+         * A missing/empty/noise marker leaves only that bubble untranslated; it must not
+         * discard good answers for other bubbles. Duplicate IDs are ambiguous for that ID
+         * only. Never shift later translations to fill a skipped slot.
          */
         fun align(text: String, layout: WebModeLayout): List<String?>? {
             val n = layout.bubbles.size
             if (n == 0) return null
 
             val markers = MARK.findAll(text).toList()
-            if (markers.size != n) {
-                OcrDiag.log("ALIGN", "bubbles=$n markers=${markers.size} -> REJECT (count mismatch)")
+            if (markers.isEmpty()) {
+                OcrDiag.log("ALIGN", "bubbles=$n markers=0 -> REJECT (no markers)")
                 return null
             }
 
             val expectedFirst = 1 + layout.titleOffset
-            val expectedNumbers = (expectedFirst until expectedFirst + n).toList()
-            val actualNumbers = markers.map { it.groupValues[1].toIntOrNull() ?: return null }
-            if (actualNumbers != expectedNumbers) {
-                OcrDiag.log("ALIGN", "bubbles=$n markers=${actualNumbers.joinToString(",")} expected=${expectedNumbers.joinToString(",")} -> REJECT (sequence mismatch)")
-                return null
-            }
+            val expectedLast = expectedFirst + n - 1
+            val byNo = HashMap<Int, String>()
+            val seen = HashSet<Int>()
+            val duplicates = HashSet<Int>()
+            var skipped = 0
+            var unknown = 0
 
-            val byNo = LinkedHashMap<Int, String>()
             for ((i, marker) in markers.withIndex()) {
+                val number = marker.groupValues[1].toIntOrNull() ?: continue
                 val end = if (i + 1 < markers.size) markers[i + 1].range.first else text.length
                 val body = text.substring(marker.range.last + 1, end).trim()
-                // A tilde is the legacy placeholder used for an untranslated/skipped bubble.
-                if (body.isEmpty() || body.matches(Regex("[~\\uFF5E]+"))) {
-                    OcrDiag.log("ALIGN", "bubbles=$n -> REJECT (empty body at marker ${actualNumbers[i]})")
-                    return null
+                if (number !in expectedFirst..expectedLast) {
+                    unknown++
+                    continue
                 }
-                byNo[actualNumbers[i]] = body
+                if (!seen.add(number)) {
+                    duplicates.add(number)
+                    byNo.remove(number)
+                    skipped++
+                    continue
+                }
+                // Empty and legacy tilde-only bodies mean "skip this bubble", not "reject batch".
+                if (body.isEmpty() || body.matches(Regex("[~\\uFF5E]+"))) {
+                    skipped++
+                    continue
+                }
+                byNo[number] = body
             }
 
-            val out = List(n) { i -> byNo[i + 1 + layout.titleOffset]?.replace(NL, " ") }
-            if (out.size != n || out.any { it.isNullOrBlank() }) {
-                OcrDiag.log("ALIGN", "bubbles=$n -> REJECT (incomplete output)")
+            duplicates.forEach { byNo.remove(it) }
+            val out = List(n) { i -> byNo[expectedFirst + i]?.replace(NL, " ") }
+            val placed = out.count { !it.isNullOrBlank() }
+            if (placed == 0) {
+                OcrDiag.log("ALIGN", "bubbles=$n markers=${markers.size} -> REJECT (no usable entries)")
                 return null
             }
-            OcrDiag.log("ALIGN", "bubbles=$n markers=${markers.size} placed=${out.size} -> ACCEPT")
+            val missing = n - placed
+            OcrDiag.log(
+                "ALIGN",
+                "bubbles=$n markers=${markers.size} placed=$placed missing=$missing skipped=$skipped duplicates=${duplicates.size} unknown=$unknown -> ACCEPT_PARTIAL"
+            )
             return out
         }
 
