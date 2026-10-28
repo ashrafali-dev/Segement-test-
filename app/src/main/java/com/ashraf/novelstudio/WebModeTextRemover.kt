@@ -52,18 +52,34 @@ internal object WebModeTextRemover {
             else decoded.copy(Bitmap.Config.ARGB_8888, true).also { decoded.recycle() }
                 ?: run { decoded.recycle(); return false }
 
+        val panelStartedMs = android.os.SystemClock.elapsedRealtime()
+        var aiCallsAttempted = 0
+        var aiCallsSucceeded = 0
+        var aiTotalMs = 0L
+        var aiPolicy = "not-evaluated"
+        var panelRemovedForLog = 0
         try {
             var totalRemoved = 0
             // AI inpainting (optional, downloaded on request; used automatically once installed) is slow on a phone:
             // only a few artwork bubbles / free-text boxes per image.
             var aiBudget = 6
-            var aiWanted = allowAi && Prefs.bool(context, "wmAiInpaint", true) && WebModeInpainter.isReady(context) &&
-                !WebModeInpainter.tooSlow
+            val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
+            val aiModelReady = WebModeInpainter.isReady(context)
+            val aiCoolingDown = WebModeInpainter.tooSlow
+            var aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown
+            aiPolicy = when {
+                !allowAi -> "disallowed-by-fast-path"
+                !aiEnabledPref -> "disabled-in-settings"
+                !aiModelReady -> "model-not-ready"
+                aiCoolingDown -> "cooldown-after-slow-run"
+                else -> "ready"
+            }
             if (aiWanted && !WebModeInpainter.isLoaded()) {
                 // Loading the model takes several seconds: do it in the background; THIS image uses the fast cleaner
                 // so the page never waits for it.
                 WebModeInpainter.warmUpAsync(context)
                 aiWanted = false
+                aiPolicy = "model-warming-in-background"
             }
             val aiStartMs = android.os.SystemClock.elapsedRealtime()
             var aiLastMs = 0L
@@ -342,9 +358,18 @@ internal object WebModeTextRemover {
                 if (soft && aiWanted && aiBudget > 0 &&
                     (android.os.SystemClock.elapsedRealtime() - aiStartMs) + aiLastMs < 8000L) {
                     val t0 = android.os.SystemClock.elapsedRealtime()
+                    aiCallsAttempted++
                     aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
                     aiLastMs = android.os.SystemClock.elapsedRealtime() - t0
-                    if (aiFill != null) aiBudget--
+                    aiTotalMs += aiLastMs
+                    if (aiFill != null) {
+                        aiBudget--
+                        aiCallsSucceeded++
+                    }
+                    OcrDiag.log(
+                        "AI_PAINT",
+                        "region src=${sourceUrl.take(80)} box=${rw}x$rh result=${if (aiFill != null) "ok" else "skipped/failed"} ms=$aiLastMs"
+                    )
                 }
                 // Free lettering (sound effects on artwork) is only erased when the AI inpainter really did it: the
                 // onion-peel fill smears artwork, and an untouched original under the overlay is the safer result.
@@ -395,6 +420,7 @@ internal object WebModeTextRemover {
                 totalRemoved += selectedCount
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
+            panelRemovedForLog = totalRemoved
             if (totalRemoved < 8) return false
 
             val bytesOut = ByteArrayOutputStream()
@@ -431,6 +457,12 @@ internal object WebModeTextRemover {
         } catch (_: Exception) {
             return false
         } finally {
+            OcrDiag.log(
+                "AI_PANEL",
+                "src=${sourceUrl.take(100)} allowAi=$allowAi policy=$aiPolicy calls=$aiCallsAttempted " +
+                    "ok=$aiCallsSucceeded aiMs=$aiTotalMs elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
+                    "removedPixels=$panelRemovedForLog"
+            )
             bitmap.recycle()
         }
     }
