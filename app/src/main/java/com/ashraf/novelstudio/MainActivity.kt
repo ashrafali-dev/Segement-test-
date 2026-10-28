@@ -4788,6 +4788,11 @@ return t.length>=40?'TXT:'+t:'';
         novelWv.loadUrl(m.value)
     }
 
+    // REQUESTED_WITH_HEADER_ALLOW_LIST is marked @RestrictTo by androidx.webkit, but it is the documented
+    // feature token for setRequestedWithHeaderOriginAllowList (added in webkit 1.7+) and has been used here
+    // since long before this UI work. Suppressed narrowly so lint reports real problems again; behaviour
+    // is unchanged (the call stays guarded by isFeatureSupported).
+    @android.annotation.SuppressLint("RestrictedApi")
     private fun setup(wv: WebView) {
         val s = wv.settings
         s.javaScriptEnabled = true
