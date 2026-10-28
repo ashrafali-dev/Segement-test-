@@ -82,10 +82,19 @@ assert.ok(!remover.includes("erased.addAll(detectorErasedKeys)") &&
   "detector pixel changes must not, by themselves, authorize transparent rendering");
 assert.ok(!remover.includes("for (b in bubbles) erased.add(WebModeTextRemovalCache.bubbleKey(b))"),
   "a successful erase anywhere on the page must not mark every bubble as erased");
-assert.ok(remover.includes("WebModeTextRemovalCache.setErased(sourceUrl, emptySet())") &&
-          remover.includes("activeCleanSource = sourceUrl") &&
-          remover.includes("keep opaque cover"),
-  "a skipped cleaner must not reuse a stale transparent-overlay decision");
+assert.ok(remover.includes("cleanSlot.lock()") &&
+          remover.includes("WebModeTextRemovalCache.readCleanedBytes(sourceUrl)") &&
+          remover.includes("previouslyErased") &&
+          remover.includes("CLEAN_QUEUE"),
+  "every clean attempt must queue, and repeated passes must preserve earlier cleaned bubbles");
+assert.ok(!remover.includes("cleanSlot.tryLock()") &&
+          !remover.includes("skip: another cleaner is running"),
+  "cleaning must wait its turn rather than permanently skipping busy panels");
+assert.ok((extractor.includes("recoverBubbleLines(bmp, st, inter, bands, lines, medFont") &&
+            extractor.includes("maxRows = if (fastMode) 5 else 3")) &&
+          extractor.includes("recognizedForClean") &&
+          extractor.includes("BUBBLE_RESCAN"),
+  "realtime must audit unread rows and pass recovered OCR boxes to the cleaner");
 assert.ok(remover.includes("insideSpeechBubbleShape(bubble, balloonMask, width, height"),
   "pixel cleaning and mask growth must stay inside a known speech-bubble shape");
 assert.ok(remover.includes("val minimumErasedPixels = max(32, (innerArea * 0.06f).toInt())") &&
