@@ -10641,7 +10641,7 @@ ${rows.take(220).joinToString("\n")}
             WebModeInpainter.isReady(this) -> "installed · used automatically for lettering on artwork"
             else -> "not installed · tap to download (≈ 16.3 MB)"
         }
-        return "🎨 AI text eraser (LaMa)\n" + state
+        return "🎨 AI text eraser (MI-GAN)\n" + state
     }
 
     private fun inpaintDialog() {
