@@ -1917,17 +1917,21 @@ Every marker is one piece of text read from a comic image: speech, narration, a 
 ${Langs.sfxRule(this)}
 markers' text under one marker.
 A marker normally holds a WHOLE speech bubble (all its lines already joined): translate all of it,
-every word, and drop nothing. Only when a sentence clearly continues across consecutive markers
-(for example "...THE" / "HERO'S LIFE..."), read them together and translate each marker as only the
-part it carries.
+every word, and drop nothing. When a sentence clearly continues across consecutive markers
+(for example "...THE" / "HERO'S LIFE..."), read the nearby markers together, then translate each marker
+with only the part that belongs to that bubble.
+Use surrounding dialogue as context to resolve pronouns, omitted subjects, speaker/addressee, tone and
+sentence continuations. Keep pronoun references consistent with the scene when the evidence supports it;
+if gender or identity is genuinely unclear, prefer natural neutral wording instead of guessing.
+Context is for understanding, not for copying: never insert another bubble's words or facts into this
+bubble's translation, and never invent dialogue that OCR did not read.
 Website names, URLs, chatbot controls, app UI labels, and scan-group watermarks are not dialogue:
 keep their marker but leave the text after it empty.
 If a marker is meaningless OCR noise (random letters or symbols), keep the marker and leave its text empty.
 Never use "~", "-", or another placeholder to represent unreadable or non-dialogue text.
-Do not invent text. Keep each translation short enough to fit a speech bubble.
-Translate ONLY the words that are written under each marker. Never add names, sentences or meaning from the
-story, from other markers or from your own guess; a one-word marker (a shout, a sound effect, a title) gets a
-one-word translation. Each marker must stay faithful to its own ${Langs.source(this)} text, word for word in meaning.
+Keep each translation concise enough to fit a speech bubble, but do not force a one-word translation when
+the target language needs a subject or pronoun for natural, accurate meaning.
+Each marker must remain faithful to its own ${Langs.source(this)} text in meaning.
 """.trimIndent()
         // This is a separate chatbot page with no prior prompt in its conversation, so always include
         // the full active translation prompt, even if the visible-chat option normally sends it once.
