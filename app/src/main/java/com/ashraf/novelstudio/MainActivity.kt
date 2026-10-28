@@ -1665,17 +1665,36 @@ class MainActivity : Activity() {
         }
         if (batch.isEmpty()) return
 
-        // Prefer one complete request for the whole ahead window. A 10-panel comic usually fits in
-        // one 30-bubble request; only unusually dialogue-heavy windows are split into bounded chunks.
-        val chunkSize = (Prefs.get(this, "rtAheadBatch", "40").toIntOrNull() ?: 40).coerceIn(15, 40)
-        val chunks = ArrayList<MutableList<Int>>()
-        var i = 0
-        while (i < batch.size) {
-            chunks.add((i until minOf(i + chunkSize, batch.size)).toMutableList())
-            i += chunkSize
+        // Translate a small local window ahead, not 30-40 bubbles at once. Long responses arrive too late to be
+        // useful before scrolling reaches them. Keep a panel intact so a sentence/dialogue and its pronoun references
+        // are not split across chatbot requests; combine adjacent panels only while the batch stays under the cap.
+        val chunkSize = (Prefs.get(this, "rtAheadBatch", "10").toIntOrNull() ?: 10).coerceIn(8, 12)
+        val panelGroups = LinkedHashMap<String, MutableList<Int>>()
+        for (index in batch.indices) {
+            val panelKey = WebModeLogic.normalizeUrl(batch[index].src) + "@" + batchTop[index]
+            panelGroups.getOrPut(panelKey) { ArrayList() }.add(index)
         }
+        val chunks = ArrayList<MutableList<Int>>()
+        var currentChunk = ArrayList<Int>()
+        for (group in panelGroups.values) {
+            if (currentChunk.isNotEmpty() && currentChunk.size + group.size > chunkSize) {
+                chunks.add(currentChunk)
+                currentChunk = ArrayList()
+            }
+            currentChunk.addAll(group)
+            if (currentChunk.size >= chunkSize) {
+                chunks.add(currentChunk)
+                currentChunk = ArrayList()
+            }
+        }
+        if (currentChunk.isNotEmpty()) chunks.add(currentChunk)
         // One WmBubble = one translation unit; OCR line grouping (BubbleGrouping) decides how many there are.
-        Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} requests=${chunks.size} chunkSize=$chunkSize")
+        OcrDiag.log(
+            "AHEAD_QUEUE",
+            "bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize sizes=" +
+                chunks.joinToString(",") { it.size.toString() }
+        )
+        Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize")
         val minChunk = minOf(4, chunkSize)
         if (chunks.isNotEmpty() && chunks.last().size < minChunk) {
             if (!force) {
