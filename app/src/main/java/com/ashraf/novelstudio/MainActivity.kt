@@ -1125,7 +1125,9 @@ class MainActivity : Activity() {
         val pageUrl: String,
         val layout: WebModeLayout,
         val top: Int = 0,
-        val attempts: Int = 0
+        val attempts: Int = 0,
+        /** Canvas generation captured when this batch was queued, so old replies cannot populate a recycled page. */
+        val canvasVersions: Map<String, Long> = emptyMap()
     )
 
     /** Visible panels are accumulated so slow/unavailable read-ahead does not force one-bubble requests. */
@@ -1416,8 +1418,15 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun rtAheadTaskId(pageUrl: String, layout: WebModeLayout): String {
-        val material = WebModeLogic.normalizeUrl(pageUrl) + "|" +
+    private fun rtAheadTaskId(
+        pageUrl: String,
+        layout: WebModeLayout,
+        canvasVersions: Map<String, Long> = WebModeLayoutStore.canvasVersions(pageUrl, layout)
+    ): String {
+        // A recycled canvas can show identical text in identical geometry on the next manga page.
+        // Include the captured generation so the next page does not collide with the prior queued/suppressed task.
+        val versions = canvasVersions.toSortedMap().entries.joinToString("|") { "${it.key}=${it.value}" }
+        val material = WebModeLogic.normalizeUrl(pageUrl) + "|" + versions + "|" +
             layout.bubbles.map { WebModeLayout.fingerprint(it) }.sorted().joinToString("|")
         return java.security.MessageDigest.getInstance("SHA-256")
             .digest(material.toByteArray(Charsets.UTF_8))
@@ -1694,12 +1703,19 @@ class MainActivity : Activity() {
         }
         for (chunk in chunks) {
             val layout = WebModeLayout(0, chunk.map { batch[it] })
-            val id = rtAheadTaskId(page, layout)
+            val canvasVersions = WebModeLayoutStore.canvasVersions(page, layout)
+            val id = rtAheadTaskId(page, layout, canvasVersions)
             if (id in rtAheadTranslationQueuedIds || id in rtAheadTranslationSuppressedIds ||
                 rtAheadTranslationTasksByJobKey.values.any { it.id == id }) continue
             rtAheadTranslationQueuedIds.add(id)
             rtAheadTranslationQueue.add(
-                RtAheadTranslationTask(id, page, layout, chunk.minOf { batchTop[it] })
+                RtAheadTranslationTask(
+                    id = id,
+                    pageUrl = page,
+                    layout = layout,
+                    top = chunk.minOf { batchTop[it] },
+                    canvasVersions = canvasVersions
+                )
             )
         }
         if (rtAheadHold.isEmpty()) {
@@ -1917,6 +1933,11 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 rtAheadTranslationSuppressedIds.add(queued.id)
                 continue
             }
+            if (!WebModeLayoutStore.canvasVersionsStillCurrent(queued.canvasVersions)) {
+                rtAheadTranslationSuppressedIds.add(queued.id)
+                OcrDiag.log("CANVAS_STALE", "dropped queued read-ahead task after canvas generation changed")
+                continue
+            }
             val remaining = queued.layout.bubbles.filter { bubble ->
                 val fp = WebModeLayout.fingerprint(bubble)
                 !rtAheadTranslationCache.containsKey(rtAheadBubbleCacheKey(bubble)) &&
@@ -1940,7 +1961,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 continue
             }
             val layout = WebModeLayout(0, remaining)
-            val baseId = rtAheadTaskId(queued.pageUrl, layout)
+            val baseId = rtAheadTaskId(queued.pageUrl, layout, queued.canvasVersions)
             val id = if (queued.attempts > 0 || queued.id.endsWith("-r")) "$baseId-r" else baseId
             val task = queued.copy(id = id, layout = layout)
             val base = lastChapter?.takeIf { cleanUrl(it.url) == currentUrl }
@@ -2160,9 +2181,14 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
         rtAheadWorkerBusy = false
         rtAheadWorkerTask = null
         rtAheadWorkerJobKey = ""
-        if (task.attempts < 1 && cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
+        val canvasStillCurrent = WebModeLayoutStore.canvasVersionsStillCurrent(task.canvasVersions)
+        if (!canvasStillCurrent) {
+            OcrDiag.log("CANVAS_STALE", "failed read-ahead task belonged to an older canvas generation; not retrying")
+        }
+        if (task.attempts < 1 && canvasStillCurrent &&
+            cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
             queueRtAheadTask(task.copy(
-                id = rtAheadTaskId(task.pageUrl, task.layout) + "-r",
+                id = rtAheadTaskId(task.pageUrl, task.layout, task.canvasVersions) + "-r",
                 attempts = task.attempts + 1
             ), front = true)
         }
@@ -2211,6 +2237,12 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     }
 
     private fun finishRealtimeAheadTranslation(jobKey: String, task: RtAheadTranslationTask, raw: String) {
+        if (!WebModeLayoutStore.canvasVersionsStillCurrent(task.canvasVersions)) {
+            OcrDiag.log("CANVAS_STALE", "discarded completed read-ahead reply after canvas generation changed")
+            cancelRealtimeAheadWorker(requeue = false)
+            handler.postDelayed({ pumpRealtimeAheadTranslation() }, 100L)
+            return
+        }
         val aligned = WebModeLayout.alignWithFallback(cleanReply(raw), task.layout)
         if (aligned == null) {
             val nums = Regex("\\[(\\d{3,})\\]").findAll(raw).map { it.groupValues[1] }.take(30).joinToString(",")
@@ -2238,7 +2270,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
             cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
             val retryLayout = WebModeLayout(0, missing)
             queueRtAheadTask(task.copy(
-                id = rtAheadTaskId(task.pageUrl, retryLayout) + "-r",
+                id = rtAheadTaskId(task.pageUrl, retryLayout, task.canvasVersions) + "-r",
                 layout = retryLayout,
                 attempts = task.attempts + 1
             ), front = true)
@@ -8947,9 +8979,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             rtAheadTranslationQueuedIds.remove(aheadTask.id)
             rtAheadTranslationSuppressedIds.add(aheadTask.id)
             running = null
-            if (aheadTask.attempts < 1 && cleanUrl(aheadTask.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
+            if (aheadTask.attempts < 1 &&
+                WebModeLayoutStore.canvasVersionsStillCurrent(aheadTask.canvasVersions) &&
+                cleanUrl(aheadTask.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
                 queueRtAheadTask(aheadTask.copy(
-                    id = rtAheadTaskId(aheadTask.pageUrl, aheadTask.layout) + "-r",
+                    id = rtAheadTaskId(aheadTask.pageUrl, aheadTask.layout, aheadTask.canvasVersions) + "-r",
                     attempts = aheadTask.attempts + 1
                 ))
             } else {
@@ -9200,6 +9234,25 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     private fun clearCanvasTransitionOverlay(url: String) {
         val changed = WebModeLayoutStore.takeCanvasTransitions(url)
         if (changed.isEmpty()) return
+
+        // Invalidate cached Japanese-canvas translations for every recycled slot, and stop an in-flight
+        // read-ahead request if it captured an older generation. Blob URLs are immutable identities and are
+        // handled by their exact source key; ns-canvas slots need this explicit generation invalidation.
+        val changedCachePrefixes = changed.mapNotNull { WebModeLayout.canvasBubbleCachePrefix(it) }.toSet()
+        if (changedCachePrefixes.isNotEmpty()) {
+            val staleCacheKeys = rtAheadTranslationCache.keys
+                .filter { key -> changedCachePrefixes.any { prefix -> key.startsWith(prefix) } }
+                .toList()
+            staleCacheKeys.forEach { rtAheadTranslationCache.remove(it) }
+        }
+        val changedJapaneseSourceKeys = changed.mapNotNull { rtJapaneseCanvasSourceKey(it) }.toSet()
+        rtJapaneseCanvasSources.removeAll(changedJapaneseSourceKeys)
+        val activeAhead = rtAheadWorkerTask
+        if (rtAheadWorkerBusy && activeAhead != null &&
+            !WebModeLayoutStore.canvasVersionsStillCurrent(activeAhead.canvasVersions)) {
+            OcrDiag.log("CANVAS_STALE", "interrupting in-flight read-ahead for recycled canvas")
+            cancelRealtimeAheadWorker(requeue = false)
+        }
 
         // A not-yet-flushed OCR batch may already contain bubbles from the old contents of this
         // recycled canvas. Remove only those entries before the queue is allowed to send a request.
