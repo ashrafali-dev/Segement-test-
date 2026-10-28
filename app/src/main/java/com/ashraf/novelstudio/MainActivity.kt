@@ -1421,7 +1421,7 @@ class MainActivity : Activity() {
     private fun rtAheadTaskId(
         pageUrl: String,
         layout: WebModeLayout,
-        canvasVersions: Map<String, Long> = WebModeLayoutStore.canvasVersions(pageUrl, layout)
+        canvasVersions: Map<String, Long> = WebModeLayoutStore.canvasCacheVersions(pageUrl, layout)
     ): String {
         // A recycled canvas can show identical text in identical geometry on the next manga page.
         // Include the captured generation so the next page does not collide with the prior queued/suppressed task.
@@ -1703,7 +1703,7 @@ class MainActivity : Activity() {
         }
         for (chunk in chunks) {
             val layout = WebModeLayout(0, chunk.map { batch[it] })
-            val canvasVersions = WebModeLayoutStore.canvasVersions(page, layout)
+            val canvasVersions = WebModeLayoutStore.canvasCacheVersions(page, layout)
             val id = rtAheadTaskId(page, layout, canvasVersions)
             if (id in rtAheadTranslationQueuedIds || id in rtAheadTranslationSuppressedIds ||
                 rtAheadTranslationTasksByJobKey.values.any { it.id == id }) continue
