@@ -152,12 +152,28 @@ internal object BubbleDetector {
     private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var lastActivityMs = 0L
     private val idleHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private val idleRelease = Runnable {
-        // Never close the session under a running detection: only release when nobody holds the model gate.
-        if (OnnxHeavyGate.lock.tryLock()) {
-            try { release(); OcrDiag.log("DETECT_SRC", "main detector released (idle)") } finally { OnnxHeavyGate.lock.unlock() }
+    /**
+     * Closing the RT-DETR session is native teardown and must not run on the main looper (Defect E). The idle
+     * runnable only schedules the close on a background thread; it still refuses to close under a running
+     * detection (the model gate is held for the whole run).
+     */
+    private val releaseExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ns-detect-release").apply { isDaemon = true }
         }
+    private val idleRelease = Runnable {
+        try {
+            releaseExecutor.execute {
+                if (OnnxHeavyGate.lock.tryLock()) {
+                    try { release(); OcrDiag.log("DETECT_SRC", "main detector released (idle, background)") }
+                    finally { OnnxHeavyGate.lock.unlock() }
+                }
+            }
+        } catch (_: Throwable) {}
     }
+
+    /** Free the RT-DETR session within 2 s of the last use (Defect E / F: memory pressure arrives in seconds). */
+    private const val IDLE_RELEASE_MS = 2_000L
 
     /** The reader is scrolling / a real-time job just started: background model runs wait until it is quiet. */
     fun noteActivity() { lastActivityMs = SystemClock.elapsedRealtime() }
@@ -371,7 +387,7 @@ internal object BubbleDetector {
             synchronized(cache) { cache[fingerprint(bmp)] = out }
             lastInfo = "${out.size} found · ${mainMs}ms$maskNote"
             idleHandler.removeCallbacks(idleRelease)
-            idleHandler.postDelayed(idleRelease, 20_000L)
+            idleHandler.postDelayed(idleRelease, IDLE_RELEASE_MS)
             OcrDiag.log("DETECT_SRC", "main=RT-DETR ${out.count { it.seg == null }} boxes in ${mainMs}ms;$maskNote")
             out
         } catch (e: Throwable) {

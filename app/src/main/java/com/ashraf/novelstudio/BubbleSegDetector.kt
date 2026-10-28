@@ -39,7 +39,12 @@ internal object BubbleSegDetector {
     private const val MAX_BYTES = 40_000_000L
     private const val APPROX_BYTES = 12_400_000L
     private const val MIN_FREE_HEAP_MB = 70L
-    private const val IDLE_RELEASE_MS = 8_000L
+    /**
+     * Free the mask model quickly after the last use: memory pressure levels 10-15 (192 MB devices) arrive within
+     * seconds of a scan, and a released session is a few MB of off-heap arena plus the 12 MB input buffer.
+     * Kept <= 2000 ms (Defect E) — a cheap download is far better than a WebView renderer kill.
+     */
+    private const val IDLE_RELEASE_MS = 2_000L
 
     @Volatile var lastError: String = ""
         private set
@@ -56,7 +61,26 @@ internal object BubbleSegDetector {
     @Volatile private var installedAt = 0L
     @Volatile private var installedVal = false
     private val idleHandler = Handler(Looper.getMainLooper())
-    private val idleRelease = Runnable { release(); OcrDiag.log("DETECT_SRC", "mask model released (idle)") }
+    /**
+     * ONNX session close is not free (it tears down native arenas; field log: UI FREEZE 4001 ms in
+     * release()). It must never run on the main looper. The idle runnable only HANDS release() to a
+     * background thread and posts the diagnostic back; the main thread never waits for it.
+     */
+    private val releaseExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ns-maskmodel-release").apply { isDaemon = true }
+        }
+
+    private val idleRelease = Runnable {
+        try {
+            releaseExecutor.execute {
+                try { release() } catch (_: Throwable) {}
+                OcrDiag.log("DETECT_SRC", "mask model released (idle, background)")
+            }
+        } catch (_: Throwable) {
+            // Rejected executor (process shutting down): nothing left to free.
+        }
+    }
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), "bubble_seg_1024.onnx")
 
