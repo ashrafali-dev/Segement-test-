@@ -21,7 +21,11 @@ internal object OcrDiag {
     private const val MAX_CHARS = 150_000
     private val lock = Any()
     private val buf = StringBuilder()
-    private val bootMs = SystemClock.elapsedRealtime()
+    // SystemClock's Android stub throws in local JVM unit tests; fall back to Java's monotonic clock.
+    private fun elapsedRealtimeSafe(): Long = try { SystemClock.elapsedRealtime() } catch (_: Throwable) {
+        System.nanoTime() / 1_000_000L
+    }
+    private val bootMs = elapsedRealtimeSafe()
     private val clock = object : ThreadLocal<SimpleDateFormat>() {
         override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
@@ -89,7 +93,7 @@ internal object OcrDiag {
         sb.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
             .append(" | Android ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n")
         sb.append("memory: ").append((rt.totalMemory() - rt.freeMemory()) shr 20).append('/')
-            .append(rt.maxMemory() shr 20).append(" MB | uptime ").append((SystemClock.elapsedRealtime() - bootMs) / 1000).append("s\n")
+            .append(rt.maxMemory() shr 20).append(" MB | uptime ").append((elapsedRealtimeSafe() - bootMs) / 1000).append("s\n")
         sb.append("page: ").append(pageUrl.take(220)).append("\n\n")
 
         sb.append("--- SETTINGS ---\n")
