@@ -1257,7 +1257,8 @@ internal object WebModeTextRemover {
                 var transparentReady = 0
                 for (owner in owners) {
                     val key = WebModeTextRemovalCache.bubbleKey(owner)
-                    if (ocrRegionLooksClean(bitmap, owner, width, height, paper)) {
+                    val ownerPaper = opaque(owner.bg)
+                    if (ocrRegionLooksClean(bitmap, owner, width, height, ownerPaper)) {
                         erased.add(key)
                         transparentReady++
                     } else {
