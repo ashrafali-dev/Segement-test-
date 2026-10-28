@@ -288,7 +288,7 @@ internal class RoutingOcrEngine : OcrEngine {
             // Diagnostic line: ids/timings only, never the recognised text.
             val routeLine = "requestedEngine=$selectedMode language=${script.name} " +
                 "activeEngine=$used fallbackUsed=$fellBack " +
-                "job=${Thread.currentThread().name} concurrentLens=${!OcrGate.isBackgroundThread() && canRunLensConcurrently()} " +
+                "job=${Thread.currentThread().name} concurrentRemote=${!OcrGate.isBackgroundThread() && canRunRemoteConcurrently()} " +
                 "gateWaitMs=${waited.ms} totalMs=${android.os.SystemClock.elapsedRealtime() - t0} " +
                 "image=${bitmap.width}x${bitmap.height}" +
                 (if (OcrEngineStatus.lastError.isNotBlank()) " lastRouterError=${OcrEngineStatus.lastError.take(120)}" else "")

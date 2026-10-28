@@ -1151,9 +1151,9 @@ class MainActivity : Activity() {
     private fun lensRealtimeFastPath(): Boolean {
         val mode = Prefs.get(this, "ocrEngine", "mlkit")
         return mode == "lens" || mode == "testing"
-    }"
-    // Lens already returns all detected text in one remote OCR response; do not hold that result
-    // behind ML-Kit-oriented multi-bubble/idle batching. Keep just a tiny window to join nearby SFX.
+    }
+    // Network-backed OCR should not wait behind ML-Kit-oriented multi-bubble batching. Keep a short
+    // collection window to join nearby sound effects while still emitting the first result quickly.
     private val rtVisibleOcrBatchMin: Int get() = if (lensRealtimeFastPath()) 2 else intArrayOf(2, 4, 8, 12)[rtBatchLevel()]
     private val rtVisibleOcrIdleFlushMs: Long get() = if (lensRealtimeFastPath()) 350L else longArrayOf(800L, 1500L, 2500L, 3500L)[rtBatchLevel()]
     private val rtVisibleOcrMaxHoldMs: Long get() = if (lensRealtimeFastPath()) 500L else longArrayOf(1000L, 1800L, 3000L, 4500L)[rtBatchLevel()]
