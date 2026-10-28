@@ -194,7 +194,7 @@ internal object OcrPost {
      * Blocks that sit right under each other, overlap horizontally and have the same text size and
      * tilt are one sentence: join them into one block.
      */
-    fun mergeNeighbours(blocks: List<OcrBlock>, image: Bitmap? = null): List<OcrBlock> {
+    fun mergeNeighbours(blocks: List<OcrBlock>, image: Bitmap? = null, verticalOnly: Boolean = false): List<OcrBlock> {
         if (blocks.size < 2) return blocks
         val work = ArrayList(blocks.sortedWith(compareBy({ it.cy }, { it.cx })))
         // outlineBetween() samples pixels (slow). The loop restarts after every merge, so remember which
@@ -207,6 +207,7 @@ internal object OcrPost {
                 for (j in i + 1 until work.size) {
                     val a = work[i]; val b = work[j]
                     if (vetoed[a]?.containsKey(b) == true) continue
+                    if (verticalOnly && (!a.vertical || !b.vertical)) continue
                     if (!joinable(a, b)) continue
                     // NEVER join two lines across a third block that sits between them. That is exactly how the
                     // middle line of a 3-line bubble vanished: top+bottom were fused, the middle one stayed
@@ -394,6 +395,7 @@ internal object OcrPost {
     private fun joinable(a: OcrBlock, b: OcrBlock): Boolean {
         if (a.vertical != b.vertical) return false
         if (a.vertical) return joinableColumns(a, b)
+        if (BubbleGrouping.isAsidePair(a, b)) return false
         if (Math.abs(a.angle) >= 6f || Math.abs(b.angle) >= 6f) return false   // clearly tilted text stays as it is
         val fa = if (a.fontPx > 0f) a.fontPx else a.h
         val fb = if (b.fontPx > 0f) b.fontPx else b.h
