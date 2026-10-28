@@ -1181,6 +1181,23 @@ internal object WebModeTextRemover {
         // The sampled paper must not itself be the ink colour, or there is nothing to distinguish.
         if (min(distance(paperRef, fg1), distance(paperRef, fg2)) < 52f) return 0
 
+        // Reject boxes that contain illustration, even when the border ring itself looks like a flat paper colour.
+        // A plate/cup/face can sit INSIDE an OCR paragraph box while the surrounding pixels are uniformly green/white;
+        // painting every text-coloured pixel against that paper model would erase the drawing's contours as well.
+        var offModelStructure = 0
+        for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+            val at = ry * rw + rx
+            if (candidate[at].toInt() != 0) continue
+            val pixel = region[at]
+            val paper = model.at(rx, ry, ix0, ix1, iy0, iy1)
+            if (distance(pixel, paper) >= 52f &&
+                min(distance(pixel, fg1), distance(pixel, fg2)) > 110f) offModelStructure++
+        }
+        if (offModelStructure > innerArea * 0.055f) {
+            OcrDiag.log("ERASE", "skip background model: non-text artwork inside OCR box pixels=$offModelStructure area=$innerArea")
+            return 0
+        }
+
         val inkMask = ByteArray(regionCount)
         var candidateCount = 0
         var inkCount = 0
