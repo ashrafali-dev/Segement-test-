@@ -2738,6 +2738,22 @@ return t.length>=40?'TXT:'+t:'';
         }
     }
 
+    /**
+     * Remove the start-up cover as soon as the first real frame is drawn. No artificial delay:
+     * the cover exists only to hide the half-built screen during initialisation.
+     */
+    private fun dismissSplashAfterFirstFrame() {
+        val cover = splashRoot ?: return
+        val done = Runnable {
+            if (splashDismissed) return@Runnable
+            splashDismissed = true
+            Splash.dismiss(cover)
+            splashRoot = null
+        }
+        cover.post(done)          // after the first layout/draw pass
+        handler.postDelayed(done, 1000L) // safety cap, not an animation delay
+    }
+
     /** Hide the old animated status dots for good (they are still built, just never shown). */
     private fun retireLegacyStatusViews() {
         if (::scanDot.isInitialized && scanDot.visibility != View.GONE) scanDot.visibility = View.GONE
@@ -3050,6 +3066,8 @@ return t.length>=40?'TXT:'+t:'';
     private var nextReadyCacheVal = false
     private var bannerAttentionKey = ""
     private lateinit var statusBannerHost: FrameLayout
+    private var splashRoot: FrameLayout? = null
+    private var splashDismissed = false
     private var barsHidden = false
     private var barsAnimating = false
     // True while WebToon Realtime or Scanning is active (Web Mode on). Read on every touch-move, so it is
@@ -4418,6 +4436,7 @@ return t.length>=40?'TXT:'+t:'';
             onSearch = { q -> go(q) }
             onMenu = { menu() }
             onHub = { part -> Hub.open(this@MainActivity, part) }
+            onMode = { key -> handleHomeMode(key) }
         }
         val root = FrameLayout(this).apply {
             background = appBackground()
@@ -4429,9 +4448,15 @@ return t.length>=40?'TXT:'+t:'';
             addView(statusBannerHost, FrameLayout.LayoutParams(MP, WC, Gravity.TOP).also { it.topMargin = dp(57) })
             addView(tourOverlay, FrameLayout.LayoutParams(MP, MP))
         }
+        // Start-up cover: shown while the app really initialises, removed on the first drawn frame
+        // (plus a 1 s safety cap so a slow first layout can never leave it stuck).
+        val splash = Splash.create(this)
+        root.addView(splash, FrameLayout.LayoutParams(MP, MP))
+        splashRoot = splash
         setContentView(root)
         handler.post(scanIndicatorRunnable)
         installManualExtractHost()
+        dismissSplashAfterFirstFrame()
 
         buildStrip()
         buildSiteShortcuts()
@@ -4672,7 +4697,42 @@ return t.length>=40?'TXT:'+t:'';
     private fun refreshHome() {
         if (!::homeView.isInitialized) return
         val novel = siteShortcuts().map { HomeSite(it.first, it.second) }
+        homeView.setSelectedMode(
+            when (currentReadMode()) {
+                ReadMode.NOVEL -> "novel"
+                ReadMode.SCAN -> "scan"
+                ReadMode.REALTIME -> if (manualRealtimeExtractEnabled()) "lite" else "realtime"
+            }
+        )
         homeView.render(homeRecents(), novel, comicSiteShortcuts())
+    }
+
+    /**
+     * Home mode chips. Selecting a mode sets it and opens the mode start page (board 21): the
+     * reader underneath keeps its page, so the user can paste or pick a link for that mode.
+     * "Soon" is the Link -> Translate placeholder and only shows an honest message.
+     */
+    private fun handleHomeMode(key: String) {
+        when (key) {
+            "novel" -> setReadMode(ReadMode.NOVEL)
+            "scan" -> setReadMode(ReadMode.SCAN)
+            "realtime" -> {
+                setReadMode(ReadMode.REALTIME)
+                if (!Prefs.bool(this, "rtAutoOcrEnabled", true)) setRealtimeAutoOcrEnabled(true)
+            }
+            "lite" -> {
+                setReadMode(ReadMode.REALTIME)
+                if (Prefs.bool(this, "rtAutoOcrEnabled", true)) setRealtimeAutoOcrEnabled(false)
+            }
+            "soon" -> {
+                // Placeholder: no scrolling, no fake progress (phase 7 builds the full screen).
+                Notify.log("Link → Translate is coming soon")
+                showAttentionBanner("Link → Translate is coming soon.")
+                return
+            }
+        }
+        refreshHome()
+        ModeStart.show(this, key) { url -> go(url) }
     }
 
     /** Webtoon / comic starting points. Edit this list to add your own sites. */
@@ -4808,7 +4868,9 @@ return t.length>=40?'TXT:'+t:'';
      * reloaded straight away (the tab restarts on the site's front page), so it can not loop.
      */
     private fun handleRendererGone(detail: android.webkit.RenderProcessGoneDetail?): Boolean {
-        val crashed = detail?.didCrash() == true
+        // didCrash() is API 26; minSdk is 24, so below 26 we cannot tell a crash from a low-memory kill
+        // and report "KILLED" (which is the more common case on those devices anyway).
+        val crashed = Build.VERSION.SDK_INT >= 26 && detail?.didCrash() == true
         val page = try { novelWv.url.orEmpty() } catch (_: Exception) { "" }
         CrashLog.note("WebView renderer " + (if (crashed) "CRASHED" else "KILLED by the system (low memory)") + " | page=" + page.take(160))
         val now = System.currentTimeMillis()

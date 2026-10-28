@@ -219,8 +219,16 @@ internal object BubbleDetectorCore {
         if (a != null && b != null) return a !== b
         // With a real balloon MASK the outline is exact: lettering inside the balloon and a small whisper / note next to
         // it OUTSIDE the outline are two texts (they used to be glued under one marker).
-        if (a != null) return outsideBalloon(a, bx, by)
-        if (b != null) return outsideBalloon(b, ax, ay)
+        // But when the detector says NOTHING about the other point at all, that silence is never a veto
+        // (an undetected piece must stay joinable) — see the contract on this function.
+        if (a != null) {
+            if (anyBoxAt(dets, bx, by) == null) return false
+            return outsideBalloon(a, bx, by)
+        }
+        if (b != null) {
+            if (anyBoxAt(dets, ax, ay) == null) return false
+            return outsideBalloon(b, ax, ay)
+        }
         // Neither piece is inside a speech bubble: free lettering (captions, labels, notes on artwork). If each one
         // sits in a text_free box and no single box holds both, they are separate texts.
         var inA = false
@@ -240,6 +248,20 @@ internal object BubbleDetectorCore {
         var best: Det? = null
         for (d in dets) {
             if (d.label != CLS_BUBBLE || !d.contains(x, y)) continue
+            if (best == null || d.area < best.area) best = d
+        }
+        return best
+    }
+
+    /**
+     * Smallest detection box of ANY label around the point, or null when the detector said nothing about it.
+     * Used to tell "the other piece sits in some box, just not this balloon" (a real separation) apart from
+     * "the detector never saw the other piece" (silence, which must never veto a join).
+     */
+    private fun anyBoxAt(dets: List<Det>, x: Float, y: Float): Det? {
+        var best: Det? = null
+        for (d in dets) {
+            if (!d.contains(x, y)) continue
             if (best == null || d.area < best.area) best = d
         }
         return best
