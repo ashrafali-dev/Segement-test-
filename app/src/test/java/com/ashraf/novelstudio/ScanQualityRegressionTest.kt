@@ -74,6 +74,25 @@ class ScanQualityRegressionTest {
         assertEquals("data:image/png;base64,TEST_A",WebModeTextRemovalCache.urlFor(a))
         assertNull(WebModeTextRemovalCache.urlFor(b))
     }
+    @Test fun cleanedBlobUsesAnExactInlineReplacementKey() {
+        val a = "blob:https://reader.test/panel-a"
+        val b = "blob:https://reader.test/panel-b"
+        assertTrue(WebModeTextRemovalCache.storeBlobCleaned(a, "data:image/webp;base64,TEST_A"))
+        assertEquals("data:image/webp;base64,TEST_A", WebModeTextRemovalCache.urlFor(a))
+        assertNull(WebModeTextRemovalCache.urlFor(b))
+    }
+
+    @Test fun inlineCleanedUrlCacheIsBoundedByTotalStringSize() {
+        val a = "blob:https://reader.test/large-a"
+        val b = "blob:https://reader.test/large-b"
+        val prefix = "data:image/webp;base64,"
+        val first = prefix + "A".repeat(390_000)
+        val second = prefix + "B".repeat(390_000)
+        assertTrue(WebModeTextRemovalCache.storeBlobCleaned(a, first))
+        assertTrue(WebModeTextRemovalCache.storeBlobCleaned(b, second))
+        assertNull(WebModeTextRemovalCache.urlFor(a))
+        assertEquals(second, WebModeTextRemovalCache.urlFor(b))
+    }
     @Test fun manualRecoveryIsNotCappedAtOneAndHalfSeconds() {
         assertTrue(com.ashraf.novelstudio.manualextract.ManualExtractConfig.OCR_CAP_MS >= 30_000)
         assertFalse(com.ashraf.novelstudio.manualextract.ManualExtractConfig.USE_TRANSLATION_CACHE)
