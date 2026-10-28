@@ -100,6 +100,7 @@ assert.ok(removerCache.includes("prepareSource(sourceUrl: String, originalImage:
 assert.ok(remover.includes("val bgRemoved = if (soft) 0 else eraseByBackgroundModel(") &&
           remover.includes("if (soft && aiFill == null)") &&
           remover.includes("non-text artwork inside OCR box") &&
+          remover.includes("if (bgRemoved < 0)") &&
           writer.includes("if(!it.cl&&!it.er && !it.sf)"),
   "non-AI cleanup must never paint broad background guesses or opaque covers over illustration");
 assert.ok(extractor.includes("if (cleanableSrc && (fullTextRemoverOn || hasBalloonMasks))") &&
