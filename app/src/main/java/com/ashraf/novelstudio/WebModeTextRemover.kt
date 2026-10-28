@@ -678,6 +678,47 @@ internal object WebModeTextRemover {
         return changed
     }
 
+
+    /**
+     * Resolve interior bands for a bubble/text OCR record. Non-rotated bubbles already carry the geometry that
+     * was used for placement. Rotated text (notably vertical Japanese) skips that placement fit, so find the
+     * containing instance mask from the original OCR box and reuse its inset bands for cleanup only.
+     */
+    private fun modelInteriorBandsFor(
+        bubble: WmBubble,
+        dets: List<BubbleDetectorCore.Det>?,
+        width: Int,
+        height: Int
+    ): List<Float> {
+        if (bubble.free || width <= 0 || height <= 0) return emptyList()
+        if (bubble.modelMaskFit && bubble.cv.size >= 4) return bubble.cv
+        if (dets.isNullOrEmpty()) return emptyList()
+
+        val hasOcrBox = bubble.ocrW > 0f && bubble.ocrH > 0f
+        val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx) * width
+        val cy = (if (hasOcrBox) bubble.ocrCy else bubble.cy) * height
+        val bw = (if (hasOcrBox) bubble.ocrW else bubble.w) * width
+        val bh = (if (hasOcrBox) bubble.ocrH else bubble.h) * height
+        if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite() || bw < 4f || bh < 4f) {
+            return emptyList()
+        }
+        val l = (cx - bw / 2f).toInt().coerceIn(0, width - 1)
+        val t = (cy - bh / 2f).toInt().coerceIn(0, height - 1)
+        val r = ceil(cx + bw / 2f).toInt().coerceIn(l + 1, width)
+        val b = ceil(cy + bh / 2f).toInt().coerceIn(t + 1, height)
+        val shape = BubbleDetectorCore.maskGeometryFor(dets, l, t, r, b) ?: return emptyList()
+        if (shape.bands.isEmpty()) return emptyList()
+        val out = ArrayList<Float>(shape.bands.size * 4)
+        for (band in shape.bands) {
+            if (band.size < 4) continue
+            out.add(band[0].toFloat() / width)
+            out.add(band[1].toFloat() / height)
+            out.add(band[2].toFloat() / width)
+            out.add(band[3].toFloat() / height)
+        }
+        return out
+    }
+
     fun cleanAndCache(
         context: Context,
         sourceUrl: String,
@@ -1147,29 +1188,37 @@ internal object WebModeTextRemover {
                 totalRemoved += selectedCount
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
-            // Recovery pass from the faster cleaner: remove missed rows/SFX inside a VERIFIED flat bubble.
-            // This is intentionally narrower than the legacy whole-interior pass. Only model-mask-derived bands
-            // qualify, the paper must be demonstrably flat, and free/artwork text is never sent through this path.
-            // Keep it AFTER glyph verification so these filled pixels cannot make the original-text verifier pass
-            // or fail based on an already-repainted bitmap.
-            val attemptedFlatBands = HashSet<Pair<List<Float>, Int>>()
+            // Recovery pass from the faster cleaner: remove missed rows/SFX inside a VERIFIED flat speech bubble.
+            // Prefer the cached model-derived bands; for rotated Japanese OCR, derive the same bands directly from the
+            // already-returned balloon mask and the original OCR box (no new inference). In either case the paper must
+            // pass a strict flat-colour check. The pass runs AFTER glyph verification and never touches free text.
+            val flatBandOwners = LinkedHashMap<List<Float>, MutableList<WmBubble>>()
             for (bubble in boundedBubbles) {
-                if (bubble.soft || bubble.free || !bubble.modelMaskFit || bubble.cv.size < 4) continue
-                val paper = opaque(bubble.bg)
-                if (!attemptedFlatBands.add(bubble.cv to paper)) continue
-                val n = try {
-                    wipeModelValidatedFlatInterior(bitmap, bubble.cv, width, height, paper)
-                } catch (_: Throwable) { 0 }
-                if (n <= 0) continue
-
-                totalRemoved += n
-                // The same model-derived interior belongs to every recognised text region in this balloon.
-                // Mark all of those keys only after the complete flat interior has actually been cleaned.
-                val related = boundedBubbles.filter {
-                    it.modelMaskFit && !it.soft && !it.free && it.cv == bubble.cv
+                if (bubble.free) continue
+                val bands = try {
+                    modelInteriorBandsFor(bubble, dets, width, height)
+                } catch (_: Throwable) { emptyList() }
+                if (bands.size < 4) continue
+                flatBandOwners.getOrPut(bands) { ArrayList() }.add(bubble)
+            }
+            for ((bands, owners) in flatBandOwners) {
+                var changed = 0
+                val triedPaper = HashSet<Int>()
+                for (owner in owners) {
+                    val paper = opaque(owner.bg)
+                    if (!triedPaper.add(paper)) continue
+                    changed = try {
+                        wipeModelValidatedFlatInterior(bitmap, bands, width, height, paper)
+                    } catch (_: Throwable) { 0 }
+                    if (changed > 0) break
                 }
-                related.forEach { erased.add(WebModeTextRemovalCache.bubbleKey(it)) }
-                OcrDiag.log("FLAT_INTERIOR", "pixels=$n bands=${bubble.cv.size / 4} related=${related.size} paperCheck=passed")
+                if (changed <= 0) continue
+
+                totalRemoved += changed
+                // One model mask can own multiple OCR rows. Mark every owner only after its entire verified
+                // flat interior has actually been reconstructed, so the writer can safely use a transparent overlay.
+                owners.forEach { erased.add(WebModeTextRemovalCache.bubbleKey(it)) }
+                OcrDiag.log("FLAT_INTERIOR", "pixels=$changed bands=${bands.size / 4} related=${owners.size} paperCheck=passed")
             }
 
             // The detector's balloon mask can occasionally cover a whole illustrated panel (for example a
