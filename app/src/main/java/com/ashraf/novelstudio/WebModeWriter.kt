@@ -118,7 +118,6 @@ internal object WebModeWriter {
       if(entry.url!==url){entry.url=url;entry.loaded=false;entry.el.src=url;}
       if(entry.el.complete&&entry.el.naturalWidth>0)entry.loaded=true;
       var x=ABS?(r.left-o0.left):r.left,y=ABS?(r.top-o0.top):r.top;
-      entry.el.style.display='block';
       entry.el.style.width=r.width+'px';entry.el.style.height=r.height+'px';
       var hl=holes[key];
       if(hl&&hl.length){
@@ -263,8 +262,8 @@ internal object WebModeWriter {
     // OCR stores their visible canvas as ns-canvas:left,contentTop,widthxheight. Resolve that stable
     // geometry back to the live canvas, so the same fractional bubble coordinates can be overlaid.
     function canvasSpec(s){
-      var m=/^ns-canvas:(-?\d+),(-?\d+),(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(?:@([\w]+))?$/.exec(norm(s));
-      return m?{x:Number(m[1]),y:Number(m[2]),w:Number(m[3]),h:Number(m[4]),token:m[5]||''}:null;
+      var m=/^ns-canvas:(-?\d+),(-?\d+),(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)$/.exec(norm(s));
+      return m?{x:Number(m[1]),y:Number(m[2]),w:Number(m[3]),h:Number(m[4])}:null;
     }
     function canvasTops(cv,r){
       var out=[r.top,r.top+(window.pageYOffset||de.scrollTop||document.documentElement.scrollTop||0)];
@@ -285,7 +284,6 @@ internal object WebModeWriter {
       if(!cv||String(cv.tagName||'').toLowerCase()!=='canvas')return Infinity;
       var r;try{r=cv.getBoundingClientRect();}catch(e){return Infinity;}
       if(r.width<40||r.height<40)return Infinity;
-      if(spec.token&&(!window.__nsCanvasToken||window.__nsCanvasToken(cv)!==spec.token))return Infinity;
       var cs;try{cs=getComputedStyle(cv);}catch(e){cs=null;}
       if(cs&&(cs.display==='none'||cs.visibility==='hidden'||parseFloat(cs.opacity||'1')<0.05))return Infinity;
       var dx=Math.abs(r.left-spec.x),dw=Math.abs(r.width-spec.w),dh=Math.abs(r.height-spec.h);
@@ -332,19 +330,6 @@ internal object WebModeWriter {
       return n;
     }
     function findImg(s, index){
-      var region=/^ns-region:(-?\d+),(-?\d+),(\d+)x(\d+)@\d+$/.exec(s||'');
-      if(region){
-        return {tagName:'NS-REGION',getBoundingClientRect:function(){
-          var left=Number(region[1])-(window.pageXOffset||0),top=Number(region[2])-(window.pageYOffset||0),
-            width=Number(region[3]),height=Number(region[4]);
-          return {left:left,top:top,width:width,height:height,right:left+width,bottom:top+height};
-        }};
-      }
-      var exported=window.__nsCanvasExports&&window.__nsCanvasExports[s];
-      if(exported){
-        return document.contains(exported.el)&&window.__nsCanvasToken&&
-          window.__nsCanvasToken(exported.el)===exported.token?exported.el:null;
-      }
       var spec=canvasSpec(s);
       if(spec){
         // Canvas identities describe a location, not an image URL; revalidate it every pass because
@@ -444,15 +429,6 @@ internal object WebModeWriter {
       for(var n=0;n<18;n++){
         var mid=(lo+hi)/2;t.style.fontSize=mid+'px';
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
-      }
-      if(hasTb){
-        // Measure BOTH axes at the final font; bubble geometry is a hard constraint.
-        t.style.fontSize=best+'px';
-        for(var safe=0;safe<24&&!fits();safe++){
-          t.style.fontSize=Math.max(0.5,(parseFloat(t.style.fontSize)||best)*0.92)+'px';
-        }
-        b.__nsReqWRatio=0;b.__nsReqHRatio=0;
-        t.style.overflow='visible';return boxH;
       }
       if(best<floorPx){
         // Even the smallest readable size does not fit: take the free space at the sides.
@@ -727,22 +703,11 @@ internal object WebModeWriter {
         if(lc.getAttribute('data-k')!==lk){lc.setAttribute('data-k',lk);lc.style.width=cwid+'px';lc.style.height=chei+'px';
           lc.style.transform='translate3d('+cx+'px,'+cy+'px,0)';}
         lc.style.display='block';
-        if(R.im&&String(R.im.tagName||'').toLowerCase()==='canvas'){
-          var owned=R.im.__nsOverlayLayers||(R.im.__nsOverlayLayers=[]);
-          if(owned.indexOf(lc)<0)owned.push(lc);
-        }
       }
       window.__nsLayoutReport={visible:vis.length,overflow:overflow,overlaps:overlaps,pushed:pushed,t:Date.now()};
       return need;
     }
-    function hideBubble(b){
-      b.style.display="none";
-      if(b.__nsCover)b.__nsCover.style.display="none";
-      if(b.__nsLabelCover)b.__nsLabelCover.style.display="none";
-    }
     function layout(){
-      // A clean image has its own lifetime: hide it until a live source validates it this pass.
-      for(var cleanKey in cleanImgs)cleanImgs[cleanKey].el.style.display="none";
       if(!document.contains(w)){
         // Another overlay replaced this one -> stop. Otherwise the page (a re-render, a lazy-load swap)
         // threw our overlay away: put it back instead of silently giving up.
@@ -788,15 +753,9 @@ internal object WebModeWriter {
       var imgIndex=needsIndex?buildImgIndex():null;
       for(var i=0;i<bs.length;i++){
         var b=bs[i],im=findImg(b.getAttribute('data-s'),imgIndex);
-        if(!im){hideBubble(b);continue;}
-        if(String(im.tagName||'').toLowerCase()==='canvas'){
-          var layers=im.__nsOverlayLayers||(im.__nsOverlayLayers=[]);
-          [b,b.__nsCover,b.__nsLabelCover].forEach(function(layer){if(layer&&layers.indexOf(layer)<0)layers.push(layer);});
-          var ownedClean=cleanImgs[norm(b.getAttribute('data-s'))];
-          if(ownedClean&&layers.indexOf(ownedClean.el)<0)layers.push(ownedClean.el);
-        }
+        if(!im){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var r=im.getBoundingClientRect();
-        if(r.width<8){hideBubble(b);continue;}
+        if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
         var cleanUrl=b.getAttribute('data-cl');
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
@@ -804,11 +763,11 @@ internal object WebModeWriter {
         var bw=g[2]*r.width,bh=g[3]*r.height;
         var vx=r.left+g[0]*r.width,vy=r.top+g[1]*r.height;       // centre in the viewport
         var near=!(vy+bh/2<-MARGIN||vy-bh/2>vh+MARGIN);
-        if(!near){hideBubble(b);continue;}
+        if(!near){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var px=ABS?(vx-o.left):vx,py=ABS?(vy-o.top):vy;          // centre in the overlay's own space
         var imgX=ABS?(r.left-o.left):r.left,angle=Number(g[4])||0;
         b.__nsNomW=bw;b.__nsMaxW=Math.max(bw,r.width-4);
-        L.push({needW:Math.max(0,(Number(b.__nsReqWRatio)||0)*bw),b:b,im:im,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
+        L.push({needW:Math.max(0,(Number(b.__nsReqWRatio)||0)*bw),b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
           ox0:px-bw/2,ox1:px+bw/2,oy0:py-bh/2,oy1:py+bh/2,il:imgX,ir:imgX+r.width,
           needH:Math.max(0,(Number(b.__nsReqHRatio)||0)*bh),angle:angle,rot:angle!==0,
           x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,hidden:false});
@@ -819,14 +778,14 @@ internal object WebModeWriter {
         var expanded=false;
         for(var n=0;n<L.length;n++){
           var R=L[n],bb=R.b,gg=R.g;
-          if(R.hidden){hideBubble(bb);continue;}
+          if(R.hidden){if(bb.style.display!=='none')bb.style.display='none';if(bb.__nsCover)bb.__nsCover.style.display='none';continue;}
           bb.__nsPushed=false;
           var cw=R.x1-R.x0,ch=R.y1-R.y0;
           var key=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
           var keyChanged=bb.getAttribute('data-k')!==key;
           var moved=Math.abs(R.x0-R.ox0)>1||Math.abs(R.y0-R.oy0)>1||Math.abs(cw-R.ow)>1||Math.abs(ch-R.oh)>1;
           var movedState=moved?'1':'0',movedChanged=bb.getAttribute('data-moved')!==movedState;
-          // Never discard the measured bubble interior during a collision pass.
+          if(moved)bb.removeAttribute('data-tb');
           bb.setAttribute('data-moved',movedState);
           var sz=Math.round(cw)+','+Math.round(ch),szChanged=bb.getAttribute('data-sz')!==sz||movedChanged;
           if(keyChanged){
@@ -1346,7 +1305,8 @@ internal object WebModeWriter {
                 // limited to canvas sources: an ordinary panel whose cleaned image is not cached (evicted, or a
                 // different job's erased marks) would otherwise lose its cover box with the original lettering
                 // still on the page — the translation then sits on top of the untranslated text.
-                .put("er", false)) // Cleaning is an overlay image, never a destructive edit to the source canvas.
+                .put("er", b.src.startsWith("ns-canvas:", true) &&
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()

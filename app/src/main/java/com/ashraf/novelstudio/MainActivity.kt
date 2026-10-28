@@ -458,10 +458,9 @@ class MainActivity : Activity() {
      * Run the manual pipeline on an already-captured bitmap (no second screenshot, no image lookup).
      * [src] is the image the ovelay anchors to; without it the writer hides the bubble entirely.
      */
-    private fun startManualExtractOnBitmap(src: String, bmp: android.graphics.Bitmap,
-        x: Float = 0f, y: Float = 0f, w: Float = 1f, h: Float = 1f) {
+    private fun startManualExtractOnBitmap(src: String, bmp: android.graphics.Bitmap) {
         OcrDiag.setMode("manual")
-        com.ashraf.novelstudio.manualextract.ManualExtractHost.startOnBitmap(this, src, bmp, manualExtractScript(), x, y, w, h)
+        com.ashraf.novelstudio.manualextract.ManualExtractHost.startOnBitmap(this, src, bmp, manualExtractScript())
     }
 
     /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
@@ -640,7 +639,6 @@ class MainActivity : Activity() {
                 }
                 onFinished?.invoke()
             },
-            forceFreshOcr = true,
             forceOcrSrc = if (forceScreenOcr) null else source,
             forceOcrRegion = if (forceScreenOcr) null else region,
             forceScreenOcr = forceScreenOcr
@@ -853,38 +851,29 @@ class MainActivity : Activity() {
             "var il=Math.max(L,r.left),it=Math.max(T,r.top),ir=Math.min(R,r.right),ib=Math.min(B,r.bottom);" +
             "if(ir<=il||ib<=it)continue;var ar=(ir-il)*(ib-it);" +
             "if(ar>ba){ba=ar;best={s:(im.currentSrc||im.src||''),x:(il-r.left)/r.width,y:(it-r.top)/r.height,w:(ir-il)/r.width,h:(ib-it)/r.height};}}" +
-            "var cvs=document.querySelectorAll('canvas');for(var ci=0;ci<cvs.length;ci++){var cv=cvs[ci],r=cv.getBoundingClientRect();" +
-            "if(r.width<40||r.height<40)continue;var il=Math.max(L,r.left),it=Math.max(T,r.top),ir=Math.min(R,r.right),ib=Math.min(B,r.bottom);" +
-            "if(ir<=il||ib<=it)continue;var ar=(ir-il)*(ib-it);if(ar>=ba){ba=ar;" +
-            "var pt=r.top+(window.pageYOffset||0),pa=cv.parentElement;while(pa&&pa!==document.body){" +
-            "var ov=getComputedStyle(pa).overflowY;if((ov==='auto'||ov==='scroll')&&pa.scrollHeight>pa.clientHeight+80){pt=r.top-pa.getBoundingClientRect().top+pa.scrollTop;break;}pa=pa.parentElement;}" +
-            "var s='ns-canvas:'+Math.round(r.left)+','+Math.round(pt)+','+Math.round(r.width)+'x'+Math.round(r.height);" +
-            "if(window.__nsCanvasToken)s+='@'+window.__nsCanvasToken(cv);" +
-            "best={s:s,cv:1,x:(il-r.left)/r.width,y:(it-r.top)/r.height,w:(ir-il)/r.width,h:(ib-it)/r.height,vx:il/vw,vy:it/vh,vr:ir/vw,vb:ib/vh};}}" +
             "return best?JSON.stringify(best):'';})($fx0,$fy0,$fx1,$fy1)"
         novelWv.evaluateJavascript(js) { raw ->
             val txt = decode(raw)
             val o = try { JSONObject(txt) } catch (_: Exception) { null }
-            if (o?.optInt("cv") == 1) {
-                val hit = captureManualRegionFromView(o.optDouble("vx").toFloat(), o.optDouble("vy").toFloat(),
-                    o.optDouble("vr").toFloat(), o.optDouble("vb").toFloat())
-                if (hit == null) { finish("⚠️ Capture failed — selected area was not changed"); return@evaluateJavascript }
-                startManualExtractOnBitmap(o.getString("s"), hit, o.optDouble("x").toFloat(),
-                    o.optDouble("y").toFloat(), o.optDouble("w").toFloat(), o.optDouble("h").toFloat())
-                finish(null)
-                return@evaluateJavascript
-            }
             if (o == null || o.optString("s").isBlank()) {
-                val hit = captureManualRegionFromView(fx0, fy0, fx1, fy1)
-                if (hit == null) { finish("⚠️ Capture failed — original text was kept"); return@evaluateJavascript }
-                val anchorJs = "(function(){var vw=innerWidth,vh=innerHeight;return 'ns-region:'+" +
-                    "Math.round($fx0*vw+(window.pageXOffset||0))+','+Math.round($fy0*vh+(window.pageYOffset||0))+','+" +
-                    "Math.max(1,Math.round(($fx1-$fx0)*vw))+'x'+Math.max(1,Math.round(($fy1-$fy0)*vh))+'@'+Date.now();})()"
-                novelWv.evaluateJavascript(anchorJs) { value ->
-                    if (!stillHere()) { hit.recycle(); finish(null) }
-                    else { startManualExtractOnBitmap(decode(value), hit); finish(null) }
+                // No image element under the frame (canvas reader, or the box sits over a background image).
+                // Manual mode still honours the intent: read exactly what was framed, from the live screen.
+                if (manual) {
+                    val hit = captureManualRegionFromView(fx0, fy0, fx1, fy1)
+                    if (hit == null) { finish("⚠️ Nothing under the frame — try again"); return@evaluateJavascript }
+                    // Anchor for the overlay. The frame may cover no <img> at all (background artwork, CSS
+                    // layers), so fall back to a canvas-style identity describing the whole WebView, which the
+                    // writer already knows how to position against.
+                    val anchor = nearbyImageSource(fx0, fy0, fx1, fy1) ?: run {
+                        val vw = novelWv.width.coerceAtLeast(1)
+                        val vh = novelWv.height.coerceAtLeast(1)
+                        "ns-canvas:0,0,${vw}x${vh}"
+                    }
+                    startManualExtractOnBitmap(anchor, hit)
+                    finish(null)
+                    return@evaluateJavascript
                 }
-                return@evaluateJavascript
+                finish("⚠️ No page image under the frame"); return@evaluateJavascript
             }
             if (manual) {
                 // Straight into the manual pipeline: no realtime queue to wait for, no pause/resume dance.
@@ -1009,11 +998,10 @@ class MainActivity : Activity() {
     }
 
     private fun requestBubbleRetranslate(src: String, cx: Float, cy: Float, w: Float, h: Float) {
-        if (!webModeOn()) {
-            toast("🔁 Re-translate needs image reading mode")
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) {
+            toast("🔁 Re-translate works in Real-time mode")
             return
         }
-        if (!DeepSeekRealtimeTranslation.isEnabled(this)) { requestForceOcrBubble(src, cx, cy, w, h); return }
         val url = novelWv.url.orEmpty()
         val srcN = WebModeLogic.normalizeUrl(src)
 
@@ -2174,7 +2162,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
         rtAheadTranslationSuppressedIds.add(task.id)
         val missing = task.layout.bubbles.filter { bubble ->
             !rtAheadTranslationCache.containsKey(rtAheadBubbleCacheKey(bubble)) &&
-                synchronized(deepSeekInFlightTextHashes) {
+                !synchronized(deepSeekInFlightTextHashes) {
                     val fp = WebModeLayout.fingerprint(bubble)
                     fp !in deepSeekTranslatedTextHashes && fp !in deepSeekInFlightTextHashes
                 }
@@ -8784,8 +8772,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 failJob(tok, ch, "The chatbot did not send any text. Just wait — the app will try again by itself.", autoRetry = true)
                 return@evaluateJavascript
             }
-            val imageBubbleReply = webModeOn() && ch.contentSel.isBlank()
-            if (rawTranslation.length < (if (livePanelBatch || imageBubbleReply) 1 else 30)) {
+            if (rawTranslation.length < (if (livePanelBatch) 2 else 30)) {
                 failJob(tok, ch, "Could not read the answer")
                 return@evaluateJavascript
             }
@@ -8793,7 +8780,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // clipboard or saved chapter, but keep the raw marked response for DOM
             // insertion so paragraph alignment survives AI formatting changes.
             val t = stripInternalMarkers(rawTranslation)
-            if (t.isBlank() || (!livePanelBatch && !imageBubbleReply && t.length < 30)) {
+            if (t.isBlank() || (!livePanelBatch && t.length < 30)) {
                 failJob(tok, ch, "Could not read the translation")
                 return@evaluateJavascript
             }
@@ -9542,7 +9529,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         if (webModePct >= 0) {
             // Web Mode OCR pass for the visible chapter: same bar, same ring, never 100 until the chatbot is done.
             progressTv.text = webModeStage
-            progressPct.text = if (webModePct > 0) "$webModePct% OCR" else ""
+            progressPct.text = if (webModePct > 0) "$webModePct%" else ""
             progressBar.progress = webModePct
             progressBar.running = true
             extractBtn.ringProgress = if (webModePct > 0) webModePct else 0

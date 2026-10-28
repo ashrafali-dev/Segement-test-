@@ -305,16 +305,16 @@ internal object BubbleDetector {
     // ---- detection ---------------------------------------------------------------------------------------------
 
     /** Detections for [bmp] in page pixels, or null when the detector is off/unavailable. Never throws. */
-    fun detect(c: Context, bmp: Bitmap, thorough: Boolean = false): List<BubbleDetectorCore.Det>? {
+    fun detect(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
         if (bmp.isRecycled) return null
-        cached(bmp)?.let { if (!thorough || !BubbleSegDetector.enabled(c) || it.any { d -> d.seg != null }) return it }
+        cached(bmp)?.let { return it }
         OnnxHeavyGate.lock.lock()
-        try { return detectLocked(c, bmp, thorough) } finally { OnnxHeavyGate.lock.unlock() }
+        try { return detectLocked(c, bmp) } finally { OnnxHeavyGate.lock.unlock() }
     }
 
     @Synchronized
-    private fun detectLocked(c: Context, bmp: Bitmap, thorough: Boolean = false): List<BubbleDetectorCore.Det>? {
+    private fun detectLocked(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
         // This detector also receives OCR slices and manual crops, not only full pages. Many legitimate
         // manga narration/dialogue boxes are short and wide, so aspect-ratio and 200px side filters caused
@@ -358,9 +358,9 @@ internal object BubbleDetector {
             // Optional second model: gives the BALLOONS found above their real outline. It never replaces anything and
             // never runs when the main detector saw no balloon, when memory is tight, or on the on-screen path.
             var maskNote = ""
-            if (!thorough && mainMs > 7000L) {
+            if (mainMs > 7000L) {
                 maskNote = " masks:skipped (device busy: main detector took ${mainMs}ms)"
-            } else if (thorough || out.any { it.label == BubbleDetectorCore.CLS_BUBBLE || it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
+            } else if (out.any { it.label == BubbleDetectorCore.CLS_BUBBLE || it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
                 val segs = BubbleSegDetector.detect(c, bmp)
                 if (segs != null && segs.isNotEmpty()) {
                     val merged = BubbleDetectorCore.attachMasks(out, segs)

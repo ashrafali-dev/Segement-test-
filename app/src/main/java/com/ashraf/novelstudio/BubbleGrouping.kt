@@ -2,7 +2,7 @@ package com.ashraf.novelstudio
 
 /**
  * Pure geometry behind "one speech bubble = one translation unit" (moved verbatim out of WebModeExtractor so it
- * can be unit-tested on the JVM). Aside text is conservatively kept separate.
+ * can be unit-tested on the JVM). Behaviour is unchanged.
  */
 internal object BubbleGrouping {
     fun aligned(a: OcrBlock, b: OcrBlock): Boolean {
@@ -71,21 +71,12 @@ internal object BubbleGrouping {
     private fun hOverlap(a: OcrBlock, b: OcrBlock): Float =
         minOf(a.cx + a.w / 2f, b.cx + b.w / 2f) - maxOf(a.cx - a.w / 2f, b.cx - b.w / 2f)
 
-    fun isAsidePair(a: OcrBlock, b: OcrBlock): Boolean {
-        val fa = font(a); val fb = font(b)
-        if (fa <= 0f || fb <= 0f || a.vertical || b.vertical) return false
-        val ratio = minOf(fa, fb) / maxOf(fa, fb)
-        val offset = kotlin.math.abs(a.cx - b.cx) > maxOf(a.w, b.w) * 0.12f
-        val tilt = kotlin.math.abs(OcrPost.usableTilt(a.angle) - OcrPost.usableTilt(b.angle)) > 5f
-        return ratio < 0.60f || (ratio < 0.80f && (offset || tilt))
-    }
-
     /** Pairwise rule used while no bubble outline is known (generic gap <= 1 font, aligned, similar font). */
     fun sameBubbleFast(a: OcrBlock, b: OcrBlock): Boolean =
         // OCR boxes often leave a larger vertical gap than the glyph height inside tall Korean webtoon balloons.
         // Production callers also pass outlineBetween() as a veto, so tolerate wider line spacing without
         // blindly chaining two visibly separate balloons together.
-        !isAsidePair(a, b) && likelySameBubbleLine(a, b, 1.6f, loose = true) && aligned(a, b) && sharesAlignment(a, b)
+        likelySameBubbleLine(a, b, 1.6f, loose = true) && aligned(a, b) && sharesAlignment(a, b)
 
     /**
      * Groups the lines [pool] (indices into [blocks]) into speech bubbles.
