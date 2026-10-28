@@ -175,7 +175,10 @@ internal object WebModeWriter {
       }
       b.appendChild(t);
       var cover=null;
-      if(!it.cl&&!it.er){
+      // Soft/free text lies on illustration. If the pixel cleaner did not prove a safe inpaint, do NOT
+      // paint a sampled flat-colour rectangle over the art; the original glyph may remain, but the artwork
+      // stays intact until AI inpainting succeeds.
+      if(!it.cl&&!it.er && !it.sf){
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
           +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
