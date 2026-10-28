@@ -2932,7 +2932,7 @@ internal class WebModeExtractor(
         private const val LIB = """
 var BAD=/avatar|logo|sprite|emoji|profile|badge|pixel|tracking|advert|\/ads?|[_\-.]ads?[_\-.]|spinner/i;
 var PH=/placeholder|blank\.|spacer|loading|lazy[-_.]?(img|load)|1x1|transparen|pixel\.gif/i;
-var LAZY=['data-src','data-original','data-lazy-src','data-lazy','data-url','data-echo','data-actualsrc','data-orig-src','data-pc-src','data-original-src','data-src-original','data-image','data-img','data-bg','data-background','data-background-image','data-ks-lazyload','data-cfsrc','data-defer-src'];
+var LAZY=['data-original','data-original-src','data-src-original','data-orig-src','data-full-src','data-full','data-hires','data-hi-res','data-original-image','data-image-url','data-download-url','data-pc-src','data-actualsrc','data-src','data-lazy-src','data-lazy','data-url','data-echo','data-image','data-img','data-bg','data-background','data-background-image','data-ks-lazyload','data-cfsrc','data-defer-src'];
 var de=document.scrollingElement||document.documentElement;
 function absUrl(s){try{return s?new URL(String(s).trim(),document.baseURI).href:'';}catch(e){return '';}}
 function decorativeUrl(s){
@@ -2952,14 +2952,62 @@ function pickSrcset(ss){
   }
   return best;
 }
+function imageUrlQuality(s){
+  s=String(s||'').toLowerCase();
+  var score=0;
+  if(/(?:^|[\\/_.?&=-])(?:original|orig|full|fullsize|full-size|fullres|full-res|large|raw|master|download|hires|hi-res|zoom)(?:[\\/_.?&=-]|$)/.test(s))score+=20;
+  if(/(?:^|[\\/_.?&=-])(?:thumb|thumbnail|thumbs|small|preview|tiny|lowres|low-res|resized|resize|medium)(?:[\\/_.?&=-]|$)/.test(s))score-=25;
+  return score;
+}
+function looksLikeImageDownloadUrl(s){
+  var u=absUrl(s);if(!u||!goodUrl(u))return false;
+  try{
+    var z=new URL(u),p=(z.pathname||'').toLowerCase(),q=(z.search||'').toLowerCase();
+    return /\\.(?:jpe?g|png|webp|avif|jfif|bmp|tiff?|jxl)$/.test(p)||
+      /\\/(?:image|images|img|original|raw|download|fullsize|full-size|fullres|full-res)(?:\\/|$)/.test(p)||
+      /[?&](?:format|fm|type|mime)=(?:image\\/)?(?:jpe?g|png|webp|avif|jxl)(?:&|$)/.test(q);
+  }catch(e){return false;}
+}
 function imageSrc(im){
-  var primary=im.currentSrc||im.getAttribute('src')||im.src||'';
-  var lazy='';
-  for(var i=0;i<LAZY.length;i++){var v=im.getAttribute&&im.getAttribute(LAZY[i]);if(goodUrl(v)){lazy=v;break;}}
+  // Prefer explicit original/full-size fields or a direct image href over the display thumbnail.
+  // Some readers show a small preview in src/currentSrc while the downloadable panel is in data-original.
+  var best='',bestScore=-Infinity;
+  function add(raw,rank){
+    if(!raw)return;
+    var u=absUrl(raw);if(!u||!goodUrl(u))return;
+    var score=rank+imageUrlQuality(u);
+    if(score>bestScore){best=u;bestScore=score;}
+  }
+  var current=im.currentSrc||'';
+  var srcAttr=(im.getAttribute&&im.getAttribute('src'))||im.src||'';
+  add(current,(im.naturalWidth||0)>=300?88:76);
+  add(srcAttr,58);
+  for(var i=0;i<LAZY.length;i++){
+    var attr=LAZY[i],v=im.getAttribute&&im.getAttribute(attr);
+    if(!v)continue;
+    var rank=(attr==='data-original'||attr==='data-original-src'||attr==='data-src-original'||attr==='data-orig-src')?112:
+      (/full|hires|original|download|image-url/.test(attr)?104:
+      (attr==='data-src'||attr==='data-lazy-src'||attr==='data-actualsrc'||attr==='data-pc-src'?86:78));
+    add(v,rank);
+  }
   var set=pickSrcset((im.getAttribute&&im.getAttribute('data-srcset'))||(im.getAttribute&&im.getAttribute('srcset'))||'');
-  if(lazy&&(!goodUrl(primary)||PH.test(primary)||((im.naturalWidth||0)>0&&(im.naturalWidth||0)<8)))primary=lazy;
-  if(!goodUrl(primary))primary=set||lazy;
-  return absUrl(primary);
+  add(set,80);
+  // <picture> may expose an explicit high-resolution source separate from the fallback <img>.
+  try{
+    var pic=im.parentElement&&String(im.parentElement.tagName||'').toLowerCase()==='picture'?im.parentElement:null;
+    if(pic&&pic.querySelectorAll){
+      var sources=pic.querySelectorAll('source[srcset]');
+      for(var si=0;si<sources.length;si++)add(pickSrcset(sources[si].getAttribute('srcset')||''),82);
+    }
+  }catch(ignore){}
+  // Only accept an anchor as the image itself when it looks like an image/resource endpoint.
+  // A chapter/navigation href must never replace the actual panel image.
+  try{
+    var a=im.closest&&im.closest('a[href]');
+    var href=a&&((a.getAttribute&&a.getAttribute('href'))||a.href||'');
+    if(href&&looksLikeImageDownloadUrl(href))add(href,120);
+  }catch(ignore){}
+  return best||absUrl(current||srcAttr);
 }
 function allNodes(limit){
   var out=[],roots=[document],seenRoots=[];
@@ -3136,8 +3184,11 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     // Small thumbnails inside comment/related blocks are not panels, but a big image is one even if the
     // reader sits inside such a container.
     if(im.closest&&im.closest('header,footer,nav,aside,[class*=comment],[class*=recommend],[class*=related],[id*=comment]')&&!(r.width>=360&&r.height>=240))continue;
-    if(seen[src])continue;seen[src]=1;
     var inScroller=!!(sc&&sc.contains(im));var top=inScroller?(r.top-sr.top+sc.scrollTop):(r.top+wy);
+    // Virtualized readers can reuse the exact same URL at several document offsets. Deduplicate cloned
+    // elements at the same geometry, not every occurrence of a source URL across the chapter.
+    var imgKey=src+'@'+Math.round(top)+','+Math.round(r.left)+','+Math.round(r.width)+','+Math.round(r.height);
+    if(seen[imgKey])continue;seen[imgKey]=1;
     out.push(attachNode({s:src,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:(im.complete&&nw>0)?1:0,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom},im));
   }
   // Readers inside a same-origin <iframe>.
@@ -3147,13 +3198,14 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     try{fd=frs[fi].contentDocument;}catch(ignore){fd=null;}
     if(!fd||!fd.images)continue;
     for(var fk=0;fk<fd.images.length;fk++){
-      var fim=fd.images[fk],fsrc=fim.currentSrc||fim.src||'';
-      if(!goodUrl(fsrc)||seen[fsrc])continue;
+      var fim=fd.images[fk],fsrc=imageSrc(fim);
+      if(!goodUrl(fsrc))continue;
       var fr=fim.getBoundingClientRect(),fnw=fim.naturalWidth||0,fnh=fim.naturalHeight||0;
       if(!((fr.width>=100&&fr.height>=60)||(fnw>=300&&fnh>=120)))continue;
-      seen[fsrc]=1;
       var ft=fb.top+fr.top,fl=fb.left+fr.left;
       var fit=sc&&sc.contains(frs[fi])?ft-sr.top+sc.scrollTop:ft+wy;
+      var iframeKey=fsrc+'@'+Math.round(fit)+','+Math.round(fl)+','+Math.round(fr.width)+','+Math.round(fr.height);
+      if(seen[iframeKey])continue;seen[iframeKey]=1;
       out.push(attachNode({s:fsrc,t:Math.round(fit),l:Math.round(fl),w:Math.round(fr.width),h:Math.round(fr.height),d:(fim.complete&&fnw>0)?1:0,fw:fr.width,fh:fr.height,vl:fl,vt:ft,vb:ft+fr.height},fim,frs[fi]));
     }
   }
@@ -3164,11 +3216,12 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     if(xr.width<100||xr.height<60)continue;
     if(String(xe.tagName).toLowerCase()==='video')xs=xe.getAttribute('poster')||'';
     else xs=(xe.href&&xe.href.baseVal)||xe.getAttribute('href')||xe.getAttribute('xlink:href')||'';
-    xs=absUrl(xs);if(!xs||!goodUrl(xs)||seen[xs])continue;
+    xs=absUrl(xs);if(!xs||!goodUrl(xs))continue;
     var xmeta=(xe.className&&xe.className.baseVal!==undefined?xe.className.baseVal:xe.className||'')+' '+(xe.id||'');
     if(BAD.test(xmeta))continue;
-    seen[xs]=1;
     var svgInside=!!(sc&&sc.contains(xe));var xt=svgInside?(xr.top-sr.top+sc.scrollTop):(xr.top+wy);
+    var svgKey=xs+'@'+Math.round(xt)+','+Math.round(xr.left)+','+Math.round(xr.width)+','+Math.round(xr.height);
+    if(seen[svgKey])continue;seen[svgKey]=1;
     out.push(attachNode({s:xs,t:Math.round(xt),l:Math.round(xr.left),w:Math.round(xr.width),h:Math.round(xr.height),d:1,fw:xr.width,fh:xr.height,vl:xr.left,vt:xr.top,vb:xr.bottom},xe));
   }
   // Some readers mix normal IMG panels with CSS-background panels. Rate-limit the expensive
@@ -3215,9 +3268,9 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
         }
       }
       if(!cu||cu.length<2500)continue;
-      var ckey=cu.length+':'+cu.slice(-48)+cu.slice(2000,2048);
-      if(seen[ckey])continue;seen[ckey]=1;cvDone++;
       var cin=!!(sc&&sc.contains(cv));var ctop=cin?(cr.top-sr.top+sc.scrollTop):(cr.top+wy);
+      var ckey=cu.length+':'+cu.slice(-48)+cu.slice(2000,2048)+'@'+Math.round(ctop)+','+Math.round(cr.left)+','+Math.round(cr.width)+','+Math.round(cr.height);
+      if(seen[ckey])continue;seen[ckey]=1;cvDone++;
       out.push(attachNode({s:cu,t:Math.round(ctop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:1},cv));
     }
   }
@@ -3242,9 +3295,10 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
       var rx=/url\((?:"|')?([^"')]+)(?:"|')?\)/g,m;
       while((m=rx.exec(bg))!==null){
         var s=absUrl((m[1]||'').trim());
-        if(!s||!goodUrl(s)||seen[s])continue;
-        seen[s]=1;
+        if(!s||!goodUrl(s))continue;
         var inScroller=!!(sc&&sc.contains(el));var top=inScroller?(r.top-sr.top+sc.scrollTop):(r.top+wy);
+        var bgKey=s+'@'+Math.round(top)+','+Math.round(r.left)+','+Math.round(r.width)+','+Math.round(r.height);
+        if(seen[bgKey])continue;seen[bgKey]=1;
         out.push(attachNode({s:s,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:1,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom},el));
       }
     }
