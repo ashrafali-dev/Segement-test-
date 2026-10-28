@@ -9,13 +9,11 @@ internal object WebModeLogic {
 
     fun normalizeUrl(u: String): String = u.substringBefore('#').trim()
 
-    /** Remove duplicate image URLs and order panels by their position in the page. */
+    /** Remove duplicate panel elements at the same geometry and order them by document position. */
     fun dedupeAndOrder(refs: List<PanelRef>): List<PanelRef> {
-        val ordered = refs.distinctBy { normalizeUrl(it.src) }
-            .sortedWith(compareBy<PanelRef>({ it.top }, { it.left }))
-        // Lazy-loading pages keep a clone of the same picture at exactly the same position (the URL differs only in its
-        // query string). The clone was downloaded and OCR-ed again, and its failed download sent the whole job to the
-        // 17-20 s screen-capture fallback.
+        // Do not dedupe by URL alone: virtualized readers can reuse the same image URL at several
+        // document offsets, and those offsets represent different panels / canvas generations.
+        val ordered = refs.sortedWith(compareBy<PanelRef>({ it.top }, { it.left }))
         val out = ArrayList<PanelRef>(ordered.size)
         for (r in ordered) {
             val twin = out.any { o ->
