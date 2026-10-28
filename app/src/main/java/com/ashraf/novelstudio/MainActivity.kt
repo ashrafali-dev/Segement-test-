@@ -1343,10 +1343,9 @@ class MainActivity : Activity() {
         // The visible viewport always wins over speculative read-ahead. If its OCR is ready while a
         // hidden-WebView ahead request is still generating, stop that request and requeue it; otherwise
         // the current panel can sit waiting for the entire background answer despite being higher priority.
-        if (runningIsAheadJob() && rtAheadWorkerBusy) {
+        if (rtAheadWorkerBusy) {
             OcrDiag.log("REALTIME", "visible batch preempts read-ahead translation; queued bubbles=${pending.bubbles.size}")
             cancelRealtimeAheadWorker(requeue = true)
-            running = null
         }
         // Scan geometry and lastChapter are shared across page writes. Wait for ordinary foreground
         // jobs and any async overlay insertion to finish before replacing either.
