@@ -38,9 +38,14 @@ jobs:
 
       - name: Unit tests
         # Recorded separately so a pre-existing test failure does not hide the build result.
+        # Baseline on the untouched code: 70 tests, 1 pre-existing failure
+        # (BubbleDetectorCoreTest.twoBubblesAreSeparatedButOneBubbleIsNot).
+        id: unit_tests
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
 
       - name: Lint (debug)
+        # Always runs so lint is measured even when the pre-existing unit test fails.
+        if: always()
         run: gradle :app:lintDebug --no-daemon --stacktrace
 
       - name: Upload debug APK
