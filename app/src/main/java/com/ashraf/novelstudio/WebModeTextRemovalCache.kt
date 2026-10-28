@@ -83,7 +83,7 @@ internal object WebModeTextRemovalCache {
     }
 
     /**
-     * Cleaned pixels for a canvas panel, as a data: URL, keyed by the canvas slot.
+     * Cleaned pixels for a canvas panel, as a data: URL, keyed by its exact source generation.
      *
      * Canvas panels have no image URL to store a file under and their synthetic source changes with every
      * scroll position, so these live in memory only and are bounded. Without this the overlay had nothing to
@@ -95,14 +95,14 @@ internal object WebModeTextRemovalCache {
 
     @Synchronized
     fun storeCanvasCleaned(sourceUrl: String, dataUrl: String) {
-        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return
-        canvasUrls[slot] = dataUrl
+        if (WebModeLayoutStore.canvasSourceSlot(sourceUrl) == null) return
+        canvasUrls[key(sourceUrl)] = dataUrl
     }
 
     @Synchronized
     private fun canvasUrlFor(sourceUrl: String): String? {
-        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return null
-        return canvasUrls[slot]
+        if (WebModeLayoutStore.canvasSourceSlot(sourceUrl) == null) return null
+        return canvasUrls[key(sourceUrl)]
     }
 
     @Synchronized
@@ -157,6 +157,7 @@ internal object WebModeTextRemovalCache {
         entries.values.forEach { runCatching { it.file.delete() } }
         entries.clear()
         erasedSoft.clear()
+        canvasUrls.clear()
         usedBytes = 0L
         val dir = root ?: File(context.cacheDir, "wm_text_removed")
         runCatching { if (dir.exists()) dir.deleteRecursively() }

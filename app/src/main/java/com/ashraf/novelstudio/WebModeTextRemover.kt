@@ -414,7 +414,7 @@ internal object WebModeTextRemover {
             // A canvas panel has no image URL: its picture is drawn by page JS, so the overlay had nothing to
             // swap in and the old lettering stayed visible under the translation. Hand the cleaned pixels to the
             // overlay as a data: URL. Canvas entries stay in memory only (a new multi-MB file per scroll
-            // position would grow the disk cache without bound) and are keyed by the stable canvas slot.
+            // position would grow the disk cache without bound) and are keyed by the exact canvas generation.
             if (sourceUrl.startsWith("ns-canvas:", true)) {
                 WebModeTextRemovalCache.storeCanvasCleaned(
                     sourceUrl,

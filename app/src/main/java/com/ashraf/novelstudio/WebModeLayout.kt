@@ -156,7 +156,7 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                 // A marker that is out of range, repeated or empty only loses ITS OWN bubble (the old rule threw the
                 // whole reply away for one such marker)...
                 if (no < 1 || no > expectedLast) { outOfRange++; continue }
-                if (!seenNumbers.add(no)) { dup++; continue }   // a number that appears twice is ambiguous: keep the first answer
+                if (!seenNumbers.add(no)) { dup++; continue }   // duplicated IDs make the entire reply invalid below
                 val end = if (k + 1 < ms.size) ms[k + 1].range.first else text.length
                 val body = text.substring(m.range.last + 1, end).trim()
                 // Older prompts/models used a tilde as a fake translation for skipped OCR.
@@ -166,9 +166,11 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             // model lost track of the numbering (merged / renumbered / re-ordered paragraphs). Putting such a reply on the
             // page prints lines in the wrong bubbles and leaves the rest permanently untranslated, so it is rejected and
             // the caller retries instead (that is what the old 70 % rule protected).
-            val need = if (n <= 2) n else Math.ceil(n * 0.75).toInt()
+            // Every bubble must have exactly one nonempty answer; title markers do not count.
+            val need = n
             val ascending = order.zipWithNext().all { (x, y) -> y > x }
-            val ok = byNo.size >= need && ascending
+            val complete = (1..n).all { byNo.containsKey(it + layout.titleOffset) }
+            val ok = complete && ascending && dup == 0 && outOfRange == 0 && empty == 0
             OcrDiag.log("ALIGN", "bubbles=$n markers=${ms.size} placed=${byNo.size} need=$need outOfRange=$outOfRange dup=$dup empty=$empty ascending=$ascending -> ${if (ok) "ACCEPT" else "REJECT"}")
             if (!ok) return null
 
@@ -189,7 +191,7 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
          */
         fun alignWithFallback(text: String, layout: WebModeLayout): List<String?>? {
             align(text, layout)?.let { return it }
-            if (layout.bubbles.size != 1) return null
+            if (layout.bubbles.size != 1 || MARK.containsMatchIn(text)) return null
             val answer = stripMarkers(text)
             if (answer.isBlank()) return null
             return listOf(answer)
@@ -284,7 +286,8 @@ internal object WebModeLayoutStore {
                     ?: scans[k]?.bubbles?.filter { sameCanvasSource(it.src, src) }
                     ?: previousLayout?.bubbles?.filter { sameCanvasSource(it.src, src) }
                     ?: emptyList()
-                val transition = canvasTransitionDetected(prior, fresh)
+                val transition = prior.any { it.src.contains("@") && src.contains("@") && it.src != src } ||
+                    canvasTransitionDetected(prior, fresh)
                 // A sparse read (< 3 bubbles) that does not contradict the stored page is only a partial
                 // view of it: keep the fuller snapshot instead of overwriting it.
                 if (fresh.size < 3 && !transition) continue
@@ -593,7 +596,7 @@ internal object WebModeLayoutStore {
         } == true
 
     private val CANVAS_SLOT = Regex(
-        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)$"
+        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)(?:@[\\w]+)?$"
     )
 
     /** Stable identity for a recycled canvas independent of the current bitmap dimensions. */

@@ -443,6 +443,9 @@ internal object LensProtocol {
     /** Sanity check on Lens' paragraph: do these two consecutive lines really belong to one block? */
     private fun continues(a: LineGeo, b: LineGeo): Boolean {
         val ga = a.g; val gb = b.g
+        val ba = block(a.text, ga, vertical = false)
+        val bb = block(b.text, gb, vertical = false)
+        if (BubbleGrouping.isAsidePair(ba, bb) || !BubbleGrouping.sharesAlignment(ba, bb)) return false
         if (Math.abs(ga.angle) >= 6f || Math.abs(gb.angle) >= 6f) return false
         val ratio = ga.h / gb.h
         if (ratio < 0.45f || ratio > 2.2f) return false
