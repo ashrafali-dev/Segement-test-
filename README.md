@@ -126,6 +126,13 @@ These are my own reader-side impressions of translation quality and speed, not a
 
 ## Performance and testing
 
+### Chatbot rate limits and request delay
+
+During testing, some chatbot services temporarily rate-limited requests. Most testing was done with **Claude Haiku 5.5**, with a smaller amount using **DeepSeek**. ChatGPT and Gemini were very slow for this real-time workflow in these tests. Claude Haiku 5.5 was responsive enough that ordinary users should be able to use it comfortably, though speed and limits depend on the service and account.
+
+During testing, a DeepSeek account was blocked for **10 days**. A likely contributing factor was sending requests without enough delay; this is a personal testing experience, not a guarantee that every account will receive the same restriction. To reduce the risk of rate limits or temporary restrictions, increase **Request Delay** from the app's menu and avoid sending requests too quickly. Service-side limits can still apply.
+
+
 On the developer's own low-budget Samsung SM-A136B phone with 3 GB RAM, some chapter translation jobs have taken roughly **50 seconds** in testing. One recorded Fast Scan test processed **64 panels in 52 seconds**. These are observations from specific tests, not a universal speed claim or a guarantee that every chapter will finish within that time.
 
 Actual speed can vary with the phone, available memory, network, number and quality of images, website behavior, and chatbot response time.
