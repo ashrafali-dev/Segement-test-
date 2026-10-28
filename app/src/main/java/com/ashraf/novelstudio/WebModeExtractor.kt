@@ -3043,6 +3043,11 @@ function candidateVisibleAt(panel,x,y){
   if(!node)return true;
   if(frame){
     try{
+      // A same-origin iframe can have a perfectly visible image in its OWN document while the whole iframe
+      // is covered by another reader layer in the outer document. Validate outer stacking first, or every
+      // recycled/overlapping iframe can pass the inner hit-test and be mistaken for a visible panel.
+      var outerHit=document.elementFromPoint(x,y);
+      if(outerHit!==frame)return false;
       var fr=frame.getBoundingClientRect(),fd=frame.contentDocument;
       if(fd&&fd.elementFromPoint){
         var inner=fd.elementFromPoint(x-fr.left,y-fr.top);
