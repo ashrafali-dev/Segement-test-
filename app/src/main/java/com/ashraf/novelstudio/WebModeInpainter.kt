@@ -97,6 +97,9 @@ internal object WebModeInpainter {
     private fun modelFile(ctx: Context): File =
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), MODEL_NAME)
 
+    private fun legacyModelFile(ctx: Context): File =
+        File(File(ctx.applicationContext.filesDir, "wm_inpaint"), "lama_int4_int8_r4.onnx")
+
     fun isReady(ctx: Context): Boolean =
         modelFile(ctx).let { it.isFile && it.length() == EXPECTED_BYTES }
 
@@ -137,7 +140,12 @@ internal object WebModeInpainter {
         Prefs.put(ctx.applicationContext, "wmAiInpaintCrashed", "")
         try { crashMarker(ctx).delete() } catch (_: Throwable) {}
         val file = modelFile(ctx)
-        return !file.exists() || file.delete()
+        val legacy = legacyModelFile(ctx)
+        val partial = File(file.parentFile, file.name + ".part")
+        try { partial.delete() } catch (_: Throwable) {}
+        val newRemoved = !file.exists() || file.delete()
+        val legacyRemoved = !legacy.exists() || legacy.delete()
+        return newRemoved && legacyRemoved
     }
 
     /** Download model on a background thread. onDone receives null on success. */
@@ -198,6 +206,8 @@ internal object WebModeInpainter {
                     sessionFailed = false
                     throw IllegalStateException("MI-GAN মডেল লোড হয়নি — এই ফোনের GPU delegate বা মডেল runtime সমর্থিত নয়")
                 }
+                // Free the previous 37 MB LaMa download only after MI-GAN has passed device-side load validation.
+                try { legacyModelFile(app).delete() } catch (_: Throwable) {}
             } catch (e: Throwable) {
                 error = e.message ?: "ডাউনলোড ব্যর্থ"
                 try { File(File(app.filesDir, "wm_inpaint"), MODEL_NAME + ".part").delete() } catch (_: Throwable) {}
