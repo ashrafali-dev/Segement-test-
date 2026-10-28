@@ -1340,8 +1340,16 @@ class MainActivity : Activity() {
         // (bounded, so real-time never waits long). This is what keeps three bubbles in ONE request.
         val heldFor = android.os.SystemClock.elapsedRealtime() - rtVisibleOcrFirstAtMs
         val ocrStillReading = webModeHandle != null && heldFor < rtVisibleOcrMaxHoldMs
-        // Scan geometry and lastChapter are shared across page writes. Wait for the visible
-        // chatbot job queue and any async overlay insertion to finish before replacing either.
+        // The visible viewport always wins over speculative read-ahead. If its OCR is ready while a
+        // hidden-WebView ahead request is still generating, stop that request and requeue it; otherwise
+        // the current panel can sit waiting for the entire background answer despite being higher priority.
+        if (runningIsAheadJob() && rtAheadWorkerBusy) {
+            OcrDiag.log("REALTIME", "visible batch preempts read-ahead translation; queued bubbles=${pending.bubbles.size}")
+            cancelRealtimeAheadWorker(requeue = true)
+            running = null
+        }
+        // Scan geometry and lastChapter are shared across page writes. Wait for ordinary foreground
+        // jobs and any async overlay insertion to finish before replacing either.
         if (ocrStillReading || running != null || queue.isNotEmpty() || activePlacementIds.isNotEmpty()) {
             rtVisibleOcrFlush?.let { handler.removeCallbacks(it) }
             val seq = ++rtVisibleOcrBatchSeq
