@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/lens-ocr-model-routing-manual-extract-20261024
+      - fix/canvas-page-overlay-lifecycle-20261025
   workflow_dispatch:
 
 permissions:

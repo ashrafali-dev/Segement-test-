@@ -107,7 +107,16 @@ internal object WebModeWriter {
           +'object-fit:fill;pointer-events:none;user-select:none;margin:0;padding:0;border:0;z-index:0;';
         cleanLayer.appendChild(ci);entry=cleanImgs[key]={el:ci,url:''};
       }
-      if(entry.url!==url){entry.url=url;entry.el.src=url;}
+      if(!entry.hooked){
+        entry.hooked=true;
+        // The cover boxes of a bubble whose lettering was "erased in the cleaned picture" stay visible until that picture
+        // has really loaded: a slow / failed / evicted clean image used to leave the ORIGINAL lettering showing under
+        // the translation with no cover at all (the "text appears but nothing behind it, sometimes" bug).
+        entry.el.addEventListener('load',function(){entry.loaded=true;try{forceNext=true;sched();}catch(e){}});
+        entry.el.addEventListener('error',function(){entry.loaded=false;});
+      }
+      if(entry.url!==url){entry.url=url;entry.loaded=false;entry.el.src=url;}
+      if(entry.el.complete&&entry.el.naturalWidth>0)entry.loaded=true;
       var x=ABS?(r.left-o0.left):r.left,y=ABS?(r.top-o0.top):r.top;
       entry.el.style.width=r.width+'px';entry.el.style.height=r.height+'px';
       var hl=holes[key];
@@ -129,12 +138,16 @@ internal object WebModeWriter {
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
       b.setAttribute('data-cl',it.cl||'');
+      // Erased in place (canvas panel): the old lettering is already gone from the page pixels, so no cover box.
+      b.setAttribute('data-er',it.er?'1':'');
       b.setAttribute('data-bg',it.bg);
       b.setAttribute('data-sf',it.sf?'1':'0');
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
       // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
+      // overflow stays VISIBLE: a long translation in a narrow (vertical Japanese) bubble used to be clipped by the box
+      // edge. fit() shrinks / widens first; if a last line still does not fit it is shown, never cut.
       b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
         +'background:transparent;color:'+it.fg+';font-family:'+fam+';font-weight:600;border-radius:0;box-shadow:none;';
@@ -143,7 +156,7 @@ internal object WebModeWriter {
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
       // measures both axes and shrinks the text instead of letting it spill outside.
       t.style.cssText='display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;'
-        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:normal;text-wrap:balance;'
+        +'text-align:center;line-height:1.25;white-space:normal;word-break:break-word;overflow-wrap:break-word;'
         // Bengali vowel signs (ি ী ু ৃ ে ৈ) stick out above and below the line box; room for them
         // stops them being clipped by the box edge or by the gradient's background-clip.
         +'padding:0.16em 0.1em;'
@@ -165,7 +178,10 @@ internal object WebModeWriter {
       }
       b.appendChild(t);
       var cover=null;
-      if(!it.cl){
+      var hasCv=!!(it.cv&&it.cv.length>=4);
+      // Bubbles with a real balloon MASK always paint it (paper colour inside the outline): erasing does not depend on
+      // the cleaned picture. Other bubbles with a cleaned picture get a cover too, shown only until that picture loads.
+      if(!it.er){
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
           +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
@@ -180,6 +196,7 @@ internal object WebModeWriter {
           cover.style.borderRadius=it.sf?'12px':'4px';
           cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
         }
+        cover.__nsWaitClean=!!it.cl&&!hasCv;
         coverLayer.appendChild(cover);
       }
       b.__nsCover=cover;
@@ -294,6 +311,24 @@ internal object WebModeWriter {
       for(var i=0;i<k.length;i++){if(k[i]===ns)return true;}
       return false;
     }
+    /**
+     * How many of this overlay's images are still unusable for placement: not decoded yet, or laid out at zero
+     * size because the reader has not finished sizing them. Only the first pass consults this.
+     */
+    function unsizedImages(nodes){
+      // Read only what the DOM already holds. Calling findImg() here built a full image index on every
+      // animation frame and poisoned the miss-cache, which then made the real placement pass pick the
+      // wrong <img> — text landed on the wrong panel and masking followed it there.
+      var n=0;
+      for(var i=0;i<nodes.length;i++){
+        var s=nodes[i].getAttribute('data-s'),im=cache[s];
+        if(!im||!document.contains(im))continue;
+        if(!im.complete||!im.naturalWidth)continue;
+        var r=im.getBoundingClientRect();
+        if(r.width<2||r.height<2)n++;
+      }
+      return n;
+    }
     function findImg(s, index){
       var spec=canvasSpec(s);
       if(spec){
@@ -376,6 +411,9 @@ internal object WebModeWriter {
       t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
       t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
       t.style.whiteSpace='normal';t.style.maxBlockSize='none';
+      // Words stay whole: with break-word a narrow box (tall Japanese bubble) printed one syllable per line. A word wider
+      // than the box now makes the FONT smaller (or the box wider) instead.
+      t.style.wordBreak='normal';t.style.overflowWrap='normal';
       t.style.flex='none';   // a flex item would shrink to the narrow box and report a wrong, too tall size while we measure
       // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
       // as a last resort, then request a taller geometry instead of clipping the final lines.
@@ -658,7 +696,7 @@ internal object WebModeWriter {
       // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
       for(var i=0;i<vis.length;i++){
         var R=vis[i].R,bb=R.b;
-        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed)||R.rot||bb.getAttribute('data-cl')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
+        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed)||R.rot||bb.getAttribute('data-cl')||bb.getAttribute('data-er')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
         var pad=Math.max(3,Math.min(8,R.inkH*0.15));
         var lc=ensureLabelCover(bb),cx=vis[i].l-orgX-pad,cy=vis[i].t-orgY-pad,cwid=vis[i].r-vis[i].l+2*pad,chei=vis[i].b-vis[i].t+2*pad;
         var lk='t'+Math.round(cx)+','+Math.round(cy)+','+Math.round(cwid)+','+Math.round(chei);
@@ -678,6 +716,21 @@ internal object WebModeWriter {
         if(!document.contains(w))return;
       }
       var bs=w.querySelectorAll('.__ns_b'),vh=window.innerHeight;
+      // Startup guard: the first pass right after page load runs before lazy images have their final size,
+      // so boxes landed in random spots and some were sized against a 0-height image, then visibly jumped
+      // once layout settled. Wait (briefly) for every referenced image to be decoded and sized before the
+      // first placement; after that the normal scroll/resize re-layout handles everything.
+      if(!window.__nsSettled){
+        // Only a picture that is laid out at zero size is a real "not ready yet" signal. readyState was
+        // also required, and canvas readers can stay interactive for the whole session, so every overlay
+        // waited the full grace period and then drew with stale geometry.
+        var un=unsizedImages(bs),waited=Date.now()-(window.__nsWaitFrom||(window.__nsWaitFrom=Date.now()));
+        if(un>0&&waited<800){
+          for(var qi=0;qi<bs.length;qi++)bs[qi].style.display='none';
+          sched();return;
+        }
+        window.__nsSettled=1;
+      }
       if(!ABS&&(de.scrollHeight||0)>(window.innerHeight||0)+80){
         // The overlay was built while the page was still short (images not loaded yet), so it chose the
         // script-driven FIXED mode, which trails behind the picture while scrolling. The page now scrolls
@@ -748,7 +801,9 @@ internal object WebModeWriter {
               cover.setAttribute('data-k',ck);cover.style.width=R.ow+'px';cover.style.height=R.oh+'px';
               cover.style.transform='translate3d('+R.ox0+'px,'+R.oy0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
             }
-            if(cover.style.display!=='block')cover.style.display='block';
+            var wantCover='block';
+            if(cover.__nsWaitClean){var ce=cleanImgs[norm(R.s)];if(ce&&ce.loaded)wantCover='none';}
+            if(cover.style.display!==wantCover)cover.style.display=wantCover;
           }
           // If the text moved away from its source bubble, retain the source cover AND add a
           // matching card under the relocated text so it stays readable over artwork.
@@ -1245,7 +1300,13 @@ internal object WebModeWriter {
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
                 .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
-                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else ""))
+                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else "")
+                // A canvas panel has no image URL, so `er` is its only way to drop the cover box. It must stay
+                // limited to canvas sources: an ordinary panel whose cleaned image is not cached (evicted, or a
+                // different job's erased marks) would otherwise lose its cover box with the original lettering
+                // still on the page — the translation then sits on top of the untranslated text.
+                .put("er", b.src.startsWith("ns-canvas:", true) &&
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()

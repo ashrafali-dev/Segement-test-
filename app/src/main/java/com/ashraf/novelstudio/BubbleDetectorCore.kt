@@ -21,11 +21,19 @@ internal object BubbleDetectorCore {
     const val SCORE_MIN = 0.30f
 
     /** One detection in the coordinates of the page that was scanned. */
-    class Det(val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int) {
+    class Det(
+        val label: Int, val score: Float, val l: Int, val t: Int, val r: Int, val b: Int,
+        /** Real balloon outline from the optional mask model; null = only the box of the main detector is known. */
+        val seg: BubbleSegCore.Seg? = null
+    ) {
         val w: Int get() = r - l
         val h: Int get() = b - t
         val area: Long get() = w.toLong() * h
-        fun contains(x: Float, y: Float): Boolean = x >= l && x < r && y >= t && y < b
+        fun contains(x: Float, y: Float): Boolean {
+            if (!(x >= l && x < r && y >= t && y < b)) return false
+            val s = seg ?: return true
+            return s.inside(x.toInt(), y.toInt())
+        }
         override fun toString(): String = "Det(label=$label score=$score box=[$l,$t,$r,$b])"
     }
 
@@ -179,6 +187,16 @@ internal object BubbleDetectorCore {
         )
     }
 
+    /** Share (0..1) of the rectangle [l,t,r,b] that lies inside the box [box] = (l,t,r,b). */
+    fun shareInside(l: Int, t: Int, r: Int, b: Int, box: IntArray): Float {
+        val area = (r - l).toLong() * (b - t)
+        if (area <= 0L) return 0f
+        val iw = Math.min(r, box[2]) - Math.max(l, box[0])
+        val ih = Math.min(b, box[3]) - Math.max(t, box[1])
+        if (iw <= 0 || ih <= 0) return 0f
+        return (iw.toLong() * ih).toFloat() / area
+    }
+
     /** Smallest bubble-like box (bubble / text_bubble) around the point, or null. */
     fun bubbleAt(dets: List<Det>?, x: Float, y: Float): Det? {
         if (dets == null) return null
@@ -195,13 +213,24 @@ internal object BubbleDetectorCore {
      * True when the detector says the two points are inside DIFFERENT speech bubbles: lines of two bubbles must never be
      * joined into one sentence. Unknown (no detection around one of them) is never a veto.
      */
+    /** True when point (x,y) is not part of balloon [d]: outside its mask, or clearly (> 10 px) outside its box. */
+    private fun outsideBalloon(d: Det, x: Float, y: Float): Boolean {
+        if (d.seg != null) return true
+        val dx = Math.max(0f, Math.max(d.l - x, x - d.r))
+        val dy = Math.max(0f, Math.max(d.t - y, y - d.b))
+        return dx > 10f || dy > 10f
+    }
+
     fun inDifferentBubbles(dets: List<Det>?, ax: Float, ay: Float, bx: Float, by: Float): Boolean {
         if (dets == null) return false
         // Use the real "bubble" (outline) boxes only: text_bubble boxes can legitimately be split per text column.
         val a = containerAt(dets, ax, ay)
         val b = containerAt(dets, bx, by)
         if (a != null && b != null) return a !== b
-        if (a != null || b != null) return false
+        // With a real balloon MASK the outline is exact: lettering inside the balloon and a small whisper / note next to
+        // it OUTSIDE the outline are two texts (they used to be glued under one marker).
+        if (a != null) return outsideBalloon(a, bx, by)
+        if (b != null) return outsideBalloon(b, ax, ay)
         // Neither piece is inside a speech bubble: free lettering (captions, labels, notes on artwork). If each one
         // sits in a text_free box and no single box holds both, they are separate texts.
         var inA = false
@@ -235,5 +264,42 @@ internal object BubbleDetectorCore {
         if (bubbleAt(dets, x, y) != null) return false
         for (d in dets) if (d.label == CLS_TEXT_FREE && d.contains(x, y)) return true
         return false
+    }
+
+    /** How the masks were merged into the main detector's list (for the log). */
+    class MergeStats(val attached: Int, val maskOnly: Int, val boxOnly: Int)
+
+    /**
+     * Gives the main detector's balloon boxes their real outline. A mask whose box matches a main-detector balloon
+     * (IoU >= 0.4, or the mask centre lies in that box) is attached to it; a mask the main detector missed is added as a
+     * balloon of its own. Lettering classes (text_bubble / text_free) are never touched: the mask model only knows balloons.
+     */
+    fun attachMasks(dets: List<Det>, segs: List<BubbleSegCore.Seg>): Pair<List<Det>, MergeStats> {
+        val out = ArrayList<Det>(dets.size + segs.size)
+        val used = BooleanArray(segs.size)
+        var attached = 0
+        for (d in dets) {
+            if (d.label != CLS_BUBBLE) { out.add(d); continue }
+            var best = -1; var bestIou = 0f
+            for ((i, s) in segs.withIndex()) {
+                if (used[i]) continue
+                val iw = Math.min(d.r, s.r) - Math.max(d.l, s.l)
+                val ih = Math.min(d.b, s.b) - Math.max(d.t, s.t)
+                if (iw <= 0 || ih <= 0) continue
+                val inter = iw.toLong() * ih
+                val uni = d.area + s.w.toLong() * s.h - inter
+                val v = if (uni <= 0L) 0f else inter.toFloat() / uni
+                if (v > bestIou) { bestIou = v; best = i }
+            }
+            if (best >= 0 && bestIou >= 0.4f) {
+                used[best] = true; attached++
+                val s = segs[best]
+                out.add(Det(CLS_BUBBLE, d.score, d.l, d.t, d.r, d.b, s))
+            } else out.add(d)
+        }
+        var maskOnly = 0
+        for ((i, s) in segs.withIndex()) if (!used[i]) { maskOnly++; out.add(Det(CLS_BUBBLE, s.score, s.l, s.t, s.r, s.b, s)) }
+        val boxOnly = dets.count { it.label == CLS_BUBBLE } - attached
+        return Pair(out, MergeStats(attached, maskOnly, boxOnly))
     }
 }

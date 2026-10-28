@@ -80,7 +80,8 @@ class BubbleDetectorCoreTest {
     @Test fun twoBubblesAreSeparatedButOneBubbleIsNot() {
         assertTrue(C.inDifferentBubbles(dets, 100f, 100f, 500f, 100f))
         assertFalse(C.inDifferentBubbles(dets, 100f, 100f, 200f, 200f))
-        assertFalse("unknown is never a veto", C.inDifferentBubbles(dets, 100f, 100f, 200f, 900f))
+        assertTrue("outside a known balloon is an independent aside", C.inDifferentBubbles(dets, 100f, 100f, 200f, 900f))
+        assertFalse("both unknown is not evidence", C.inDifferentBubbles(dets, 800f, 800f, 900f, 900f))
         assertFalse(C.inDifferentBubbles(null, 1f, 1f, 2f, 2f))
     }
 

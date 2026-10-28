@@ -117,3 +117,24 @@ class BubbleGroupingTest {
         assertEquals(blocks.size, all.toSet().size)
     }
 }
+
+class BubbleSideNoteTest {
+    private fun line(text: String, cx: Float, cy: Float, w: Float, h: Float = 30f) =
+        OcrBlock(text = text, top = (cy - h / 2).toInt(), left = (cx - w / 2).toInt(), cx = cx, cy = cy, w = w, h = h,
+            angle = 0f, fontPx = h)
+
+    @Test fun whisperBesideABubbleIsASideNote() {
+        val bubble = line("bubble line", 345f, 540f, 200f, 44f)
+        val note = line("note beside", 527f, 600f, 230f, 34f)
+        assertTrue(BubbleGrouping.sideNote(bubble, note))
+        assertEquals(2, BubbleGrouping.groups(listOf(bubble, note), listOf(0, 1)).size)
+    }
+
+    @Test fun stackedCentredLinesAreNotSideNotes() {
+        assertFalse(BubbleGrouping.sideNote(line("a", 300f, 100f, 280f), line("b", 300f, 134f, 130f)))
+    }
+
+    @Test fun leftAlignedLinesAreNotSideNotes() {
+        assertFalse(BubbleGrouping.sideNote(line("a", 250f, 100f, 200f), line("b", 290f, 134f, 280f)))
+    }
+}

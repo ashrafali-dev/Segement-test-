@@ -12,7 +12,7 @@ import org.json.JSONObject
  * The download route is re-checked every 15th page, because a site can change.
  */
 object SiteLearner {
-    private const val KEY = "siteLearn2"   // new key: old data wrongly marked many sites as "downloads blocked"
+    private const val KEY = "siteLearn3"   // new key: old data wrongly marked many sites as "downloads blocked"
     private const val MAX_HOSTS = 60
 
     private class P(

@@ -82,11 +82,44 @@ internal object WebModeTextRemovalCache {
         return false
     }
 
+    /**
+     * Cleaned pixels for a canvas panel, as a data: URL, keyed by the canvas slot.
+     *
+     * Canvas panels have no image URL to store a file under and their synthetic source changes with every
+     * scroll position, so these live in memory only and are bounded. Without this the overlay had nothing to
+     * draw and the original Japanese lettering stayed visible under the translation.
+     */
+    private val canvasUrls = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 12
+    }
+
+    @Synchronized
+    fun storeCanvasCleaned(sourceUrl: String, dataUrl: String) {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return
+        canvasUrls[slot] = dataUrl
+    }
+
+    @Synchronized
+    private fun canvasUrlFor(sourceUrl: String): String? {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return null
+        return canvasUrls[slot]
+    }
+
     @Synchronized
     fun urlFor(sourceUrl: String): String? {
+        // A canvas panel is served from the in-memory table, not the on-disk cache.
+        canvasUrlFor(sourceUrl)?.let { return it }
+        // has() verifies the file is still there, so the overlay never receives a URL whose bytes are gone
+        // (that left a broken <img>: no cleaned picture AND no cover box, original lettering showing through).
         if (!has(sourceUrl)) return null
         val raw = sourceUrl.substringBefore('#')
-        if (Uri.parse(raw).getQueryParameter(MARKER) == "1") return raw
+        // getQueryParameter() throws UnsupportedOperationException unless the URI is hierarchical.
+        // blob:, data: and a canvas panel's synthetic identity ("ns-canvas:<left>,<top>,WxH") are all
+        // non-hierarchical, so they must never be parsed — the whole app died here just as a translation
+        // was about to be placed. Non-hierarchical sources are used verbatim as the cache key instead.
+        val parsed = try { Uri.parse(raw) } catch (_: Throwable) { null }
+        if (parsed == null || !parsed.isHierarchical) return raw
+        if (parsed.getQueryParameter(MARKER) == "1") return raw
         val sep = when {
             '?' !in raw -> "?"
             raw.endsWith("?") || raw.endsWith("&") -> ""
@@ -97,6 +130,8 @@ internal object WebModeTextRemovalCache {
 
     /** Called by NovelClient.shouldInterceptRequest; non-remover requests always fall through. */
     fun intercept(uri: Uri): WebResourceResponse? {
+        // Same guard: a non-hierarchical URI (blob:, data:) would throw here too, on the WebView's own thread.
+        if (!uri.isHierarchical) return null
         if (uri.getQueryParameter(MARKER) != "1") return null
         val source = stripMarker(uri.toString())
         val entry = synchronized(this) {

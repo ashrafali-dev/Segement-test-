@@ -79,8 +79,12 @@ internal object WebModeTextRemover {
             // colour. This does not depend on the lettering test below, so Japanese columns, bold SFX and lettering the
             // recogniser missed are wiped too, and the bubble counts as cleaned. (Before, any bubble that failed one of the
             // strict glyph checks kept its old text and fell back to an ugly background box.)
+            // `soft` only says the ring around the OCR box is textured; the bubble interior itself can still be
+            // flat paper. Dense Japanese/Korean columns touch the ring and were tagged soft, which skipped this
+            // whole pass — the old lettering then stayed under the translation. wipeInterior() already refuses
+            // when the interior is mostly dark/coloured, so it is safe to try it for soft bubbles too.
             for (bubble in boundedBubbles) {
-                if (bubble.soft || bubble.cv.size < 4) continue
+                if (bubble.cv.size < 4) continue
                 val n = try { wipeInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)) } catch (_: Exception) { 0 }
                 if (n > 0) { totalRemoved += n; erased.add(WebModeTextRemovalCache.bubbleKey(bubble)) }
             }
@@ -291,8 +295,11 @@ internal object WebModeTextRemover {
                 }
 
                 // If the inferred mask covers too much of the OCR box, it is probably art rather than text.
-                // Dense bold CJK glyphs legitimately hold more ink than Latin text.
-                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.5 else 0.6)) continue
+                // Dense bold CJK glyphs legitimately hold more ink than Latin text: a tight Japanese OCR box
+                // around two heavy kanji columns is ~70 % ink, and the old 50 % cap threw the whole bubble away.
+                // Only very dense (>= 85 %) masks are treated as artwork now; the shape-size limits above and
+                // the on-artwork AI gate still decide whether this is really lettering.
+                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
 
                 // Flat bubble: sweep EVERYTHING inside the OCR box (slightly widened) that differs from the paper
                 // colour, unless it belongs to a protected shape. This removes the faint ghosts that the strict
@@ -394,12 +401,29 @@ internal object WebModeTextRemover {
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
             // of re-encoding the whole comic page with lossy WebP.
             val modern = Build.VERSION.SDK_INT >= 30
-            val format = if (modern) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.PNG
-            if (!bitmap.compress(format, 100, bytesOut)) return false
+            // Lossless WebP encoding took ~1 s of CPU per picture on a mid-range phone (a 126-picture chapter scan spent
+            // minutes there). High-quality lossy WebP is several times faster and keeps the line art; switch the
+            // pref wmCleanLossless on if the halftone dots of a title look soft.
+            val lossless = Prefs.bool(context, "wmCleanLossless", false)
+            val format = if (modern) (if (lossless) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.WEBP_LOSSY)
+                         else Bitmap.CompressFormat.PNG
+            if (!bitmap.compress(format, if (modern && !lossless) 94 else 100, bytesOut)) return false
             val cleaned = bytesOut.toByteArray()
             if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
-            val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned,
-                if (modern) "image/webp" else "image/png")
+            val mime = if (modern) "image/webp" else "image/png"
+            // A canvas panel has no image URL: its picture is drawn by page JS, so the overlay had nothing to
+            // swap in and the old lettering stayed visible under the translation. Hand the cleaned pixels to the
+            // overlay as a data: URL. Canvas entries stay in memory only (a new multi-MB file per scroll
+            // position would grow the disk cache without bound) and are keyed by the stable canvas slot.
+            if (sourceUrl.startsWith("ns-canvas:", true)) {
+                WebModeTextRemovalCache.storeCanvasCleaned(
+                    sourceUrl,
+                    "data:$mime;base64," + android.util.Base64.encodeToString(cleaned, android.util.Base64.NO_WRAP)
+                )
+                WebModeTextRemovalCache.setErased(sourceUrl, erased)
+                return true
+            }
+            val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned, mime)
             if (stored) WebModeTextRemovalCache.setErased(sourceUrl, erased)
             return stored
         } catch (_: OutOfMemoryError) {

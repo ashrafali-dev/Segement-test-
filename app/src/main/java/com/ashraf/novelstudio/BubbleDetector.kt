@@ -15,6 +15,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.FloatBuffer
+import java.util.LinkedHashMap
 import java.nio.LongBuffer
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
@@ -42,6 +43,12 @@ internal object BubbleDetector {
     const val MODEL_BYTES = 11_120_765L
     private const val AUTO_MIN_RAM_MB = 3500L
 
+    // Detector calls are made on OCR slices as well as full panels. A valid manga bubble can therefore
+    // arrive as a short/wide crop (e.g. 360x132); do not reject it by aspect ratio or a 200px height floor.
+    // The model input is resized to its fixed tensor size below, so only genuinely tiny image fragments skip.
+    private const val MIN_DETECTION_SIDE = 64
+    private const val MIN_DETECTION_AREA = 10_000L
+
     @Volatile var lastError: String = ""
         private set
 
@@ -55,10 +62,26 @@ internal object BubbleDetector {
     private var sessionStamp = 0L
     /** Set after a load/run failure so a broken model is not retried on every page; cleared on download/delete/mode change. */
     @Volatile private var broken = false
+    @Volatile private var retryAtMs = 0L
+    @Volatile private var failCount = 0
+    @Volatile private var installedAt = 0L
+    @Volatile private var installedVal = false
+    @Volatile private var ramOk: Boolean? = null
+    /** Finished results by page fingerprint: the read-ahead thread fills it, the on-screen path only ever reads it. */
+    private val cache = object : LinkedHashMap<Long, List<BubbleDetectorCore.Det>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<BubbleDetectorCore.Det>>?): Boolean = size > 5
+    }
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), "bubble_detector.onnx")
 
-    fun isInstalled(c: Context): Boolean = modelFile(c).let { it.isFile && it.length() == MODEL_BYTES }
+    /** Called every status-pill tick on the main thread: the file check is cached (no disk access on the UI thread). */
+    fun isInstalled(c: Context): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - installedAt < 4000L) return installedVal
+        installedVal = modelFile(c).let { it.isFile && it.length() == MODEL_BYTES }
+        installedAt = now
+        return installedVal
+    }
 
     fun isDownloading(): Boolean = downloading.get()
     fun downloadPercent(): Int = downloadPct
@@ -68,16 +91,21 @@ internal object BubbleDetector {
 
     fun setMode(c: Context, m: String) {
         Prefs.put(c, "wmDetectorMode", m)
-        broken = false
+        broken = false; failCount = 0
         if (m == "off") release()
     }
 
     fun enabled(c: Context): Boolean {
-        if (broken || !isInstalled(c)) return false
+        if (broken) {
+            // One failed run used to switch the detector off until the app restarted: retry after a growing pause.
+            if (SystemClock.elapsedRealtime() < retryAtMs) return false
+            broken = false
+        }
+        if (!isInstalled(c)) return false
         return when (mode(c)) {
             "on" -> true
             "off" -> false
-            else -> DeviceTier.totalRamMb(c) >= AUTO_MIN_RAM_MB
+            else -> (ramOk ?: (DeviceTier.totalRamMb(c) >= AUTO_MIN_RAM_MB).also { ramOk = it })
         }
     }
 
@@ -101,8 +129,88 @@ internal object BubbleDetector {
         release()
         try { modelFile(c).delete() } catch (_: Throwable) {}
         try { File(modelFile(c).path + ".part").delete() } catch (_: Throwable) {}
-        broken = false
+        broken = false; failCount = 0; installedAt = 0L
+        synchronized(cache) { cache.clear() }
         lastError = ""
+    }
+
+    /** Cheap fingerprint of a page bitmap (size + 192 sampled pixels). */
+    private fun fingerprint(bmp: Bitmap): Long {
+        var h = bmp.width * 31L + bmp.height
+        val w = bmp.width; val ht = bmp.height
+        for (i in 0 until 192) {
+            val x = ((i * 7919L) % w).toInt(); val y = ((i * 104729L) % ht).toInt()
+            h = h * 1099511628211L xor bmp.getPixel(x, y).toLong()
+        }
+        return h
+    }
+
+    private val asyncPool: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "ns-webmode-detect").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+        }
+    private val inFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var lastActivityMs = 0L
+    private val idleHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val idleRelease = Runnable {
+        // Never close the session under a running detection: only release when nobody holds the model gate.
+        if (OnnxHeavyGate.lock.tryLock()) {
+            try { release(); OcrDiag.log("DETECT_SRC", "main detector released (idle)") } finally { OnnxHeavyGate.lock.unlock() }
+        }
+    }
+
+    /** The reader is scrolling / a real-time job just started: background model runs wait until it is quiet. */
+    fun noteActivity() { lastActivityMs = SystemClock.elapsedRealtime() }
+
+    private val scanJobs = java.util.concurrent.atomic.AtomicInteger(0)
+    /** A whole-chapter scan is running: it must get every CPU core, so no background model run starts meanwhile. */
+    fun scanStart() { scanJobs.incrementAndGet() }
+    fun scanEnd() { if (scanJobs.get() > 0) scanJobs.decrementAndGet() }
+
+    /**
+     * Real-time path: start detection for [bmp] in the background and return IMMEDIATELY (the reader's text must never
+     * wait for a 4-10 s model run). The model works on its OWN copy of the picture, so the caller may recycle [bmp] at
+     * once (the old "Can't call getPixel() on a recycled bitmap" failures); the result lands in the cache and the next
+     * pass over the same panel uses it. One run at a time; a busy detector simply skips (the next pass asks again).
+     */
+    fun requestAsync(c: Context, bmp: Bitmap) {
+        try {
+            if (bmp.isRecycled || !enabled(c) || scanJobs.get() > 0) return
+            val key = fingerprint(bmp)
+            if (synchronized(cache) { cache.containsKey(key) }) return
+            if (!inFlight.compareAndSet(false, true)) return
+            val rt = Runtime.getRuntime()
+            val freeMb = (rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())) / 1048576L
+            if (freeMb < 60L) {
+                inFlight.set(false)
+                OcrDiag.log("DETECT_SRC", "background detection skipped: low memory (free heap ${freeMb}MB)")
+                return
+            }
+            val copy = try { bmp.copy(Bitmap.Config.ARGB_8888, false) } catch (_: Throwable) { null }
+            if (copy == null) { inFlight.set(false); return }
+            try {
+                asyncPool.execute {
+                    try {
+                        // A model run takes 2 CPU threads for seconds: never while the page is being scrolled.
+                        var waited = 0
+                        while (SystemClock.elapsedRealtime() - lastActivityMs < 2500L && waited < 12000) { Thread.sleep(200); waited += 200 }
+                        if (SystemClock.elapsedRealtime() - lastActivityMs < 2500L) {
+                            OcrDiag.log("DETECT_SRC", "background detection dropped: reader kept scrolling")
+                        } else detect(c, copy)
+                    } catch (_: Throwable) {} finally {
+                        try { copy.recycle() } catch (_: Throwable) {}
+                        inFlight.set(false)
+                    }
+                }
+            } catch (_: Throwable) { try { copy.recycle() } catch (_: Throwable) {}; inFlight.set(false) }
+        } catch (_: Throwable) { inFlight.set(false) }
+    }
+
+    /** Finished result for this picture, or null. Never runs a model, so it is safe on any thread. */
+    fun cached(bmp: Bitmap): List<BubbleDetectorCore.Det>? {
+        if (bmp.isRecycled) return null
+        val k = fingerprint(bmp)
+        return synchronized(cache) { cache[k] }
     }
 
     @Synchronized
@@ -164,7 +272,7 @@ internal object BubbleDetector {
                     part.copyTo(target, overwrite = true)
                     if (target.length() != MODEL_BYTES) throw IllegalStateException("Could not save the model")
                 }
-                broken = false
+                broken = false; failCount = 0; installedAt = 0L
                 lastError = ""
             } catch (e: Throwable) {
                 error = (e.message ?: e.javaClass.simpleName).take(200)
@@ -199,6 +307,8 @@ internal object BubbleDetector {
     /** Detections for [bmp] in page pixels, or null when the detector is off/unavailable. Never throws. */
     fun detect(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
+        if (bmp.isRecycled) return null
+        cached(bmp)?.let { return it }
         OnnxHeavyGate.lock.lock()
         try { return detectLocked(c, bmp) } finally { OnnxHeavyGate.lock.unlock() }
     }
@@ -206,9 +316,14 @@ internal object BubbleDetector {
     @Synchronized
     private fun detectLocked(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
-        // Speech bubbles do not live in banners, thumbnails or thin strips; one model run costs ~1.9 s on a mid-range phone.
-        if (bmp.width < 200 || bmp.height < 200 || bmp.width > bmp.height * 2.2f) {
-            lastInfo = "skipped (small/banner ${bmp.width}x${bmp.height})"
+        // This detector also receives OCR slices and manual crops, not only full pages. Many legitimate
+        // manga narration/dialogue boxes are short and wide, so aspect-ratio and 200px side filters caused
+        // their source lettering to remain under translations. Skip only tiny fragments; the model resizes
+        // each tile to its fixed input size before inference.
+        val shortSide = minOf(bmp.width, bmp.height)
+        val area = bmp.width.toLong() * bmp.height.toLong()
+        if (shortSide < MIN_DETECTION_SIDE || area < MIN_DETECTION_AREA) {
+            lastInfo = "skipped (tiny region ${bmp.width}x${bmp.height})"
             return null
         }
         return try {
@@ -235,15 +350,38 @@ internal object BubbleDetector {
                 }
                 all.addAll(s.run(px, t))
             }
-            val out = BubbleDetectorCore.merge(all)
+            var out = BubbleDetectorCore.merge(all)
             Log.i(TAG, "tiles=${tiles.size} detections=${out.size} image=${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0}")
             lastError = ""
-            lastInfo = "${out.size} found · ${SystemClock.elapsedRealtime() - t0}ms"
+            val mainMs = SystemClock.elapsedRealtime() - t0
+            failCount = 0
+            // Optional second model: gives the BALLOONS found above their real outline. It never replaces anything and
+            // never runs when the main detector saw no balloon, when memory is tight, or on the on-screen path.
+            var maskNote = ""
+            if (mainMs > 7000L) {
+                maskNote = " masks:skipped (device busy: main detector took ${mainMs}ms)"
+            } else if (out.any { it.label == BubbleDetectorCore.CLS_BUBBLE || it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE }) {
+                val segs = BubbleSegDetector.detect(c, bmp)
+                if (segs != null && segs.isNotEmpty()) {
+                    val merged = BubbleDetectorCore.attachMasks(out, segs)
+                    out = merged.first
+                    maskNote = " masks:+${merged.second.attached} attached, ${merged.second.maskOnly} mask-only, ${merged.second.boxOnly} box-only"
+                } else maskNote = " masks:" + BubbleSegDetector.lastInfo
+            } else maskNote = " masks:skipped (main detector saw no balloon)"
+            synchronized(cache) { cache[fingerprint(bmp)] = out }
+            lastInfo = "${out.size} found · ${mainMs}ms$maskNote"
+            idleHandler.removeCallbacks(idleRelease)
+            idleHandler.postDelayed(idleRelease, 20_000L)
+            OcrDiag.log("DETECT_SRC", "main=RT-DETR ${out.count { it.seg == null }} boxes in ${mainMs}ms;$maskNote")
             out
         } catch (e: Throwable) {
             lastError = (e.message ?: e.javaClass.simpleName).take(160)
             Log.w(TAG, "detector failed: $lastError")
+            if (lastError.contains("recycled", ignoreCase = true)) return null   // the caller's picture went away: not a model failure
+            failCount++
             broken = true
+            retryAtMs = if (failCount >= 4) Long.MAX_VALUE else SystemClock.elapsedRealtime() + 20_000L * failCount
+            OcrDiag.log("DETECT_SRC", "main detector FAILED ($failCount): $lastError; retry in ${20 * failCount}s")
             release()
             null
         }
@@ -314,7 +452,8 @@ internal object BubbleDetector {
         private fun createSession(file: File): OrtSession {
             try {
                 val o = OrtSession.SessionOptions()
-                o.setIntraOpNumThreads(Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors() / 2)))
+                o.setIntraOpNumThreads(2)   // 4 threads starved the UI and Lens decoding on mid-range phones
+                try { o.setCPUArenaAllocator(false) } catch (_: Throwable) {}   // do not keep a big native memory pool after a run
                 return env.createSession(file.absolutePath, o)
             } catch (first: Throwable) {
                 // Some phones/ORT builds reject an optimisation pass on quantised graphs: retry with optimisations off.

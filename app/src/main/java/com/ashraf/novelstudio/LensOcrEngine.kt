@@ -66,7 +66,10 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
 
     override fun recognize(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script)
     override fun recognizeFast(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script, fastMode = true)
-    override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script)
+    // A region crop is the user's own selection (manual extract / area select): never second-guess it with the
+    // realtime non-bubble heuristic, which threw away narrow or small Japanese bubbles before they were sent.
+    override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult =
+        read(bitmap, script, skipBubblePrefilter = true)
 
     /** Force a genuine Lens request for manual Extract / Rescan instead of replaying cached OCR. */
     fun recognizeFresh(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult =
@@ -84,16 +87,36 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
     // ---------------------------------------------------------------------------------------------
 
     private fun read(
-        bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false, bypassCache: Boolean = false
+        bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false, bypassCache: Boolean = false,
+        skipBubblePrefilter: Boolean = false
     ): OcrResult {
         if (bitmap.isRecycled) throw OcrUnavailableException("Google Lens: bitmap was recycled")
         if (bitmap.width < MIN_SIDE || bitmap.height < MIN_SIDE) return OcrResult(emptyList())
+
+        // Skip crops that are never dialogue: tiny UI/logo tiles and near-square boxes. Speech bubbles are
+        // wide, tall, or at least sizable; the logs showed 220x202, 96x54, 111x63 … being uploaded 8 times
+        // each and always coming back empty. This runs before prepare()/upload, so it is free.
+        // A user-selected region (recognizeRegion) skips this: narrow Japanese bubbles are legitimate.
+        if (!skipBubblePrefilter && looksLikeNonBubble(bitmap.width, bitmap.height)) {
+            Log.i(TAG, "PRE_FILTER skip ${bitmap.width}x${bitmap.height} (not a text bubble)")
+            return OcrResult(emptyList())
+        }
 
         val t0 = SystemClock.elapsedRealtime()
         val prepared = prepare(bitmap)
         val prepareMs = SystemClock.elapsedRealtime() - t0
         val keyStart = SystemClock.elapsedRealtime()
         val key = fnv64(prepared.jpeg) xor (prepared.w.toLong() shl 32) xor prepared.h.toLong()
+        // Region-stable key: the JPEG hash changes with compression noise between identical repeat crops,
+        // so a short negative cache on (size + coarse pixel signature) stops the same empty region being
+        // re-uploaded on every scroll frame even when the encoder output differs by a byte.
+        val regionKey = fnv64("${bitmap.width}x${bitmap.height}:${coarseSignature(bitmap)}".toByteArray())
+
+        val negative = if (bypassCache) false else recentlyEmpty(regionKey)
+        if (negative) {
+            Log.i(TAG, "NEG_CACHE skip region=${bitmap.width}x${bitmap.height} (empty within ${EMPTY_CACHE_TTL_MS}ms)")
+            return OcrResult(emptyList())
+        }
 
         // Lens detects the image language itself. This cache is mainly for external callers that repeat one bitmap.
         val cachedLines = if (bypassCache) null else cached(key)
@@ -204,6 +227,8 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         if (lines.isEmpty()) Log.w(TAG, "NO_TEXT $diagnostic") else Log.i(TAG, "PARSED $diagnostic")
         Breaker.success()
         remember(key, lines)
+        // Remember the empty region so the same crop is not re-uploaded on the next scroll frame.
+        if (lines.isEmpty()) rememberEmptyRegion(regionKey) else forgetEmptyRegion(regionKey)
         Log.i(TAG, "ok lines=${lines.size} sent=${prepared.w}x${prepared.h} bytes=${prepared.jpeg.size} ms=$totalMs")
         Log.i(TAG, "TIMING imageId=${java.lang.Long.toHexString(key)} cacheHit=false prepareMs=$prepareMs keyCacheMs=$keyCacheMs " +
             "payloadBuildMs=$payloadBuildMs networkMs=$networkMs parseMs=$parseMs mapMs=$mapMs totalMs=$totalMs")
@@ -365,6 +390,50 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         synchronized(cache) { cache[key] = Cached(SystemClock.elapsedRealtime(), lines) }
     }
 
+    // ---- non-bubble pre-filter + region negative cache -----------------------------------------
+
+    /** A crop smaller/squarer than this can never be a speech bubble per the observed UI/logo tiles. */
+    private fun looksLikeNonBubble(w: Int, h: Int): Boolean {
+        val area = w.toLong() * h.toLong()
+        if (area < MIN_BUBBLE_AREA) return true
+        val longSide = maxOf(w, h).toFloat()
+        val shortSide = minOf(w, h).toFloat().coerceAtLeast(1f)
+        return longSide / shortSide < MIN_BUBBLE_ASPECT
+    }
+
+    /** Cheap, compression-stable fingerprint: 8x8 binary luma sampled on a coarse grid. */
+    private fun coarseSignature(bmp: Bitmap): Long {
+        val px = IntArray(8 * 8)
+        val stepX = (bmp.width / 8).coerceAtLeast(1)
+        val stepY = (bmp.height / 8).coerceAtLeast(1)
+        for (gy in 0 until 8) for (gx in 0 until 8) {
+            val x = (gx * stepX).coerceAtMost(bmp.width - 1)
+            val y = (gy * stepY).coerceAtMost(bmp.height - 1)
+            val c = bmp.getPixel(x, y)
+            val luma = ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 151 + (c and 0xFF) * 28) shr 8
+            // One bit per cell (above/below mid-grey) keeps it stable against tiny colour/JPEG shifts.
+            px[gy * 8 + gx] = if (luma >= 128) 1 else 0
+        }
+        return fnv64(px.joinToString("").toByteArray())
+    }
+
+    private val emptyRegions = object : LinkedHashMap<Long, Long>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Long>?): Boolean = size > NEG_CACHE_SIZE
+    }
+
+    private fun recentlyEmpty(regionKey: Long): Boolean = synchronized(emptyRegions) {
+        val at = emptyRegions[regionKey] ?: return@synchronized false
+        if (SystemClock.elapsedRealtime() - at > EMPTY_CACHE_TTL_MS) { emptyRegions.remove(regionKey); false } else true
+    }
+
+    private fun rememberEmptyRegion(regionKey: Long) {
+        synchronized(emptyRegions) { emptyRegions[regionKey] = SystemClock.elapsedRealtime() }
+    }
+
+    private fun forgetEmptyRegion(regionKey: Long) {
+        synchronized(emptyRegions) { emptyRegions.remove(regionKey) }
+    }
+
     // ---- transport -----------------------------------------------------------------------------
 
     private class NetInfo(val online: Boolean, val network: Network?)
@@ -403,6 +472,37 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
 
     private fun publish(a: Attempt) { lastHttpStatus.set(a.status); lastHttpMeta.set(a.meta) }
 
+    /**
+     * Serialises the *start* of requests so a burst is not mistaken for abuse.
+     *
+     * Kept separate from [REQUEST_SLOTS] on purpose: sleeping inside a permit wasted a third of the
+     * concurrency, which is exactly why a full scan got slower after the slot cap was introduced.
+     * Returns false when the wait would exceed the caller's remaining deadline.
+     */
+    private fun awaitStartTurn(maxWaitMs: Long): Boolean {
+        // Reserve the next start slot under a real class-level lock, then sleep OUTSIDE it. Sleeping inside
+        // the lock would serialise every Lens request behind one another — that is what made a 145-panel
+        // scan take 238 s. (A per-call `object : Any() {}` as the monitor, as an earlier version had, locked
+        // nothing at all.)
+        val nextStart: Long
+        synchronized(START_LOCK) {
+            val now = SystemClock.elapsedRealtime()
+            nextStart = maxOf(now, lastStartAt + START_GAP_MS)
+            if (nextStart - now >= maxWaitMs) return false
+            lastStartAt = nextStart
+        }
+        val sleep = nextStart - SystemClock.elapsedRealtime()
+        if (sleep > 0L) {
+            try {
+                Thread.sleep(sleep)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return true
+    }
+
     /** One logical request: bounded retries inside one overall deadline. Throws [OcrUnavailableException] only. */
     private fun post(payload: ByteArray, fastMode: Boolean): ByteArray {
         lastHttpStatus.set(0)
@@ -425,6 +525,14 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                 throw OcrUnavailableException("Google Lens: no internet connection")
             }
             var waitMs = BACKOFF_MS shl attempt
+            // Space request starts BEFORE taking a slot. Holding a slot while sleeping for the gap wasted
+            // one of the three concurrency permits on every panel, which is what made a full scan slow.
+            if (!awaitStartTurn(remaining)) throw OcrUnavailableException("Google Lens: cancelled")
+            // Cap concurrent requests: a scan firing many panels at once is exactly what earns an HTTP 429,
+            // and one 429 then costs more time than the parallelism ever saved.
+            if (!REQUEST_SLOTS.tryAcquire(remaining, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                throw OcrUnavailableException("Google Lens: request slot timeout")
+            }
             try {
                 return race(payload, info, remaining, connectMs, hedgeAfterMs, minimumAttemptMs, firstBound = attempt % 2 == 0)
             } catch (e: HttpStatus) {
@@ -455,6 +563,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                     throw OcrUnavailableException("Google Lens: DNS resolution failed ($why)", e)
                 }
                 last = e    // ConnectException, SocketException ("Socket closed"), EOF, ...
+            } finally {
+                // Always hand the wire back, whatever happened above (thrown or not).
+                REQUEST_SLOTS.release()
             }
             val jitter = (random.nextInt(120)).toLong()
             val elapsed = SystemClock.elapsedRealtime() - started
@@ -760,6 +871,19 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private const val BACKOFF_MS = 400L
         private val RETRYABLE_STATUS = setOf(429, 500, 502, 503, 504)
 
+        /**
+         * Requests actually on the wire at once, across every caller.
+         *
+         * A full scan overlaps panels for speed; without this cap that burst is what produces HTTP 429 in the
+         * first place. Three is the value that has kept Lens answering on the test device.
+         */
+        private val REQUEST_SLOTS = java.util.concurrent.Semaphore(7)
+        /** Spacing between request starts so a burst is not mistaken for abuse. */
+        private val START_GAP_MS = 120L
+        /** Guards the reservation of the next request start; the sleep itself happens outside it. */
+        private val START_LOCK = Any()
+        @Volatile private var lastStartAt = 0L
+
         // Two timeouts in a row used to switch Lens off for 45 s, which looked like whole panels being skipped.
         private const val TRANSIENT_TRIP = 3
         private const val TRANSIENT_PAUSE_MS = 15_000L
@@ -768,5 +892,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private const val CACHE_SIZE = 32
         private const val CACHE_TTL_MS = 3 * 60_000L
         private const val EMPTY_CACHE_TTL_MS = 20_000L
+        // Non-bubble pre-filter + region negative cache (see read()).
+        private const val MIN_BUBBLE_AREA = 300L * 300L   // ~90k px: below this it is a UI/logo tile, not a bubble
+        private const val MIN_BUBBLE_ASPECT = 1.2f        // bubbles are never ~1:1 square
+        private const val NEG_CACHE_SIZE = 64
     }
 }

@@ -117,7 +117,7 @@ object AdBlock {
     /** Prompt + report in one piece: paste it into any chatbot and it answers with the fix. */
     fun report(): String = synchronized(logLines) {
         promptText() + "\n\n===== DEBUG REPORT =====\n" +
-            "AdBlock debug mode: ${debugModeName()} (hosts=${hosts.size})\n" +
+            "AdBlock debug mode: ${debugModeName()} (hosts=${hostCount()})\n" +
             (if (logLines.isEmpty()) "(nothing logged yet — load the page first)" else logLines.joinToString("\n"))
     }
 
@@ -127,7 +127,7 @@ APP: Kotlin Android WebView app "NovelStudio" (AGP 8.2.2, Kotlin 1.9.22, minSdk 
 PROBLEM: with AdBlock ON some web pages come up blank or broken; with AdBlock OFF the same page loads fine.
 
 HOW THE ADBLOCK WORKS NOW
-1. Network (WebViewClient.shouldInterceptRequest, sub-resources only, not the main frame): a request is blocked when the full URL string contains any of these substrings: ${PATTERNS.joinToString(" ")} -- or when its host (or any parent domain) is in a list of ${hosts.size} ad/tracker hosts. A blocked request gets an empty 200 response with Content-Type text/plain.
+1. Network (WebViewClient.shouldInterceptRequest, sub-resources only, not the main frame): a request is blocked when the full URL string contains any of these substrings: ${PATTERNS.joinToString(" ")} -- or when its host (or any parent domain) is in a list of ${hostCount()} ad/tracker hosts. A blocked request gets an empty 200 response with Content-Type text/plain.
 2. Navigation gate (shouldOverrideUrlLoading, main frame, only when there is NO user gesture): the navigation is cancelled only if blockReason(url) matches a rule above. Other cross-domain redirects are allowed and only logged.
 3. Cosmetic (JS run in onPageFinished): injects CSS that hides ${COSMETIC_SEL}  and REMOVES (element.remove()) every element matching [class*="ad-"],[id*="ad-"],[class*="advert"],[id*="advert"],[class*="popup"],[id*="popup"],iframe[src*="doubleclick"],iframe[src*="googlesyndication"], plus a MutationObserver that does the same for later nodes.
 4. Debug modes (the first line of the report shows the current one): Full, Network only, Cosmetic only, Log only (nothing is blocked or removed, everything that WOULD be is logged).
@@ -287,7 +287,7 @@ RULES FOR YOUR ANSWER
             if (pageRoot.isNotBlank() && root(h) == pageRoot) continue
             if (aiNeverBlockHosts.any { hostMatches(h, it) }) continue
             // The AI must not add a domain that is already covered by any active list.
-            if (hosts.any { hostMatches(h, it) }) continue
+            if (listed(h)) continue
             accepted.add(h)
         }
         if (accepted.isEmpty()) return 0
@@ -359,15 +359,57 @@ RULES FOR YOUR ANSWER
         "collect?v=", "/beacon", "fingerprint"
     )
 
+    // Small set (built-in + AI-found hosts) as strings; the big downloaded lists as sorted 64-bit hashes (8 bytes per host
+    // instead of ~100 bytes for a String in a HashSet: 100 000 hosts = 0.8 MB, not ~10 MB of Java heap).
     @Volatile private var hosts: Set<String> = builtIn.toHashSet()
+    @Volatile private var bigHashes: LongArray = LongArray(0)
+
+    private fun hash64(s: String): Long {
+        var h = -3750763034362895579L
+        for (ch in s) { h = h xor ch.code.toLong(); h *= 1099511628211L }
+        return h
+    }
+    private fun bigContains(h: String): Boolean = bigHashes.isNotEmpty() && java.util.Arrays.binarySearch(bigHashes, hash64(h)) >= 0
+    /** True when [h] or one of its parent domains is on any block list. */
+    private fun listed(h0: String): Boolean {
+        var h = h0
+        val set = hosts
+        while (h.contains('.')) {
+            if (set.contains(h) || bigContains(h)) return true
+            h = h.substringAfter('.')
+        }
+        return false
+    }
+    fun hostCount(): Int = hosts.size + bigHashes.size
+
+    // Hosts that carry real content / site infrastructure: never blocked by a downloaded list, whatever the list says.
+    private val LIST_NEVER = setOf(
+        "cloudfront.net", "fastly.net", "akamaihd.net", "akamaized.net", "bunnycdn.net", "b-cdn.net", "cdn77.org", "imgix.net",
+        "pstatic.net", "naver.com", "kakao.com", "kakaocdn.net", "daumcdn.net", "pximg.net", "tonarinoyj.jp", "shonenjump.com",
+        "jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "cloudflare.com", "googleapis.com", "gstatic.com", "googleusercontent.com",
+        "wp.com", "wordpress.com", "gravatar.com", "imgur.com", "imgbb.com", "ibb.co", "postimg.cc", "blogspot.com", "blogger.com",
+        "github.com", "githubusercontent.com", "amazonaws.com", "youtube.com", "ytimg.com", "recaptcha.net", "hcaptcha.com"
+    )
+    private fun listSafe(h: String) = LIST_NEVER.none { h == it || h.endsWith(".$it") }
+    private const val MAX_LIST_HOSTS = 100_000
 
     fun load(ctx: Context) {
         val s = HashSet<String>(builtIn)
         val f = File(ctx.filesDir, "blocklist.txt")
-        if (f.exists()) f.forEachLine { val t = it.trim().lowercase(); if (t.isNotEmpty()) s.add(t) }
+        var big = LongArray(4096)
+        var n = 0
+        if (f.exists()) f.forEachLine {
+            val t = it.trim().lowercase()
+            if (t.isNotEmpty() && n < MAX_LIST_HOSTS && listSafe(t)) {
+                if (n == big.size) big = big.copyOf(big.size * 2)
+                big[n++] = hash64(t)
+            }
+        }
+        big = big.copyOf(n); big.sort()
         // Keep AI-discovered hosts separate so a normal filter refresh cannot erase them.
         val ai = File(ctx.filesDir, "ai-blocklist.txt")
         if (ai.exists()) ai.forEachLine { val t = it.trim().lowercase(); if (t.isNotEmpty()) s.add(t) }
+        bigHashes = big
         hosts = s
         parseRules(Prefs.get(ctx, "adblockRules", ""))
         debugMode = (Prefs.get(ctx, "adblockDebugMode", "0").toIntOrNull() ?: 0).coerceIn(0, 3)
@@ -404,23 +446,52 @@ RULES FOR YOUR ANSWER
                 r.blockHost.firstOrNull { hostMatches(rh, it) }?.let { return "rule:block-host:$it" }
             }
         }
-        PATTERNS.firstOrNull { full.contains(it) }?.let { return "pattern:$it" }
-        var h = u.host ?: return null
+        val reqHost = (u.host ?: return null).lowercase()
+        // First-party requests (the site's own pages, images, scripts, its own CDN sub-domains) are never touched by the
+        // generic URL patterns or the third-party host lists: those are what broke image loading on sites like toongod.
+        val firstParty = page != null && pageRegistrable(page) == registrable(reqHost)
+        // Pictures are never blocked by a URL pattern either (a path like /ads/ or /banners/ can hold real artwork).
+        // Tracking pixels still go: they live on listed ad hosts, which are checked below for every request type.
+        if (!firstParty && !isImageUrl(u)) PATTERNS.firstOrNull { full.contains(it) }?.let { return "pattern:$it" }
+        if (firstParty) return null
+        var h = reqHost
         val set = hosts
         while (h.contains('.')) {
-            if (set.contains(h)) return "host:$h"
+            if (set.contains(h) || bigContains(h)) return "host:$h"
             h = h.substringAfter('.')
         }
         return null
     }
 
+    @Volatile private var lastPage: String? = null
+    @Volatile private var lastPageReg: String = ""
+    private fun pageRegistrable(page: String): String {
+        if (page == lastPage) return lastPageReg
+        val r = registrable(page.lowercase()); lastPageReg = r; lastPage = page
+        return r
+    }
+
+    private val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "avif", "gif", "svg", "bmp")
+    private fun isImageUrl(u: Uri): Boolean =
+        (u.path ?: "").lowercase().substringAfterLast('.', "") in IMAGE_EXT
+
+    private val TWO_LEVEL = setOf("co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "com.br",
+        "com.cn", "com.hk", "com.sg", "com.my", "co.in", "co.jp", "or.jp", "ne.jp", "co.kr", "or.kr", "com.mx", "com.tr", "com.tw",
+        "com.ar", "co.za", "com.sa", "com.eg", "com.bd", "com.pk", "co.id", "com.ph", "com.vn", "com.ng")
+    /** example.co.uk, not co.uk: the "same site" test for first-party requests. */
+    fun registrable(h: String): String {
+        val p = h.trim('.').split('.')
+        if (p.size <= 2) return h
+        val last2 = p.takeLast(2).joinToString(".")
+        return if (last2 in TWO_LEVEL && p.size >= 3) p.takeLast(3).joinToString(".") else last2
+    }
+
     fun blocked(u: Uri): Boolean = blockReason(u) != null
 
+    // Only selectors that cannot match real content: ad-network markup. Everything word-based ("ad", "popup", "advert"...)
+    // is decided per element in the JS below, with a guard that protects pictures and chapter text.
     private const val COSMETIC_SEL = ".adsbygoogle,ins.adsbygoogle,[id^=google_ads],[id*=div-gpt-ad],[id*=taboola],[id*=outbrain]," +
-        "[class*=adsbygoogle],[class*=ad-banner],[class*=ad-container],[class*=advert],[class*=advertisement]," +
-        "[class*=ads-wrapper],[class*=ad-slot],[class*=popup],[class*=popunder],[id*=ad-banner],[id*=advert]," +
-        "[id*=popup],[id*=popunder],[class*=sponsored],[class*=social-share],[class*=push-notification]," +
-        "iframe[src*=doubleclick],iframe[src*=googlesyndication],iframe[src*=adsterra]"
+        "iframe[src*=doubleclick],iframe[src*=googlesyndication],iframe[src*=adsterra],iframe[src*=exoclick],iframe[src*=propellerads]"
 
     fun cosmeticJs(page: String? = pageHost): String {
         val rs = if (siteRules.isEmpty()) emptyList() else rulesFor(page)
@@ -449,53 +520,142 @@ RULES FOR YOUR ANSWER
               if(!s){s=document.createElement('style');s.id='__nsAdStyle';(document.head||document.documentElement).appendChild(s);}
               s.textContent=css;
             }
-            var kill=function(root){
+            // A class / id TOKEN is an ad marker only when it IS an ad word or starts/ends a dash-separated name with one:
+            // ad, ads, ad-banner, top-ad, advert-box, popup-overlay ... but NOT head-, load-, preload-, lazy-load-, read-,
+            // upload-, which the old substring test (class contains "ad-") matched and then deleted together with the pictures.
+            var TOK=/^(?:ads?|adv|advert\w*|adslot|adbox|adsbox|popup\w*|popunder\w*|sponsored\w*)(?:[-_].*)?${'$'}|[-_](?:ads?|advert\w*|popup\w*|popunder\w*)(?:[-_].*)?${'$'}/i;
+            var isAd=function(e){
+              var c=(typeof e.className==='string')?e.className:'';
+              var t=(c+' '+(e.id||'')).split(/\s+/);
+              for(var i=0;i<t.length;i++){ if(t[i]&&TOK.test(t[i]))return true; }
+              return false;
+            };
+            // Real content is never hidden: pictures, canvases, video, long text, page frames, huge containers.
+            // Cheap checks first; no innerText (it forces a layout pass while the page is scrolling).
+            var isContent=function(e){
+              var tg=e.tagName;
+              if(tg==='BODY'||tg==='HTML'||tg==='MAIN'||tg==='ARTICLE'||tg==='IMG'||tg==='PICTURE'||tg==='CANVAS'||tg==='VIDEO')return true;
               try{
-                root.querySelectorAll('[class*="ad-"],[id*="ad-"],[class*="advert"],[id*="advert"],[class*="popup"],[id*="popup"],iframe[src*="doubleclick"],iframe[src*="googlesyndication"]').forEach(function(e){
-                  if(e.tagName==='BODY'||e.tagName==='HTML')return;
-                  if(KEEP&&(e.matches(KEEP)||e.closest(KEEP)))return;
-                  if(DRY){note('would-remove',e);return;}
-                  note('removed',e);
-                  e.remove();
+                if(e.querySelector('canvas,video,picture'))return true;
+                var im=e.getElementsByTagName('img');
+                for(var i=0;i<im.length&&i<30;i++){
+                  var m=im[i];
+                  if(m.hasAttribute('data-src')||m.hasAttribute('data-lazy-src')||m.hasAttribute('data-original')||/lazy|chapter|page|manga|webtoon|reader/i.test(m.className||''))return true;
+                  if((m.naturalWidth||0)>=250&&(m.naturalHeight||0)>=150)return true;
+                }
+                if((e.textContent||'').length>1500)return true;
+                if(e.clientHeight>window.innerHeight*1.4)return true;
+              }catch(x){}
+              return false;
+            };
+            var hide=function(e){
+              if(KEEP&&(e.matches(KEEP)||e.closest(KEEP)))return;
+              if(DRY){note('would-hide',e);return;}
+              if(e.getAttribute('data-ns-ad')==='1')return;
+              e.setAttribute('data-ns-ad','1');
+              e.style.setProperty('display','none','important');
+              note('hidden',e);
+            };
+            var SKIP={IMG:1,SCRIPT:1,STYLE:1,SVG:1,PATH:1,LINK:1,META:1,BR:1,SPAN:0};
+            var scanOne=function(e){
+              if(!e||e.nodeType!==1||SKIP[e.tagName]===1)return;
+              if(e.getAttribute('data-ns-ad')==='1')return;
+              if(!(e.className||e.id))return;
+              if(isAd(e)&&!isContent(e))hide(e);
+            };
+            var scanTree=function(root,cap){
+              if(root!==document)scanOne(root);
+              var list;try{list=root.querySelectorAll('[class],[id]');}catch(x){return;}
+              var n=Math.min(list.length,cap);
+              for(var i=0;i<n;i++)scanOne(list[i]);
+            };
+            // A hidden element that later turns out to hold content (lazy images arrive) is shown again.
+            var restore=function(){
+              try{
+                document.querySelectorAll('[data-ns-ad="1"]').forEach(function(e){
+                  if(isContent(e)){e.style.removeProperty('display');e.removeAttribute('data-ns-ad');note('restored',e);}
                 });
               }catch(e){}
             };
-            kill(document);
+            scanTree(document,1500);
             if(window.__nsAdObs)window.__nsAdObs.disconnect();
+            // Later changes: only the ADDED nodes are looked at (never the whole page again), image nodes are ignored, and
+            // the work is batched into one idle-time pass every 1.5 s - scrolling a lazy-loading reader adds hundreds of nodes.
+            var queue=[],tmr=0;
+            var flush=function(){
+              tmr=0;var q=queue;queue=[];var c=0;
+              for(var i=0;i<q.length&&c<120;i++){var n=q[i];if(n&&n.isConnected){scanTree(n,250);c++;}}
+            };
             window.__nsAdObs=new MutationObserver(function(ms){
-              for(var i=0;i<ms.length;i++)for(var j=0;j<ms[i].addedNodes.length;j++){
-                var n=ms[i].addedNodes[j];
-                if(n.nodeType===1)kill(n.parentNode||document);
+              for(var i=0;i<ms.length;i++){
+                var a=ms[i].addedNodes;
+                for(var j=0;j<a.length;j++){var n=a[j];if(n.nodeType===1&&SKIP[n.tagName]!==1&&queue.length<200)queue.push(n);}
               }
+              if(!tmr&&queue.length)tmr=setTimeout(function(){if(window.requestIdleCallback)requestIdleCallback(flush,{timeout:3000});else flush();},1500);
             });
             window.__nsAdObs.observe(document.documentElement,{childList:true,subtree:true});
+            setTimeout(restore,1500);setTimeout(restore,4000);
           }catch(e){}
         })();"""
     }
 
-    // Downloads a bigger public ad-server hosts list and merges it with the built-in one
+    /** One host per line out of "0.0.0.0 host" / "||host^" / plain-host list text; everything else is ignored. */
+    private fun parseHostList(lines: List<String>): List<String> {
+        val out = ArrayList<String>()
+        val valid = Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+        for (raw in lines) {
+            var t = raw.trim().lowercase()
+            if (t.isEmpty() || t.startsWith("#") || t.startsWith("!") || t.startsWith("[")) continue
+            if (t.startsWith("||")) {                     // adblock syntax: ||host^ (no path, no exceptions)
+                if (t.contains("/") || t.contains("*") || t.contains("@@")) continue
+                t = t.removePrefix("||")
+                val i = t.indexOf('^'); if (i < 0) continue
+                val opts = t.substring(i + 1)
+                if (opts.isNotEmpty() && opts != "\$third-party" && opts != "\$all") continue
+                t = t.substring(0, i)
+            } else {                                      // hosts syntax: "0.0.0.0 host" or a bare host
+                t = t.substringBefore('#').trim().split(Regex("\\s+")).last()
+            }
+            if (t == "localhost" || t == "0.0.0.0" || t == "broadcasthost" || t.startsWith("local") || !valid.matches(t)) continue
+            out.add(t)
+        }
+        return out
+    }
+
+    /** Result of the last list update, for the menu / debug report. */
+    @Volatile var lastUpdateInfo: String = "not updated yet"
+
+    // Downloads several public ad / tracker / malware host lists and merges them with the built-in one.
     fun update(ctx: Context, cb: (Int) -> Unit) {
         val app = ctx.applicationContext
         Thread {
-            var n = 0
-            try {
-                val conn = URL("https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext")
-                    .openConnection() as HttpURLConnection
-                conn.connectTimeout = 15000
-                conn.readTimeout = 20000
-                val lines = conn.inputStream.bufferedReader().readLines()
-                val out = ArrayList<String>()
-                for (l in lines) {
-                    val t = l.trim()
-                    if (t.isEmpty() || t.startsWith("#")) continue
-                    val h = t.split(Regex("\\s+")).last()
-                    if (h.contains('.')) out.add(h)
+            val sources = listOf(
+                "Peter Lowe" to "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
+                "AdGuard DNS" to "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt",
+                "StevenBlack" to "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+            )
+            val merged = LinkedHashSet<String>()
+            val info = StringBuilder()
+            for ((name, url) in sources) {
+                try {
+                    val conn = URL(url).openConnection() as HttpURLConnection
+                    conn.connectTimeout = 15000
+                    conn.readTimeout = 25000
+                    val got = parseHostList(conn.inputStream.bufferedReader().readLines())
+                    var added = 0
+                    for (h in got) { if (merged.size >= MAX_LIST_HOSTS) break; if (listSafe(h) && merged.add(h)) added++ }
+                    info.append("$name +$added; ")
+                } catch (e: Exception) {
+                    info.append("$name failed (${(e.message ?: e.javaClass.simpleName).take(40)}); ")
                 }
-                File(app.filesDir, "blocklist.txt").writeText(out.joinToString("\n"))
-                n = out.size
-            } catch (e: Exception) {
             }
-            if (n > 0) load(app)
+            val n = merged.size
+            if (n > 0) {
+                try { File(app.filesDir, "blocklist.txt").writeText(merged.joinToString("\n")) } catch (_: Exception) {}
+                load(app)
+            }
+            lastUpdateInfo = info.toString().trim()
+            logEntry("LIST-UPDATE total=$n :: $lastUpdateInfo")
             Handler(Looper.getMainLooper()).post { cb(n) }
         }.start()
     }
