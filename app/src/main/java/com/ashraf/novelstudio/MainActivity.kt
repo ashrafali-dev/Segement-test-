@@ -1189,11 +1189,36 @@ class MainActivity : Activity() {
     // the first usable panel arrives. Panels completed during that window are batched together.
     // Lens gets a short collection window so its completed OCR does not inherit ML Kit batch latency.
     private val REALTIME_AHEAD_COLLECT_FLUSH_MS: Long get() = if (lensRealtimeFastPath()) 450L else longArrayOf(2000L, 3500L, 6000L, 9000L)[rtBatchLevel()]
+    private var lastAheadBudgetLogAtMs = 0L
 
     private fun startAheadOcr() {
         if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
-        val n = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
+        val configuredN = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
+        val runtime = Runtime.getRuntime()
+        val maxHeapMb = runtime.maxMemory() / 1_048_576L
+        val freeHeapMb = (runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())) / 1_048_576L
+        val am = getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val memoryInfo = android.app.ActivityManager.MemoryInfo()
+        try { am?.getMemoryInfo(memoryInfo) } catch (_: Throwable) {}
+        // Keep look-ahead deliberately small on low-heap phones: one whole panel is enough to overlap remote
+        // Lens/chat latency, while a 3-panel read-ahead wave can retain several decoded images and OCR layouts.
+        // If the heap/system is already pressured, skip speculative work entirely and protect the visible panel.
+        val n = when {
+            configuredN == 0 -> 0
+            memoryInfo.lowMemory || freeHeapMb < 72L -> 0
+            maxHeapMb <= 192L -> minOf(configuredN, 1)
+            maxHeapMb <= 256L -> minOf(configuredN, 2)
+            else -> configuredN
+        }
         deepSeekAheadAtMs = System.currentTimeMillis()
+        if (n != configuredN && System.currentTimeMillis() - lastAheadBudgetLogAtMs >= 5_000L) {
+            lastAheadBudgetLogAtMs = System.currentTimeMillis()
+            OcrDiag.log(
+                "AHEAD_BUDGET",
+                "configured=" + configuredN + " effective=" + n + " maxHeapMB=" + maxHeapMb +
+                    " freeHeapMB=" + freeHeapMb + " systemLowMemory=" + memoryInfo.lowMemory
+            )
+        }
         if (n == 0) return
         val token = navToken
         val seq = ++aheadOcrSeq
