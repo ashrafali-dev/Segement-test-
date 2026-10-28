@@ -40,17 +40,37 @@ object NotifyClass {
         return Kind.LOG
     }
 
-    /** Strip emoji/leading symbols so the log stays plain text (no emoji in the UI chrome). */
+    /**
+     * Keep log lines plain text (no emoji in the UI chrome).
+     *
+     * Two passes, so real text is never damaged:
+     *  1) inside the line, remove only the unambiguous emoji planes (U+1F000+, ⚡/✅/❌/⚠, ★, ZWJ);
+     *     arrows and "→" stay, because "Link → Translate" is a real label.
+     *  2) at the very start, drop a leading pictograph/arrow/showstopper the old code used as an icon
+     *     (⏹ ⏸ ▶ ⟳ ▪ ← …), which is what "leading icon + text" toasts look like.
+     */
     fun clean(message: String): String {
         val s = StringBuilder()
         var i = 0
         while (i < message.length) {
             val cp = message.codePointAt(i)
-            val isEmoji = cp in 0x1F000..0x1FAFF || cp in 0x2600..0x27BF || cp in 0x2B00..0x2BFF ||
-                cp == 0xFE0F || cp == 0x200D
-            if (!isEmoji) s.appendCodePoint(cp)
+            val emoji = cp in 0x1F000..0x1FAFF ||
+                cp in 0x2600..0x27BF ||   // ⚡ ✅ ❌ ⚠ ☀ ★ ✅
+                cp in 0x2B00..0x2BFF ||   // ⬛ ⭐
+                cp == 0xFE0F || cp == 0x200D || cp == 0x20E3
+            if (!emoji) s.appendCodePoint(cp)
             i += Character.charCount(cp)
         }
-        return s.toString().replace(Regex("\\s+"), " ").trim()
+        var text = s.toString().trimStart()
+        while (text.isNotEmpty()) {
+            val cp = text.codePointAt(0)
+            val leadIcon = cp in 0x2190..0x21FF ||   // arrows (⟳ ⟲ ← →) as a leading icon
+                cp in 0x2300..0x23FF ||              // ⏹ ⏸ ⏳ ⏱
+                cp in 0x25A0..0x25FF ||              // ▶ ◀ ■
+                Character.isWhitespace(cp) || Character.getType(cp) == Character.FORMAT.toInt()
+            if (!leadIcon) break
+            text = text.substring(Character.charCount(cp))
+        }
+        return text.replace(Regex("\\s+"), " ").trim()
     }
 }
