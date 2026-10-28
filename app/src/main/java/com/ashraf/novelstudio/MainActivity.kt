@@ -2709,7 +2709,6 @@ return t.length>=40?'TXT:'+t:'';
             !WebModeInpainter.isReady(this) -> "not installed"
             !Prefs.bool(this, "wmAiInpaint", true) -> "off"
             Prefs.get(this, "wmAiInpaintCrashed", "") == "1" -> "OFF (crashed before)"
-            !android.os.Process.is64Bit() && Prefs.get(this, "wmAiForce32", "") != "1" -> "OFF (32-bit phone)"
             WebModeInpainter.tooSlow -> "paused (slow)"
             WebModeInpainter.isLoaded() -> "ON" + (WebModeInpainter.lastNote.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
             else -> "loading"
@@ -10640,7 +10639,7 @@ ${rows.take(220).joinToString("\n")}
             WebModeInpainter.isDownloading() -> "downloading…"
             WebModeInpainter.tooSlow -> "installed · paused for a few minutes (this phone was too slow)"
             WebModeInpainter.isReady(this) -> "installed · used automatically for lettering on artwork"
-            else -> "not installed · tap to download (≈ 37 MB)"
+            else -> "not installed · tap to download (≈ 16.3 MB)"
         }
         return "🎨 AI text eraser (LaMa)\n" + state
     }
