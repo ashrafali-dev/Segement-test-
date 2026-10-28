@@ -400,15 +400,19 @@ internal object WebModeWriter {
       var maskLock=b.getAttribute('data-mf')==='1';
       function fitInsideMask(startPx){
         t.style.overflowWrap='normal';t.style.wordBreak='normal';
-        var px=Math.max(1.5,Number(startPx)||1.5);
-        for(var mi=0;mi<70;mi++){
+        var px=Math.max(0.5,Number(startPx)||0.5),inside=false;
+        for(var mi=0;mi<84;mi++){
           t.style.fontSize=px+'px';
-          if(fits())break;
-          if(px<=1.5)break;
-          px=Math.max(1.5,px*0.9);
+          if(fits()){inside=true;break;}
+          if(px<=0.5)break;
+          px=Math.max(0.5,px*0.9);
         }
         t.style.fontSize=px+'px';
-        t.style.overflow='hidden';
+        // Never silently chop a translation after exhausting every safe font size. Prefer visible overflow
+        // to clipping Bengali conjuncts or the final Japanese/Korean/Latin words; a measured shape-fit still
+        // takes priority, and the localized fallback card keeps this exceptional case legible.
+        if(inside){t.style.overflow='hidden';}
+        else{t.style.overflow='visible';b.style.overflow='visible';b.__nsShapeFitApplied=false;}
       }
       var tbs=b.getAttribute('data-tb');
       if(tbs){
@@ -704,7 +708,10 @@ internal object WebModeWriter {
           var textValue=String(RB.b.textContent||'');
           var hasAttrs=RB.b&&typeof RB.b.getAttribute==='function';
           var unshapedColumn=!RB.rot&&(!hasAttrs||RB.b.getAttribute('data-mf')!=='1')&&
-            (!hasAttrs||!RB.b.getAttribute('data-tb'))&&RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\s/.test(textValue);
+            // A pixel-derived data-tb is not proof of a usable full bubble shape by itself. If no real
+            // interior bands (data-cv) survived, don't keep Bengali trapped in a narrow vertical-source box.
+            (!hasAttrs||!RB.b.getAttribute('data-tb')||!RB.b.getAttribute('data-cv'))&&
+            RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\s/.test(textValue);
           var maxBoxW=unshapedColumn?Math.min(RB.rw*0.72,Math.max(RB.ow*3,Math.min(RB.oh*0.55,RB.rw*0.72))):RB.ow*1.35;
           RB.wideMaxW=maxBoxW;
           RB.w=Math.max(8,Math.min(wantW,room,maxBoxW));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
@@ -772,9 +779,10 @@ internal object WebModeWriter {
       if(!labelCover){
         labelCover=document.createElement('div');labelCover.className='__ns_label_cover';
         var labelBg=bb.getAttribute('data-bg')||'#fff',labelSfx=bb.getAttribute('data-sf')==='1';
+        var unresolvedArt=labelSfx&&!bb.getAttribute('data-cl')&&bb.getAttribute('data-er')!=='1';
         labelCover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
-          +'pointer-events:none;will-change:transform;background:'+labelBg+';border-radius:'+(labelSfx?'12px':'4px')+';'
-          +'box-shadow:'+(labelSfx?'0 0 7px 5px '+labelBg:'0 0 0 3px '+labelBg)+';';
+          +'pointer-events:none;will-change:transform;background:'+labelBg+';border-radius:'+(unresolvedArt?'4px':(labelSfx?'12px':'4px'))+';'
+          +'box-shadow:'+(unresolvedArt?'0 0 0 2px '+labelBg:(labelSfx?'0 0 7px 5px '+labelBg:'0 0 0 3px '+labelBg))+';';
         coverLayer.appendChild(labelCover);bb.__nsLabelCover=labelCover;
       }
       return labelCover;
@@ -832,7 +840,11 @@ internal object WebModeWriter {
       // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
       for(var i=0;i<vis.length;i++){
         var R=vis[i].R,bb=R.b;
-        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed)||R.rot||bb.getAttribute('data-cl')||bb.getAttribute('data-er')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
+        // If original lettering on artwork was NOT cleaned, always give its translation a tight text-sized
+        // opaque card. This hides source glyphs directly underneath the translation without painting the whole
+        // balloon; cards are measured from rendered glyphs, so the background can never clip the text itself.
+        var unresolvedArt=bb.getAttribute('data-sf')==='1'&&!bb.getAttribute('data-cl')&&bb.getAttribute('data-er')!=='1';
+        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed&&!unresolvedArt)||R.rot||bb.getAttribute('data-cl')||bb.getAttribute('data-er')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
         var pad=Math.max(3,Math.min(8,R.inkH*0.15));
         var lc=ensureLabelCover(bb),cx=vis[i].l-orgX-pad,cy=vis[i].t-orgY-pad,cwid=vis[i].r-vis[i].l+2*pad,chei=vis[i].b-vis[i].t+2*pad;
         var lk='t'+Math.round(cx)+','+Math.round(cy)+','+Math.round(cwid)+','+Math.round(chei);
