@@ -96,6 +96,8 @@ internal object WebModeWriter {
     var textLayer=document.createElement('div'); textLayer.id='__ns_wm_text_layer';
     textLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2;';
     w.appendChild(textLayer);
+    // Per-source cleaned-image URLs are passed once, not repeated in every bubble item (important for low-memory phones).
+    var cleanSources=__CLEAN_SOURCES__||Object.create(null);
     var cleanImgs=Object.create(null);
     var holes=Object.create(null);   // per picture: rectangles (image fractions) where the ORIGINAL must show through
     function ensureCleanImage(im,s,url,r,o0){
@@ -137,7 +139,7 @@ internal object WebModeWriter {
       if(it.hole){var hk=norm(it.s);(holes[hk]=holes[hk]||[]);for(var hq=0;hq<it.r.length;hq++)holes[hk].push(it.r[hq]);continue;}
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
-      b.setAttribute('data-cl',it.cl||'');
+      b.setAttribute('data-cl',it.cl?'1':'');
       // Erased in place (canvas panel): the old lettering is already gone from the page pixels, so no cover box.
       b.setAttribute('data-er',it.er?'1':'');
       b.setAttribute('data-bg',it.bg);
@@ -746,7 +748,7 @@ internal object WebModeWriter {
         var r=im.getBoundingClientRect();
         if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
-        var cleanUrl=b.getAttribute('data-cl');
+        var cleanUrl=b.getAttribute('data-cl')?cleanSources[norm(b.getAttribute('data-s'))]||'':'';
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
         var g=b.getAttribute('data-g').split(',');
         var bw=g[2]*r.width,bh=g[3]*r.height;
@@ -1278,23 +1280,34 @@ internal object WebModeWriter {
                 // If the source image was cleaned, keep the local text-box cover until the replacement really loads.
                 // The clean image removes only the recognized lettering patch; failed/unsupported sources retain the
                 // small text-box cover instead of flattening the whole speech-bubble interior.
-                .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
-                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else ""))
+                .put("cl", WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()
+        val cleanSources = JSONObject()
         // Pass every OCR source, including bubbles with no translation. Otherwise an off-screen
         // query-ID variant could be mistaken for the one translated item still in the DOM.
+        // Cleaned URLs (especially data: URLs) appear only once per source; bubble items carry a small boolean flag.
         layout.bubbles.asSequence()
             .map { WebModeLogic.normalizeUrl(it.src) }
             .filter { it.isNotBlank() }
             .distinct()
-            .forEach { sources.put(it) }
+            .forEach { src ->
+                sources.put(src)
+                val hasErasedText = layout.bubbles.any { bubble ->
+                    WebModeLogic.normalizeUrl(bubble.src) == src &&
+                        WebModeTextRemovalCache.isErased(bubble.src, WebModeTextRemovalCache.bubbleKey(bubble))
+                }
+                if (hasErasedText) {
+                    WebModeTextRemovalCache.urlFor(src)?.takeIf { it.isNotBlank() }?.let { cleanSources.put(src, it) }
+                }
+            }
         return "try{document.documentElement.style.setProperty('--ns-bi','" + bottomInsetPx + "px');}catch(e){};" + BUBBLES
             .replace("__FONT__", JSONObject.quote(font))
             .replace("__PID__", JSONObject.quote(pageId))
             .replace("__ITEMS__", arr.toString())
             .replace("__SOURCES__", sources.toString())
+            .replace("__CLEAN_SOURCES__", cleanSources.toString())
     }
 }
 
