@@ -79,8 +79,9 @@ assert.ok(remover.includes("val cx = (if (hasOcrBox) bubble.ocrCx else bubble.cx
   "image cleaning must use original OCR bounds, not the expanded speech-bubble cover bounds");
 assert.ok(!remover.includes("erased.addAll(detectorErasedKeys)") &&
           remover.includes("Final reconstruction may improve the saved pixels but cannot add an erased key") &&
-          remover.includes("eraseDetected(bitmap, dets, recognizedLines)"),
-  "detector pixel changes must not, by themselves, authorize transparent rendering");
+          remover.includes("val verifiedDialogueLines = if (maskOnly) emptyList() else recognizedLines.filter") &&
+          remover.includes("eraseDetected(bitmap, dets, verifiedDialogueLines)"),
+  "detector reconstruction must be limited to independently verified dialogue boxes, never every OCR region");
 assert.ok(!remover.includes("for (b in bubbles) erased.add(WebModeTextRemovalCache.bubbleKey(b))"),
   "a successful erase anywhere on the page must not mark every bubble as erased");
 assert.ok(remover.includes("cleanSlot.lock()") &&
