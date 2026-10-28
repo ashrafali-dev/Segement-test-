@@ -27,9 +27,13 @@ internal object WebModeTextRemovalCache {
     /** Per source image: keys of the artwork (soft) bubbles whose lettering the remover really erased. */
     private val erasedSoft = LinkedHashMap<String, Set<String>>()
 
-    /** Stable id of a bubble by its (rounded) position; the writer looks it up with the same function. */
+    /**
+     * Stable id of a bubble by its rounded cover geometry AND original OCR-ink geometry.
+     * If a later scan recovers another row inside the same cover shape, its OCR box changes and an earlier
+     * partial erase must not be mistaken for proof that the whole bubble is clean.
+     */
     fun bubbleKey(b: WmBubble): String =
-        "${k(b.cx)}:${k(b.cy)}:${k(b.w)}:${k(b.h)}"
+        "${k(b.cx)}:${k(b.cy)}:${k(b.w)}:${k(b.h)}:${k(b.ocrCx)}:${k(b.ocrCy)}:${k(b.ocrW)}:${k(b.ocrH)}"
 
     // The saved layout stores every number rounded to 5 decimals. Rounding to 5 decimals FIRST makes the key of the freshly
     // read bubble and of the same bubble after the save/load round trip identical (before, ~3 % of the bubbles landed on
