@@ -6,7 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Defect B (prefilter decision + Lens cache short-circuit) and Defect F (LRU bounds). Pure JVM tests. */
+/** Defect B (Lens cache short-circuit) and Defect F (LRU bounds). Pure JVM tests. */
 class OcrQualityGateTest {
 
     private fun block(t: String, cx: Float = 10f, cy: Float = 10f) =
@@ -24,20 +24,28 @@ class OcrQualityGateTest {
     @Test fun lensCacheIsBoundedAndEvictsLeastRecentlyUsed() {
         LensCache.clear()
         for (i in 1..LensCache.MAX_ENTRIES + 5) {
-            LensCache.put(sig(i), LensCache.Entry(listOf(block("t$i")), 100, 100, OcrScript.LATIN))
+            LensCache.put("k$i", LensCache.Entry(listOf(block("t$i")), 100, 100, OcrScript.LATIN))
         }
         assertTrue(LensCache.size() <= LensCache.MAX_ENTRIES)
-        // The oldest entries were evicted; the newest survives.
-        assertNotNull(LensCache.get(sig(LensCache.MAX_ENTRIES + 5), OcrScript.LATIN))
-        assertNull(LensCache.get(sig(1), OcrScript.LATIN))
+        assertNotNull(LensCache.get("k${LensCache.MAX_ENTRIES + 5}", OcrScript.LATIN))
+        assertNull(LensCache.get("k1", OcrScript.LATIN))
     }
 
-    @Test fun lensCacheAliasLetsRawByteDigestHit() {
+    @Test fun pixelEntryIsReachableByItsPixelDigest() {
         LensCache.clear()
         val s = sig(77)
-        LensCache.put(s, LensCache.Entry(listOf(block("hello")), 300, 500, OcrScript.LATIN))
-        LensCache.alias("md5:rawdigest", s)
-        assertEquals(1, LensCache.get("md5:rawdigest", OcrScript.LATIN)?.size)
+        LensCache.putByPixels(s, LensCache.Entry(listOf(block("hello")), 300, 500, OcrScript.LATIN))
+        val digest = LensCache.pixelDigest(s)
+        assertEquals(1, LensCache.get(digest, OcrScript.LATIN)?.size)
+        assertNotNull(LensCache.get(s, OcrScript.LATIN))
+    }
+
+    @Test fun pixelDigestIsStableAndDistinct() {
+        val a = LensCache.pixelDigest(sig(200))
+        val b = LensCache.pixelDigest(sig(200))
+        val c = LensCache.pixelDigest(sig(20))
+        assertEquals(a, b)
+        assertTrue(a != c)
     }
 
     @Test fun emptyResultsAreNeverCached() {
@@ -51,11 +59,6 @@ class OcrQualityGateTest {
         val b = LensCache.signatureOf(64, 64) { x, y -> (x + y) % 256 }
         assertEquals(a, b)
         assertEquals(32 * 32, a.length)
-    }
-
-    @Test fun signatureDiffersForDifferentPixels() {
-        val dark = LensCache.signatureOf(64, 64) { _, _ -> 10 }
-        val light = LensCache.signatureOf(64, 64) { _, _ -> 240 }
-        assertTrue(dark != light)
+        assertTrue(LensCache.signatureOf(64, 64) { _, _ -> 10 } != LensCache.signatureOf(64, 64) { _, _ -> 240 })
     }
 }

@@ -1967,8 +1967,38 @@ internal class WebModeExtractor(
             imgHash: String, bytes: ByteArray, script: OcrScript, p: PanelRef,
             slot: Int, total: Int, texts: Array<String?>, bubbles: MutableList<WmBubble>?
         ): Boolean {
-            val cached = LensCache.get(imgHash, script) ?: return false
-            if (cached.isEmpty()) return false
+            var cached = LensCache.get(imgHash, script)
+            if (cached == null) {
+                // The engine reads decoded pixels, so its entry is keyed by a byte digest of those pixels. Bridge
+                // by decoding this panel the same way the reader would and recomputing that digest. Cheap and only
+                // on a DEDUPE_HIT, i.e. exactly when an upload is about to be avoided.
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val w = bounds.outWidth; val h = bounds.outHeight
+                if (w > 0 && h > 0) {
+                    var bmp: Bitmap? = null
+                    try {
+                        bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+                            BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
+                        if (bmp != null) {
+                            val sig = LensCache.signatureOf(w, h) { x, y ->
+                                val c = bmp.getPixel(x.coerceIn(0, w - 1), y.coerceIn(0, h - 1))
+                                ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 151 + (c and 0xFF) * 28) shr 8
+                            }
+                            val e = LensCache.get(LensCache.pixelDigest(sig))
+                            // Only reuse when the cached geometry was produced for this exact panel size.
+                            if (e != null && e.script == script && e.panelW == w && e.panelH == h) {
+                                cached = e.blocks
+                                LensCache.alias(imgHash, LensCache.pixelDigest(sig))
+                            }
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        try { bmp?.recycle() } catch (_: Throwable) {}
+                    }
+                }
+            }
+            if (cached.isNullOrEmpty()) return false
             OcrDiag.log("DEDUPE_HIT", "panel ${slot + 1}/$total top=${p.top} LensCache hit blocks=${cached.size} (no upload)")
             texts[slot] = cached.joinToString("\n\n") { it.text.trim() }.trim()
             if (bubbles != null) {

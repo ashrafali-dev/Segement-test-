@@ -233,9 +233,10 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         Log.i(TAG, "TIMING imageId=${java.lang.Long.toHexString(key)} cacheHit=false prepareMs=$prepareMs keyCacheMs=$keyCacheMs " +
             "payloadBuildMs=$payloadBuildMs networkMs=$networkMs parseMs=$parseMs mapMs=$mapMs totalMs=$totalMs")
         // Small bounded LRU shared with the scanner: a duplicate panel in a later job can short-circuit without
-        // an upload. Geometry stays in this bitmap's own pixels (the scanner's md5(bytes) is linked as an alias).
+        // an upload. Geometry stays in this bitmap's own pixels. The scanner asks by md5(panel bytes); the entry
+        // is additionally reachable through [pixelDigest] so WebModeExtractor.lensCacheHit can bridge the two.
         if (!bypassCache && lines.isNotEmpty()) {
-            LensCache.put(panelSignature(bitmap), LensCache.Entry(lines, bitmap.width, bitmap.height, script))
+            LensCache.putByPixels(panelSignature(bitmap), LensCache.Entry(lines, bitmap.width, bitmap.height, script))
         }
         val mergeStart = SystemClock.elapsedRealtime()
         val finished = finish(lines, bitmap, script)
@@ -406,7 +407,6 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         return longSide / shortSide < MIN_BUBBLE_ASPECT
     }
 
-    /** Cheap, compression-stable fingerprint: 8x8 binary luma sampled on a coarse grid. */
     /** 32x32 luma signature of a panel (the key of the shared [LensCache]). */
     private fun panelSignature(bmp: Bitmap): String =
         LensCache.signatureOf(bmp.width, bmp.height) { x, y ->
