@@ -576,7 +576,7 @@ class MainActivity : Activity() {
                     )
                     // The user corrected a box on THIS page: translate only this text and merge it into the
                     // bubbles already placed, instead of re-reading the whole screen (scanning-mode region path).
-                    scanRegionChapter = if (DeepSeekRealtimeTranslation.isEnabled(this)) null else chapter
+                    scanRegionChapter = if (DeepSeekRealtimeTranslation.isEnabled(this@MainActivity)) null else chapter
                     handleChapter(chapter, useSavedTranslation = false)
                 }
             } finally {
