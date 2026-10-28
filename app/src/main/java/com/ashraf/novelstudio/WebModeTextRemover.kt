@@ -36,6 +36,14 @@ internal object WebModeTextRemover {
     ): Boolean {
         if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
+        // A file-backed replacement cannot replace a blob: URL through WebResource interception. Returning the
+        // original blob as if it were cleaned would hide the text-cleaning fallback and place translation over old text.
+        // Let WebModeWriter cover only the OCR text box for blob panels; synthetic ns-canvas panels use the bounded
+        // in-memory data-URL path below and can safely use local pixel cleaning.
+        if (sourceUrl.startsWith("blob:", ignoreCase = true)) {
+            OcrDiag.log("CLEAN", "skipped blob source: no safe file-backed replacement; use local OCR-box cover")
+            return false
+        }
         if (isAnimatedOrUnsupported(encoded)) return false
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
