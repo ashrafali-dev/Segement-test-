@@ -2002,9 +2002,11 @@ internal class WebModeExtractor(
                     src.startsWith("ns-canvas:", true) || src.startsWith("blob:", true)
                 if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) && cleanableSrc) {
                     try {
-                        // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
+                        // Real-time AND speculative read-ahead use the same low-latency cleaner. MI-GAN remains
+                        // available to thorough scan mode, but must not consume CPU/RAM while the reader is scrolling
+                        // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
-                        val cleaned = WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead")
+                        val cleaned = WebModeTextRemover.cleanAndCache(wv.context, src, bytes, bubbles, allowAi = !fastMode)
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
@@ -2179,7 +2181,10 @@ internal class WebModeExtractor(
                     DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
                 } catch (_: Throwable) { null }
             } else if (fastMode && cachedDets == null && remoteDet && detOk) {
-                BubbleDetector.requestAsync(wv.context, bmp)
+                // A 3-6 s RT-DETR run in a "background" thread still steals CPU and native memory from the reader,
+                // and the model often starts in the quiet gap just before the user scrolls again. Realtime consumes
+                // an already-cached result when available; it must not launch new speculative detector inference.
+                OcrDiag.log("DETECT_SRC", "realtime detector skipped; use cached detections/pixel bubble finder")
             }
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
