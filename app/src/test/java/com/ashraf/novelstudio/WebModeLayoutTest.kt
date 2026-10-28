@@ -190,6 +190,16 @@ class WebModeCanvasBubbleCacheIdentityTest {
         assertTrue(first != second)
     }
 
+    @Test fun blobPanelsWithSameTextDoNotShareIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("blob:https://reader.example/one", "待って！", 0.3f, 0.2f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("blob:https://reader.example/two", "待って！", 0.3f, 0.2f)
+        )
+        assertTrue(first != null && second != null && first != second)
+    }
+
     @Test fun ordinaryImageDoesNotUseCanvasIdentity() {
         assertNull(WebModeLayout.canvasBubbleCacheIdentity(
             bubble("https://cdn.example.test/panel.jpg", "待って！", 0.3f, 0.2f)
