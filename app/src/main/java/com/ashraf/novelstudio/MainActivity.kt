@@ -1168,7 +1168,7 @@ class MainActivity : Activity() {
     private val rtJapaneseCanvasSources = linkedSetOf<String>()
     // After one targeted retry, keep empty/noise replies out of automatic read-ahead until navigation.
     // This is separate from translation cache state and is not consulted by the visible/manual selection path.
-    private val rtAheadSkippedBubbleHashes = LinkedHashSet<String>()
+    private val rtAheadSkippedBubbleHashes = LinkedHashMap<String, String>()
 
     // The ahead translator uses its own invisible WebView so it never overwrites the visible chat
     // conversation or blocks the foreground panel's send/poll callbacks.
@@ -1476,9 +1476,11 @@ class MainActivity : Activity() {
     }
 
     private fun rememberSkippedAheadBubbles(bubbles: List<WmBubble>) {
-        bubbles.forEach { rtAheadSkippedBubbleHashes.add(WebModeLayout.fingerprint(it)) }
+        bubbles.forEach {
+            rtAheadSkippedBubbleHashes[WebModeLayout.fingerprint(it)] = WebModeLogic.normalizeUrl(it.src)
+        }
         while (rtAheadSkippedBubbleHashes.size > 600) {
-            val iterator = rtAheadSkippedBubbleHashes.iterator()
+            val iterator = rtAheadSkippedBubbleHashes.entries.iterator()
             if (iterator.hasNext()) { iterator.next(); iterator.remove() } else break
         }
     }
@@ -9247,6 +9249,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         }
         val changedJapaneseSourceKeys = changed.mapNotNull { rtJapaneseCanvasSourceKey(it) }.toSet()
         rtJapaneseCanvasSources.removeAll(changedJapaneseSourceKeys)
+        val skippedForChangedSources = rtAheadSkippedBubbleHashes
+            .filterValues { it in changed }
+            .keys
+            .toList()
+        skippedForChangedSources.forEach { rtAheadSkippedBubbleHashes.remove(it) }
         val activeAhead = rtAheadWorkerTask
         if (rtAheadWorkerBusy && activeAhead != null &&
             !WebModeLayoutStore.canvasVersionsStillCurrent(activeAhead.canvasVersions)) {
