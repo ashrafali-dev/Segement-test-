@@ -480,6 +480,26 @@ internal object WebModeLayoutStore {
             (canvasGenerationBySource[sourceKey] ?: 0L) == generation
         }
 
+    /**
+     * Capture current generations for read-ahead batches without requiring their bubbles to be the current
+     * visible snapshot. Ahead OCR can legitimately describe a panel that has not reached the viewport yet.
+     * The stricter canvasVersions() above remains for visible placement validation.
+     */
+    @Synchronized
+    fun canvasCacheVersions(url: String, layout: WebModeLayout?): Map<String, Long> {
+        if (!hasCanvasSources(layout)) return emptyMap()
+        val currentLayout = layout ?: return emptyMap()
+        val sources = currentLayout.bubbles.asSequence()
+            .map { WebModeLogic.normalizeUrl(it.src) }
+            .filter { it.startsWith("ns-canvas:") }
+            .distinctBy { canvasSourceSlot(it) ?: it }
+            .toList()
+        return sources.associate { src ->
+            val generationKey = canvasIdentityKey(url, src)
+            generationKey to (canvasGenerationBySource[generationKey] ?: 0L)
+        }
+    }
+
     @Synchronized
     fun setScan(url: String, layout: WebModeLayout) { scans[key(url)] = layout }
 
