@@ -76,7 +76,7 @@ internal object BubbleGrouping {
         // OCR boxes often leave a larger vertical gap than the glyph height inside tall Korean webtoon balloons.
         // Production callers also pass outlineBetween() as a veto, so tolerate wider line spacing without
         // blindly chaining two visibly separate balloons together.
-        likelySameBubbleLine(a, b, 1.6f, loose = true) && aligned(a, b) && sharesAlignment(a, b) && !sideNote(a, b)
+        likelySameBubbleLine(a, b, 1.6f, loose = true) && aligned(a, b) && sharesAlignment(a, b) && !sideNote(a, b) && !isAsidePair(a, b)
 
     /**
      * A whisper / hand-written note beside a bubble: the two blocks sit mostly NEXT to each other (little shared
