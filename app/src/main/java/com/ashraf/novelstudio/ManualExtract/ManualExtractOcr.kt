@@ -29,7 +29,7 @@ internal class ManualExtractOcr(context: Context) {
          * Manual crops are only downscaled when they exceed this. Lens/ML Kit both lose small glyphs when a
          * big selection is shrunk first, so a user-marked box keeps far more resolution than the realtime cap.
          */
-        const val MAX_FORCE_DIM = 2400
+        const val MAX_FORCE_DIM = 1600
     }
 
     data class Outcome(val blocks: List<OcrBlock>, val engine: String)
@@ -44,63 +44,25 @@ internal class ManualExtractOcr(context: Context) {
     fun read(bitmap: Bitmap, script: OcrScript, deadlineMs: Long): Outcome {
         val t0 = SystemClock.elapsedRealtime()
         val useLens = Prefs.get(app, "ocrEngine", "mlkit") == "lens"
-        fun budget() = !Thread.currentThread().isInterrupted && SystemClock.elapsedRealtime() - t0 < deadlineMs
-        fun infer(input: Bitmap, remote: Boolean): List<OcrBlock> = try {
-            val found = if (remote) {
-                val e = lens ?: LensOcrEngine(app).also { lens = it }
-                e.recognizeFresh(input, script, fastMode = false).blocks
-            } else {
-                val e = mlkit ?: MlKitOcrEngine().also { mlkit = it }
-                e.recognizeRegion(input, script).blocks
-            }
-            found.filter { it.text.isNotBlank() }
-        } catch (_: Exception) { emptyList() }
+
         if (useLens) {
-            val first = infer(bitmap, true)
-            if (first.isNotEmpty()) return Outcome(first, "Google Lens (fresh region)")
+            val lensBlocks = try {
+                val e = lens ?: LensOcrEngine(app).also { lens = it }
+                // Fresh: bypassCache also skips the short-lived empty-region cache, which would otherwise
+                // answer a user-selected crop with "empty" just because realtime scanned that area before.
+                e.recognizeFresh(bitmap, script, fastMode = false).blocks.filter { it.text.isNotBlank() }
+            } catch (_: Throwable) { emptyList() }
+            if (lensBlocks.isNotEmpty()) return Outcome(lensBlocks, "Google Lens")
+            // No text from Lens → ML Kit on the SAME crop (never a different/larger image).
+            if (SystemClock.elapsedRealtime() - t0 >= deadlineMs) return Outcome(emptyList(), "Google Lens")
         }
-        if (!budget()) return Outcome(emptyList(), "OCR deadline")
-        val local = infer(bitmap, false)
-        if (local.isNotEmpty()) return Outcome(local, "ML Kit (fresh region)")
-        // The frame is authoritative. Retry the SAME pixels at larger scale / contrast;
-        // never invent text and never let a cached empty result satisfy this request.
-        for (variant in 0..2) {
-            if (!budget()) break
-            val scale = minOf(2f, MAX_FORCE_DIM.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtLeast(1f)
-            val ww = (bitmap.width * scale).toInt().coerceAtLeast(1)
-            val hh = (bitmap.height * scale).toInt().coerceAtLeast(1)
-            var view: Bitmap? = null
-            try {
-                view = Bitmap.createBitmap(ww, hh, Bitmap.Config.ARGB_8888)
-                val paint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
-                if (variant > 0) {
-                    val gain = if (variant == 2) -1.5f else 1.6f
-                    val bias = if (variant == 2) 320f else -65f
-                    paint.colorFilter = android.graphics.ColorMatrixColorFilter(floatArrayOf(
-                        gain,0f,0f,0f,bias, 0f,gain,0f,0f,bias,
-                        0f,0f,gain,0f,bias, 0f,0f,0f,1f,0f))
-                }
-                android.graphics.Canvas(view).drawBitmap(bitmap, null,
-                    android.graphics.Rect(0, 0, ww, hh), paint)
-                val engines = if (useLens) listOf(true, false) else listOf(false)
-                for (remote in engines) {
-                    if (!budget()) break
-                    val found = infer(view, remote)
-                    if (found.isNotEmpty()) {
-                        val sx = bitmap.width.toFloat() / ww
-                        val sy = bitmap.height.toFloat() / hh
-                        val mapped = found.map { q -> q.copy(
-                            top = (q.top * sy).toInt(), left = (q.left * sx).toInt(),
-                            cx = q.cx * sx, cy = q.cy * sy, w = q.w * sx, h = q.h * sy,
-                            fontPx = q.fontPx * minOf(sx, sy),
-                            polygon = q.polygon.map { Pair(it.first * sx, it.second * sy) }) }
-                        return Outcome(mapped, "${if (remote) "Google Lens" else "ML Kit"} (region recovery ${variant + 1})")
-                    }
-                }
-            } catch (_: OutOfMemoryError) { break }
-            finally { view?.recycle() }
-        }
-        return Outcome(emptyList(), "Region recovery exhausted; source retained")
+        val mlBlocks = try {
+            val e = mlkit ?: MlKitOcrEngine().also { mlkit = it }
+            // Full inference, not the fast path: the user marked this box to get every glyph.
+            e.recognizeRegion(bitmap, script).blocks.filter { it.text.isNotBlank() }
+        } catch (_: Throwable) { emptyList() }
+        val engine = if (useLens) "ML Kit (Lens found none)" else "ML Kit"
+        return Outcome(mlBlocks, engine)
     }
 
     fun close() {

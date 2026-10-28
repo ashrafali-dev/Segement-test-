@@ -35,9 +35,8 @@ internal object ManualExtractHost {
      * Run on pixels the Activity already captured (the 6-dot frame). No image lookup and no second screenshot:
      * the caller owns [bitmap] and the pipeline recycles it.
      */
-    fun startOnBitmap(context: android.content.Context, src: String, bitmap: Bitmap, script: OcrScript,
-        x: Float = 0f, y: Float = 0f, w: Float = 1f, h: Float = 1f) =
-        ManualExtractController.startExtractWithBitmap(context, src, bitmap, script, x, y, w, h)
+    fun startOnBitmap(context: android.content.Context, src: String, bitmap: Bitmap, script: OcrScript) =
+        ManualExtractController.startExtractWithBitmap(context, src, bitmap, script)
 
     fun cancel() = ManualExtractController.cancel()
 }
