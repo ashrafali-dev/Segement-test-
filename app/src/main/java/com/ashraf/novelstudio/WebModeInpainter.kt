@@ -1,44 +1,55 @@
 package com.ashraf.novelstudio
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
-import java.nio.FloatBuffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Optional AI inpainting (LaMa, ONNX) for lettering that sits on artwork. The model is NOT part of the app:
- * it is downloaded once, on request, into app-private storage. Input/output contract of the model
- * (othytenk/lama-int4-int8, a quantized copy of Carve/LaMa-ONNX): image float32 [1,3,512,512] RGB 0..1, mask float32 [1,1,512,512]
- * (1 = erase, 0 = keep), output float32 [1,3,512,512] RGB (0..255).
+ * Optional MI-GAN (LiteRT/TFLite) inpainting for lettering on textured artwork.
+ *
+ * The fp16 model is downloaded on demand to app-private storage; it is not packaged in the APK.
+ * Model contract from litert-community/MI-GAN-512-Places2-LiteRT:
+ *   input [1,4,512,512], NCHW float32:
+ *     channel 0 = keepMask - 0.5 (1 means keep, 0 means erase)
+ *     channels 1..3 = normalized RGB [-1,1] multiplied by keepMask
+ *   output [1,3,512,512], NCHW float32 in [-1,1].
+ *
+ * Use the GPU delegate only. The model card reports that XNNPACK declines this fp16 graph, so a
+ * CPU fallback is deliberately not used: a slow/high-memory CPU run should not block manga reading.
  */
 internal object WebModeInpainter {
-    // LaMa (big-lama) with int4/int8 weights, 37 MB, same inputs/outputs as the 208 MB fp32 model (othytenk/lama-int4-int8).
-    const val MODEL_URL = "https://huggingface.co/othytenk/lama-int4-int8/resolve/main/lama_int4_int8_r4.onnx"
-    private const val MODEL_NAME = "lama_int4_int8_r4.onnx"
-    private const val MODEL_SHA256 = "4e3b78a253eb4abf21896811c928ffa91214b916e5d6ced24cecdd7999b4aaa1"
-    private const val MIN_BYTES = 20_000_000L
-    private const val MAX_BYTES = 150_000_000L
+    const val MODEL_URL =
+        "https://huggingface.co/litert-community/MI-GAN-512-Places2-LiteRT/resolve/main/migan_fp16.tflite"
+    private const val MODEL_NAME = "migan_fp16.tflite"
+    private const val MIN_BYTES = 15_000_000L
+    private const val MAX_BYTES = 20_000_000L
     private const val SIZE = 512
+    private const val PLANE = SIZE * SIZE
 
     private val downloading = AtomicBoolean(false)
     private val warming = AtomicBoolean(false)
-    /** Set when one inpaint took longer than 9 s on this phone: AI is skipped for [SLOW_PAUSE_MS], then tried again. */
+
     @Volatile private var slowUntil = 0L
     private const val SLOW_PAUSE_MS = 180_000L
-    val tooSlow: Boolean get() = android.os.SystemClock.elapsedRealtime() < slowUntil
-    @Volatile private var session: OrtSession? = null
+    val tooSlow: Boolean get() = SystemClock.elapsedRealtime() < slowUntil
+
+    @Volatile private var engine: Interpreter? = null
+    @Volatile private var gpuDelegate: GpuDelegate? = null
     @Volatile private var sessionFailed = false
-    @Volatile private var imageName = "image"
-    @Volatile private var maskName = "mask"
+    private var mappedModel: MappedByteBuffer? = null
 
     /** Why the AI painter was skipped / how long the last run took (shown in the status pill). */
     @Volatile var lastNote: String = ""
@@ -47,10 +58,9 @@ internal object WebModeInpainter {
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), ".running")
 
     /**
-     * True when the AI painter may run right now. A marker file is written before every model load / run and removed
-     * after it. A native out-of-memory kills the process without any exception, so a marker still present at the next
-     * start proves the previous run crashed the app: the painter then stays off until the model is deleted/re-downloaded.
-     * Must be called while holding [OnnxHeavyGate.lock].
+     * A native GPU/OOM failure may kill the process without throwing an exception. If the marker
+     * remains from the previous launch, disable this optional painter until the model is downloaded
+     * again. Must be called while holding OnnxHeavyGate.lock.
      */
     private fun aiSafe(ctx: Context): Boolean {
         val app = ctx.applicationContext
@@ -58,25 +68,26 @@ internal object WebModeInpainter {
         if (marker.exists()) {
             try { marker.delete() } catch (_: Throwable) {}
             Prefs.put(app, "wmAiInpaintCrashed", "1")
-            OcrDiag.log("AI_PAINT", "previous AI painter run crashed the app; painter switched off until the model is re-downloaded")
+            OcrDiag.log("AI_PAINT", "previous MI-GAN run crashed the app; painter switched off until model re-download")
         }
-        if (Prefs.get(app, "wmAiInpaintCrashed", "") == "1") { lastNote = "off (crashed before)"; return false }
-        // LaMa needs far more memory than a 32-bit process can address. The latest report shows it killing the app on a
-        // 3.5 GB phone with 520 MB free. Set wmAiForce32=1 to try anyway.
-        if (!android.os.Process.is64Bit() && Prefs.get(app, "wmAiForce32", "") != "1") {
-            lastNote = "off (32-bit phone)"
+        if (Prefs.get(app, "wmAiInpaintCrashed", "") == "1") {
+            lastNote = "off (crashed before)"
             return false
         }
-        val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return true
+
+        val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            ?: return true
         val mi = android.app.ActivityManager.MemoryInfo()
         am.getMemoryInfo(mi)
         val is64 = android.os.Process.is64Bit()
-        // The crash marker above switches the painter off for good if a run ever kills the app, so the limit can be modest.
-        val needMb = (Prefs.get(app, "wmAiMinFreeMb", "").toLongOrNull()) ?: if (is64) 600L else 520L
+        // MI-GAN is much smaller than the previous LaMa model, but GPU delegate buffers still need
+        // headroom. A user preference can override this conservative free-RAM threshold.
+        val needMb = Prefs.get(app, "wmAiMinFreeMb", "").toLongOrNull()
+            ?: if (is64) 400L else 350L
         val availMb = mi.availMem / 1048576L
         if (mi.lowMemory || availMb < needMb) {
-            lastNote = "skipped: low RAM (${availMb}MB free)"
-            OcrDiag.log("AI_PAINT", "skipped: free RAM ${availMb}MB < ${needMb}MB (64bit=$is64)")
+            lastNote = "skipped: low RAM (" + availMb + "MB free)"
+            OcrDiag.log("AI_PAINT", "skipped: free RAM " + availMb + "MB < " + needMb + "MB (64bit=" + is64 + ")")
             return false
         }
         return true
@@ -85,13 +96,15 @@ internal object WebModeInpainter {
     private fun modelFile(ctx: Context): File =
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), MODEL_NAME)
 
-    fun isReady(ctx: Context): Boolean = modelFile(ctx).let { it.isFile && it.length() in MIN_BYTES..MAX_BYTES }
-    fun isDownloading(): Boolean = downloading.get()
-    fun isLoaded(): Boolean = session != null
+    fun isReady(ctx: Context): Boolean =
+        modelFile(ctx).let { it.isFile && it.length() in MIN_BYTES..MAX_BYTES }
 
-    /** Loads the model in the background (several seconds), so the first scanned page never waits for it. */
+    fun isDownloading(): Boolean = downloading.get()
+    fun isLoaded(): Boolean = engine != null
+
+    /** Load in the background so the first scanned image does not wait for GPU model compilation. */
     fun warmUpAsync(ctx: Context) {
-        if (session != null || sessionFailed || !isReady(ctx) || !warming.compareAndSet(false, true)) return
+        if (engine != null || sessionFailed || !isReady(ctx) || !warming.compareAndSet(false, true)) return
         val app = ctx.applicationContext
         Thread {
             try {
@@ -100,45 +113,60 @@ internal object WebModeInpainter {
                     if (aiSafe(app)) {
                         val marker = crashMarker(app)
                         try { marker.parentFile?.mkdirs(); marker.writeText("1") } catch (_: Throwable) {}
-                        try { session(app) } finally { try { marker.delete() } catch (_: Throwable) {} }
+                        try { interpreter(app) } finally { try { marker.delete() } catch (_: Throwable) {} }
                     }
-                } finally { OnnxHeavyGate.lock.unlock() }
-            } catch (_: Throwable) {} finally { warming.set(false) }
-        }.apply { isDaemon = true; name = "wm-inpaint-warmup" }.start()
+                } finally {
+                    OnnxHeavyGate.lock.unlock()
+                }
+            } catch (_: Throwable) {
+            } finally {
+                warming.set(false)
+            }
+        }.apply { isDaemon = true; name = "wm-migan-warmup" }.start()
     }
 
     @Synchronized
     fun delete(ctx: Context): Boolean {
-        try { session?.close() } catch (_: Throwable) {}
-        session = null
+        try { engine?.close() } catch (_: Throwable) {}
+        engine = null
+        try { gpuDelegate?.close() } catch (_: Throwable) {}
+        gpuDelegate = null
+        mappedModel = null
         sessionFailed = false
         Prefs.put(ctx.applicationContext, "wmAiInpaintCrashed", "")
         try { crashMarker(ctx).delete() } catch (_: Throwable) {}
-        return !modelFile(ctx).exists() || modelFile(ctx).delete()
+        val file = modelFile(ctx)
+        return !file.exists() || file.delete()
     }
 
-    /** Downloads the model on a background thread. [onDone] gets null on success, otherwise a short error. */
+    /** Download model on a background thread. onDone receives null on success. */
     fun download(ctx: Context, onProgress: (Long, Long) -> Unit, onDone: (String?) -> Unit) {
-        if (!downloading.compareAndSet(false, true)) { onDone("ডাউনলোড ইতিমধ্যে চলছে"); return }
+        if (!downloading.compareAndSet(false, true)) {
+            onDone("ডাউনলোড ইতিমধ্যে চলছে")
+            return
+        }
         val app = ctx.applicationContext
         Thread {
             var error: String? = null
             var conn: HttpURLConnection? = null
             try {
                 val target = modelFile(app)
-                target.parentFile?.let { if (!it.exists() && !it.mkdirs()) throw IllegalStateException("ফোল্ডার তৈরি করা যায়নি") }
+                target.parentFile?.let {
+                    if (!it.exists() && !it.mkdirs()) throw IllegalStateException("ফোল্ডার তৈরি করা যায়নি")
+                }
                 val part = File(target.parentFile, target.name + ".part")
                 part.delete()
                 conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 20000; readTimeout = 45000; instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", "NovelStudio-Inpaint/1")
+                    connectTimeout = 20000
+                    readTimeout = 45000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "NovelStudio-MI-GAN/1")
                 }
                 val code = conn.responseCode
-                if (code !in 200..299) throw IllegalStateException("HTTP $code")
+                if (code !in 200..299) throw IllegalStateException("HTTP " + code)
                 val total = conn.contentLengthLong
                 if (total > MAX_BYTES) throw IllegalStateException("অপ্রত্যাশিত ফাইল সাইজ")
                 var readTotal = 0L
-                val digest = java.security.MessageDigest.getInstance("SHA-256")
                 BufferedInputStream(conn.inputStream).use { input ->
                     FileOutputStream(part).use { output ->
                         val buffer = ByteArray(65536)
@@ -148,65 +176,80 @@ internal object WebModeInpainter {
                             readTotal += n
                             if (readTotal > MAX_BYTES) throw IllegalStateException("ফাইলের সাইজ বেশি")
                             output.write(buffer, 0, n)
-                            digest.update(buffer, 0, n)
                             onProgress(readTotal, total)
                         }
                     }
                 }
                 if (total > 0 && readTotal != total) throw IllegalStateException("অসম্পূর্ণ ডাউনলোড")
-                if (part.length() !in MIN_BYTES..MAX_BYTES) throw IllegalStateException("ফাইল যাচাই ব্যর্থ")
-                val hex = digest.digest().joinToString("") { "%02x".format(it) }
-                if (hex != MODEL_SHA256) throw IllegalStateException("ফাইলের চেকসাম মেলেনি")
+                if (part.length() !in MIN_BYTES..MAX_BYTES) throw IllegalStateException("ফাইল যাচাই ব্যর্থ: সাইজ মেলেনি")
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) throw IllegalStateException("ফাইল সংরক্ষণ ব্যর্থ")
-                // Prove right now that this phone's ONNX Runtime can run the model; otherwise say so instead of failing silently.
+
+                // Validate that this device's TFLite GPU runtime can load the file and its I/O shapes.
                 sessionFailed = false
                 Prefs.put(app, "wmAiInpaintCrashed", "")
-                if (session(app) == null) {
+                if (interpreter(app) == null) {
                     target.delete()
                     sessionFailed = false
-                    throw IllegalStateException("মডেল লোড হয়নি — এই অ্যাপের ONNX Runtime সংস্করণ মডেলটির জন্য পুরনো হতে পারে")
+                    throw IllegalStateException("MI-GAN মডেল লোড হয়নি — এই ফোনের GPU delegate বা মডেল runtime সমর্থিত নয়")
                 }
             } catch (e: Throwable) {
                 error = e.message ?: "ডাউনলোড ব্যর্থ"
-                try { File(File(app.filesDir, "wm_inpaint"), "$MODEL_NAME.part").delete() } catch (_: Throwable) {}
+                try { File(File(app.filesDir, "wm_inpaint"), MODEL_NAME + ".part").delete() } catch (_: Throwable) {}
             } finally {
                 try { conn?.disconnect() } catch (_: Throwable) {}
                 downloading.set(false)
                 onDone(error)
             }
-        }.apply { isDaemon = true; name = "wm-inpaint-download" }.start()
+        }.apply { isDaemon = true; name = "wm-migan-download" }.start()
     }
 
     @Synchronized
-    private fun session(ctx: Context): OrtSession? {
-        session?.let { return it }
+    private fun interpreter(ctx: Context): Interpreter? {
+        engine?.let { return it }
         if (sessionFailed || !isReady(ctx)) return null
-        return try {
-            val env = OrtEnvironment.getEnvironment()
-            val opts = OrtSession.SessionOptions()
-            opts.setIntraOpNumThreads(maxOf(2, minOf(4, Runtime.getRuntime().availableProcessors())))
-            // Required by this int4/int8 model: dequantize the weights once at load so it runs like fp32.
-            opts.addConfigEntry("session.disable_quant_qdq", "1")
-            // Lower the native memory peak (LaMa at 512x512 is heavy): no pre-planned memory pattern, no arena that keeps blocks.
-            try { opts.setMemoryPatternOptimization(false) } catch (_: Throwable) {}
-            try { opts.setCPUArenaAllocator(false) } catch (_: Throwable) {}
-            val s = env.createSession(modelFile(ctx).absolutePath, opts)
-            val names = s.inputNames.toList()
-            imageName = if (names.contains("image")) "image" else names[0]
-            maskName = if (names.contains("mask")) "mask" else names[names.size - 1]
-            session = s
-            s
-        } catch (_: Throwable) {
+
+        var delegate: GpuDelegate? = null
+        var candidate: Interpreter? = null
+        try {
+            val file = modelFile(ctx)
+            val mapped = RandomAccessFile(file, "r").use { raf ->
+                raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, file.length())
+            }
+            delegate = GpuDelegate()
+            val options = Interpreter.Options().apply {
+                setNumThreads(2)
+                setAllowFp16PrecisionForFp32(true)
+                addDelegate(delegate)
+            }
+            candidate = Interpreter(mapped, options)
+            val inShape = candidate.getInputTensor(0).shape()
+            val outShape = candidate.getOutputTensor(0).shape()
+            if (inShape.size != 4 || inShape[0] != 1 || inShape[1] != 4 ||
+                inShape[2] != SIZE || inShape[3] != SIZE ||
+                outShape.size != 4 || outShape[0] != 1 || outShape[1] != 3 ||
+                outShape[2] != SIZE || outShape[3] != SIZE) {
+                throw IllegalStateException("MI-GAN-এর input/output shape প্রত্যাশিত নয়")
+            }
+            mappedModel = mapped
+            gpuDelegate = delegate
+            engine = candidate
+            return candidate
+        } catch (t: Throwable) {
+            try { candidate?.close() } catch (_: Throwable) {}
+            try { delegate?.close() } catch (_: Throwable) {}
+            mappedModel = null
             sessionFailed = true
-            null
+            lastNote = "GPU model unavailable"
+            OcrDiag.log("AI_PAINT", "MI-GAN GPU initialization failed: " + (t.message ?: t.javaClass.simpleName))
+            return null
         }
     }
 
     /**
-     * Fills the masked pixels of the region [x0,y0,rw,rh] of [bitmap] with AI-generated picture content.
-     * [mask] is region-local (rw*rh, non-zero = erase). Returns an rw*rh array whose masked entries hold the
-     * new ARGB colour, or null when the model is unavailable or anything fails (caller falls back).
+     * Fills masked pixels in [x0,y0,rw,rh] of [bitmap].
+     * [mask] is region-local: non-zero means erase. Returns generated ARGB values at masked entries,
+     * or null when MI-GAN is unavailable or the input cannot safely be processed.
      */
     fun fill(ctx: Context, bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray): IntArray? {
         OnnxHeavyGate.lock.lock()
@@ -216,28 +259,34 @@ internal object WebModeInpainter {
             try { marker.parentFile?.mkdirs(); marker.writeText("1") } catch (_: Throwable) {}
             val t0 = SystemClock.elapsedRealtime()
             try {
-                val r = fillLocked(ctx, bitmap, x0, y0, rw, rh, mask)
-                if (r != null) lastNote = "last ${(SystemClock.elapsedRealtime() - t0) / 100 / 10.0}s"
-                return r
-            } finally { try { marker.delete() } catch (_: Throwable) {} }
-        } finally { OnnxHeavyGate.lock.unlock() }
+                val result = fillLocked(ctx, bitmap, x0, y0, rw, rh, mask)
+                if (result != null) {
+                    val elapsed = SystemClock.elapsedRealtime() - t0
+                    lastNote = "last " + (elapsed / 100) / 10.0 + "s"
+                    if (elapsed > 9000L) slowUntil = SystemClock.elapsedRealtime() + SLOW_PAUSE_MS
+                }
+                return result
+            } finally {
+                try { marker.delete() } catch (_: Throwable) {}
+            }
+        } finally {
+            OnnxHeavyGate.lock.unlock()
+        }
     }
 
     @Synchronized
     private fun fillLocked(ctx: Context, bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray): IntArray? {
-        val s = session(ctx) ?: return null
-        val t0 = SystemClock.elapsedRealtime()
+        val model = interpreter(ctx) ?: return null
+        if (rw <= 0 || rh <= 0 || mask.size != rw * rh) return null
+
         var scaledIn: Bitmap? = null
         var srcBmp: Bitmap? = null
         var outSmall: Bitmap? = null
         var outBig: Bitmap? = null
-        var tImg: OnnxTensor? = null
-        var tMask: OnnxTensor? = null
-        var result: OrtSession.Result? = null
         try {
             val bw = bitmap.width
             val bh = bitmap.height
-            // A square window with some context around the region; the model works at a fixed 512x512.
+            // Use a square context window around the text; MI-GAN accepts a fixed 512x512 input.
             val side = minOf(maxOf(160, (maxOf(rw, rh) * 1.6f).toInt()), bw, bh)
             if (rw > side || rh > side) return null
             val cx0 = (x0 + rw / 2 - side / 2).coerceIn(0, bw - side)
@@ -246,79 +295,85 @@ internal object WebModeInpainter {
             bitmap.getPixels(crop, 0, side, cx0, cy0, side, side)
             srcBmp = Bitmap.createBitmap(crop, side, side, Bitmap.Config.ARGB_8888)
             scaledIn = Bitmap.createScaledBitmap(srcBmp, SIZE, SIZE, true)
-            val px = IntArray(SIZE * SIZE)
+            val px = IntArray(PLANE)
             scaledIn.getPixels(px, 0, SIZE, 0, 0, SIZE, SIZE)
-            val plane = SIZE * SIZE
-            val img = FloatArray(3 * plane)
-            for (i in 0 until plane) {
-                val p = px[i]
-                img[i] = ((p shr 16) and 255) / 255f
-                img[plane + i] = ((p shr 8) and 255) / 255f
-                img[2 * plane + i] = (p and 255) / 255f
-            }
-            // Mask at 512x512: a target pixel is "erase" if ANY source pixel of its block is masked.
-            val m = FloatArray(plane)
+
+            // MI-GAN input: channel 0 is keepMask-0.5; RGB channels are normalized to [-1,1]
+            // and multiplied by keepMask. Model mask semantics are the inverse of our local erase mask.
+            val input = FloatArray(4 * PLANE)
             for (ty in 0 until SIZE) {
                 val sy0 = ty * side / SIZE
                 val sy1 = maxOf(sy0 + 1, (ty + 1) * side / SIZE)
                 for (tx in 0 until SIZE) {
                     val sx0 = tx * side / SIZE
                     val sx1 = maxOf(sx0 + 1, (tx + 1) * side / SIZE)
-                    var hit = false
+                    var erase = false
                     var sy = sy0
-                    while (sy < sy1 && !hit) {
+                    while (sy < sy1 && !erase) {
                         val ry = cy0 + sy - y0
                         if (ry in 0 until rh) {
                             var sx = sx0
                             while (sx < sx1) {
                                 val rx = cx0 + sx - x0
-                                if (rx in 0 until rw && mask[ry * rw + rx].toInt() != 0) { hit = true; break }
+                                if (rx in 0 until rw && mask[ry * rw + rx].toInt() != 0) {
+                                    erase = true
+                                    break
+                                }
                                 sx++
                             }
                         }
                         sy++
                     }
-                    if (hit) m[ty * SIZE + tx] = 1f
+
+                    val at = ty * SIZE + tx
+                    val keep = if (erase) 0f else 1f
+                    input[at] = keep - 0.5f
+                    if (keep != 0f) {
+                        val p = px[at]
+                        input[PLANE + at] = (((p shr 16) and 255) / 127.5f - 1f)
+                        input[2 * PLANE + at] = (((p shr 8) and 255) / 127.5f - 1f)
+                        input[3 * PLANE + at] = ((p and 255) / 127.5f - 1f)
+                    }
                 }
             }
-            val env = OrtEnvironment.getEnvironment()
-            tImg = OnnxTensor.createTensor(env, FloatBuffer.wrap(img), longArrayOf(1, 3, SIZE.toLong(), SIZE.toLong()))
-            tMask = OnnxTensor.createTensor(env, FloatBuffer.wrap(m), longArrayOf(1, 1, SIZE.toLong(), SIZE.toLong()))
-            result = s.run(mapOf(imageName to tImg, maskName to tMask))
-            val ot = result.get(0) as OnnxTensor
-            val arr = FloatArray(3 * plane)
-            ot.floatBuffer.get(arr)
-            var mx = 0f
-            for (v in arr) if (v > mx) mx = v
-            val k = if (mx <= 1.5f) 255f else 1f      // tolerate a model that returns 0..1
-            val outPx = IntArray(plane)
-            for (i in 0 until plane) {
-                val r = (arr[i] * k).toInt().coerceIn(0, 255)
-                val g = (arr[plane + i] * k).toInt().coerceIn(0, 255)
-                val b = (arr[2 * plane + i] * k).toInt().coerceIn(0, 255)
+
+            val inputBytes = ByteBuffer.allocateDirect(input.size * 4).order(ByteOrder.nativeOrder())
+            inputBytes.asFloatBuffer().put(input)
+            val outputBytes = ByteBuffer.allocateDirect(3 * PLANE * 4).order(ByteOrder.nativeOrder())
+            model.run(inputBytes, outputBytes)
+
+            val generated = FloatArray(3 * PLANE)
+            outputBytes.rewind()
+            outputBytes.asFloatBuffer().get(generated)
+            val outPx = IntArray(PLANE)
+            for (i in 0 until PLANE) {
+                val r = ((generated[i] * 127.5f) + 127.5f).toInt().coerceIn(0, 255)
+                val g = ((generated[PLANE + i] * 127.5f) + 127.5f).toInt().coerceIn(0, 255)
+                val b = ((generated[2 * PLANE + i] * 127.5f) + 127.5f).toInt().coerceIn(0, 255)
                 outPx[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
+
             outSmall = Bitmap.createBitmap(outPx, SIZE, SIZE, Bitmap.Config.ARGB_8888)
             outBig = Bitmap.createScaledBitmap(outSmall, side, side, true)
             val big = IntArray(side * side)
             outBig.getPixels(big, 0, side, 0, 0, side, side)
             val res = IntArray(rw * rh)
-            for (ry in 0 until rh) for (rx in 0 until rw) {
-                val at = ry * rw + rx
-                if (mask[at].toInt() == 0) continue
-                val sx = x0 + rx - cx0
-                val sy = y0 + ry - cy0
-                if (sx !in 0 until side || sy !in 0 until side) continue
-                res[at] = big[sy * side + sx]
+            for (ry in 0 until rh) {
+                for (rx in 0 until rw) {
+                    val at = ry * rw + rx
+                    if (mask[at].toInt() == 0) continue
+                    val sx = x0 + rx - cx0
+                    val sy = y0 + ry - cy0
+                    if (sx !in 0 until side || sy !in 0 until side) continue
+                    res[at] = big[sy * side + sx]
+                }
             }
-            if (SystemClock.elapsedRealtime() - t0 > 9000L) slowUntil = SystemClock.elapsedRealtime() + SLOW_PAUSE_MS
             return res
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            lastNote = "MI-GAN failed"
+            OcrDiag.log("AI_PAINT", "MI-GAN inference failed: " + (t.message ?: t.javaClass.simpleName))
             return null
         } finally {
-            try { result?.close() } catch (_: Throwable) {}
-            try { tImg?.close() } catch (_: Throwable) {}
-            try { tMask?.close() } catch (_: Throwable) {}
             if (outBig != null && outBig !== outSmall) outBig.recycle()
             outSmall?.recycle()
             if (scaledIn != null && scaledIn !== srcBmp) scaledIn.recycle()
