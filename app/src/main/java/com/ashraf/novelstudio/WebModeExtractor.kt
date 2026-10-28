@@ -3003,6 +3003,47 @@ function scroller(){
   if(chosen)window.__nsWmScroller=chosen;
   return chosen;
 }
+// Non-enumerable DOM references let the viewport-only pass test the actual hit target without leaking
+// DOM objects into JSON passed to Kotlin or increasing the serialized payload.
+function attachNode(panel,node,frame){
+  try{Object.defineProperty(panel,'_node',{value:node});if(frame)Object.defineProperty(panel,'_frame',{value:frame});}catch(e){}
+  return panel;
+}
+function candidateVisibleAt(panel,x,y){
+  var node=panel._node,frame=panel._frame;
+  if(!node)return true;
+  if(frame){
+    try{
+      var fr=frame.getBoundingClientRect(),fd=frame.contentDocument;
+      if(fd&&fd.elementFromPoint){
+        var inner=fd.elementFromPoint(x-fr.left,y-fr.top);
+        return inner===node||!!(inner&&node.contains&&node.contains(inner));
+      }
+    }catch(e){}
+    try{return document.elementFromPoint(x,y)===frame;}catch(e){return false;}
+  }
+  try{
+    var hit=document.elementFromPoint(x,y);
+    return hit===node||!!(hit&&node.contains&&node.contains(hit));
+  }catch(e){return false;}
+}
+function panelContributesVisiblePixels(panel,vw,vh){
+  var pl=Number(panel.vl)||0,pt=Number(panel.vt)||0;
+  var pw=Number(panel.fw)||Number(panel.w)||0,ph=Number(panel.fh)||Number(panel.h)||0;
+  var l=Math.max(0,pl),t=Math.max(0,pt),r=Math.min(vw,pl+pw),b=Math.min(vh,Math.min(Number(panel.vb)||pt+ph,pt+ph));
+  if(r-l<24||b-t<24)return false;
+  // Probe several points inside the clipped rectangle. This keeps partly visible neighboring panels,
+  // but excludes hidden/recycled images stacked at the same viewport coordinates behind the real panel.
+  var points=[
+    [(l+r)/2,(t+b)/2],
+    [l+(r-l)*0.25,t+(b-t)*0.25],
+    [l+(r-l)*0.75,t+(b-t)*0.25],
+    [l+(r-l)*0.25,t+(b-t)*0.75],
+    [l+(r-l)*0.75,t+(b-t)*0.75]
+  ];
+  for(var i=0;i<points.length;i++)if(candidateVisibleAt(panel,points[i][0],points[i][1]))return true;
+  return false;
+}
 function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
   var out=[],seen={},imgs=document.images,wy=window.pageYOffset||de.scrollTop||0,sr=sc?sc.getBoundingClientRect():null;
   // Big on-screen canvases = the page the user is really reading (Shonen Jump+, Comic-Walker...). An <img> that sits
@@ -3063,7 +3104,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     if(im.closest&&im.closest('header,footer,nav,aside,[class*=comment],[class*=recommend],[class*=related],[id*=comment]')&&!(r.width>=360&&r.height>=240))continue;
     if(seen[src])continue;seen[src]=1;
     var inScroller=!!(sc&&sc.contains(im));var top=inScroller?(r.top-sr.top+sc.scrollTop):(r.top+wy);
-    out.push({s:src,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:(im.complete&&nw>0)?1:0,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom});
+    out.push(attachNode({s:src,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:(im.complete&&nw>0)?1:0,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom},im));
   }
   // Readers inside a same-origin <iframe>.
   var frs=document.querySelectorAll('iframe');
@@ -3079,7 +3120,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
       seen[fsrc]=1;
       var ft=fb.top+fr.top,fl=fb.left+fr.left;
       var fit=sc&&sc.contains(frs[fi])?ft-sr.top+sc.scrollTop:ft+wy;
-      out.push({s:fsrc,t:Math.round(fit),l:Math.round(fl),w:Math.round(fr.width),h:Math.round(fr.height),d:(fim.complete&&fnw>0)?1:0,fw:fr.width,fh:fr.height,vl:fl,vt:ft,vb:ft+fr.height});
+      out.push(attachNode({s:fsrc,t:Math.round(fit),l:Math.round(fl),w:Math.round(fr.width),h:Math.round(fr.height),d:(fim.complete&&fnw>0)?1:0,fw:fr.width,fh:fr.height,vl:fl,vt:ft,vb:ft+fr.height},fim,frs[fi]));
     }
   }
   // Some pages use SVG <image> or videos with posters.
@@ -3094,7 +3135,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     if(BAD.test(xmeta))continue;
     seen[xs]=1;
     var svgInside=!!(sc&&sc.contains(xe));var xt=svgInside?(xr.top-sr.top+sc.scrollTop):(xr.top+wy);
-    out.push({s:xs,t:Math.round(xt),l:Math.round(xr.left),w:Math.round(xr.width),h:Math.round(xr.height),d:1,fw:xr.width,fh:xr.height,vl:xr.left,vt:xr.top,vb:xr.bottom});
+    out.push(attachNode({s:xs,t:Math.round(xt),l:Math.round(xr.left),w:Math.round(xr.width),h:Math.round(xr.height),d:1,fw:xr.width,fh:xr.height,vl:xr.left,vt:xr.top,vb:xr.bottom},xe));
   }
   // Some readers mix normal IMG panels with CSS-background panels. Rate-limit the expensive
   // style sweep for callers that do not specify a mode; full-chapter final collection opts in.
@@ -3135,7 +3176,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
           if(!seen[pkey]){
             seen[pkey]=1;cvDone++;
             var pin=!!(sc&&sc.contains(cv));var ptop=pin?(cr.top-sr.top+sc.scrollTop):(cr.top+wy);
-            out.push({s:'ns-canvas:'+Math.round(cr.left)+','+Math.round(ptop)+','+Math.round(cr.width)+'x'+Math.round(cr.height),t:Math.round(ptop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:2});
+            out.push(attachNode({s:'ns-canvas:'+Math.round(cr.left)+','+Math.round(ptop)+','+Math.round(cr.width)+'x'+Math.round(cr.height),t:Math.round(ptop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:2},cv));
           }
         }
       }
@@ -3143,7 +3184,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
       var ckey=cu.length+':'+cu.slice(-48)+cu.slice(2000,2048);
       if(seen[ckey])continue;seen[ckey]=1;cvDone++;
       var cin=!!(sc&&sc.contains(cv));var ctop=cin?(cr.top-sr.top+sc.scrollTop):(cr.top+wy);
-      out.push({s:cu,t:Math.round(ctop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:1});
+      out.push(attachNode({s:cu,t:Math.round(ctop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:1},cv));
     }
   }
   if(doBackgrounds===true){
@@ -3170,7 +3211,7 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
         if(!s||!goodUrl(s)||seen[s])continue;
         seen[s]=1;
         var inScroller=!!(sc&&sc.contains(el));var top=inScroller?(r.top-sr.top+sc.scrollTop):(r.top+wy);
-        out.push({s:s,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:1,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom});
+        out.push(attachNode({s:s,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:1,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom},el));
       }
     }
   
@@ -3354,7 +3395,9 @@ var sc=scroller(),c=cands(sc,undefined,true);
 var top=sc?(sc.scrollTop||0):(window.pageYOffset||de.scrollTop||0);
 var height=sc?(sc.clientHeight||window.innerHeight||800):(window.innerHeight||800);
 var bottom=top+height;
-var vpH=window.innerHeight||800;c=c.filter(function(p){return p.vb>0&&p.vt<vpH;});
+var vpW=window.innerWidth||800,vpH=window.innerHeight||800,rawVisibleCandidates=c.length;
+c=c.filter(function(p){return panelContributesVisiblePixels(p,vpW,vpH);});
+
 function q(s){var e=document.querySelector(s);return e?(e.textContent||'').trim():'';}
 function link(kind){
   var re=kind==='next'?/next|\\u4e0b\\u4e00|\\ub2e4\\uc74c|\\u6b21\\u306e|\\u6b21\\u3078|\\u6b21\\u7ae0/i:/prev(?!iew)|\\u4e0a\\u4e00|\\uc774\\uc804|\\u524d\\u306e|\\u524d\\u3078|\\u524d\\u7ae0/i;
@@ -3372,7 +3415,7 @@ var novel=q('.detail_header .subj')||q('a.subj')||q('.series-title')||q('.comic-
 var xf=0,ifs=document.querySelectorAll('iframe');for(var xi=0;xi<ifs.length;xi++){try{if(!ifs[xi].contentDocument)xf++;}catch(e0){xf++;}}
 var ncv=0,cvl=[];var cvs0=document.querySelectorAll('canvas');for(var cj=0;cj<cvs0.length&&cj<8;cj++){var rr=cvs0[cj].getBoundingClientRect();cvl.push(cvs0[cj].width+'x'+cvs0[cj].height+'@'+Math.round(rr.top)+'/'+Math.round(rr.width)+'x'+Math.round(rr.height));}
 var cands2=c.map(function(x){return (x.cv?'CANVAS ':'')+x.w+'x'+x.h+' '+String(x.s).slice(0,60);}).slice(0,12);
-var dbg=document.images.length+' img, '+ifs.length+' iframe('+xf+' cross-origin), '+cvs0.length+' canvas, '+c.length+' found | canvasErr='+(window.__nsWmCanvasErr||'-')+' | canvases=['+cvl.join(', ')+'] | cands=['+cands2.join(' ;; ')+'] | vp='+(window.innerWidth||0)+'x'+(window.innerHeight||0)+' | ready='+document.readyState;
+var dbg=document.images.length+' img, '+ifs.length+' iframe('+xf+' cross-origin), '+cvs0.length+' canvas, visibleHit='+rawVisibleCandidates+'->'+c.length+' found | canvasErr='+(window.__nsWmCanvasErr||'-')+' | canvases=['+cvl.join(', ')+'] | cands=['+cands2.join(' ;; ')+'] | vp='+(window.innerWidth||0)+'x'+(window.innerHeight||0)+' | ready='+document.readyState;
 return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,title:title,novel:novel,next:link('next'),prev:link('prev'),imgs:c.slice(0,600),dbg:dbg});
 """
 
