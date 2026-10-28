@@ -26,7 +26,7 @@ class RegionChainTest {
             lensFast: (OcrScript) -> OcrResult = { OcrResult(emptyList()) },
             mlkit: (OcrScript) -> OcrResult = { OcrResult(emptyList()) },
             cancelled: () -> Boolean = { false }
-        ) = RegionChainCore(
+        ): RegionChainCore<Bmp> = RegionChainCore<Bmp>(
             lensFull = { _, s -> order.add(UserRegionEngine.LENS_FULL_2X); lensFull(s) },
             lensFast = { _, s -> order.add(UserRegionEngine.LENS_FAST); lensFast(s) },
             mlkit = { _, s -> order.add(UserRegionEngine.MLKIT); mlkit(s) },
