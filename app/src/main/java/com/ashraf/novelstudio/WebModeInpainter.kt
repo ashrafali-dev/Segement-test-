@@ -277,7 +277,7 @@ internal object WebModeInpainter {
                 val result = fillLocked(ctx, bitmap, x0, y0, rw, rh, mask)
                 if (result != null) {
                     val elapsed = SystemClock.elapsedRealtime() - t0
-                    lastNote = "last " + (elapsed / 100) / 10.0 + "s"
+                    lastNote = "last region " + (elapsed / 100) / 10.0 + "s"
                     if (elapsed > 9000L) slowUntil = SystemClock.elapsedRealtime() + SLOW_PAUSE_MS
                 }
                 return result
