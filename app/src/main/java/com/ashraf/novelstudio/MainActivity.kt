@@ -1163,7 +1163,7 @@ class MainActivity : Activity() {
     }
     // Slots confirmed to contain Japanese glyphs in a synthetic canvas OCR result. This is page-local
     // and bounded; only these slots use spatial cache identity instead of the general text-only cache.
-    private val rtJapaneseCanvasSlots = linkedSetOf<String>()
+    private val rtJapaneseCanvasSources = linkedSetOf<String>()
 
     // The ahead translator uses its own invisible WebView so it never overwrites the visible chat
     // conversation or blocks the foreground panel's send/poll callbacks.
@@ -1417,26 +1417,33 @@ class MainActivity : Activity() {
     private fun containsJapaneseKana(text: String): Boolean =
         text.any { it.code in 0x3040..0x30FF }
 
-    private fun rememberJapaneseCanvasSlots(panels: List<WebModeAheadPanel>) {
+    /** Only synthetic canvas slots and short-lived blob-backed panels get Japanese spatial cache keys. */
+    private fun rtJapaneseCanvasSourceKey(src: String): String? {
+        val normalized = WebModeLogic.normalizeUrl(src)
+        val slot = WebModeLayoutStore.canvasSourceSlot(normalized)
+        if (slot != null) return "canvas:$slot"
+        if (normalized.startsWith("blob:", ignoreCase = true)) return "blob:$normalized"
+        return null
+    }
+
+    private fun rememberJapaneseCanvasSources(panels: List<WebModeAheadPanel>) {
         for (panel in panels) {
-            val canvasBubbles = panel.bubbles.filter {
-                WebModeLayoutStore.canvasSourceSlot(it.src) != null
-            }
+            val canvasBubbles = panel.bubbles.filter { rtJapaneseCanvasSourceKey(it.src) != null }
             if (canvasBubbles.any { containsJapaneseKana(it.sourceText) }) {
                 canvasBubbles.forEach { bubble ->
-                    WebModeLayoutStore.canvasSourceSlot(bubble.src)?.let { rtJapaneseCanvasSlots.add(it) }
+                    rtJapaneseCanvasSourceKey(bubble.src)?.let { rtJapaneseCanvasSources.add(it) }
                 }
             }
         }
-        while (rtJapaneseCanvasSlots.size > 64) {
-            rtJapaneseCanvasSlots.remove(rtJapaneseCanvasSlots.first())
+        while (rtJapaneseCanvasSources.size > 64) {
+            rtJapaneseCanvasSources.remove(rtJapaneseCanvasSources.first())
         }
     }
 
     private fun rtAheadBubbleCacheKey(bubble: WmBubble): String {
         val text = WebModeLayout.normalizeOcrText(bubble.sourceText)
-        val slot = WebModeLayoutStore.canvasSourceSlot(bubble.src)
-        if (slot != null && slot in rtJapaneseCanvasSlots) {
+        val sourceKey = rtJapaneseCanvasSourceKey(bubble.src)
+        if (sourceKey != null && sourceKey in rtJapaneseCanvasSources) {
             WebModeLayout.canvasBubbleCacheIdentity(bubble)?.let { return it }
         }
         val letters = text.filter { it.isLetterOrDigit() }
@@ -1532,11 +1539,11 @@ class MainActivity : Activity() {
         if (page != rtAheadHoldPage) {
             rtAheadHold.clear()
             rtAheadHoldPage = page
-            rtJapaneseCanvasSlots.clear()
+            rtJapaneseCanvasSources.clear()
         }
         if (page.isBlank() || page != cleanUrl(novelWv.url.orEmpty()) ||
             (panels.isEmpty() && rtAheadHold.isEmpty())) return
-        rememberJapaneseCanvasSlots(panels)
+        rememberJapaneseCanvasSources(panels)
 
         // Do not queue a bubble that is already cached, already queued, being translated, or
         // already completed. This also prevents overlapping read-ahead windows from resending
@@ -2230,7 +2237,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
         rtAheadTranslationTasksByJobKey.clear()
         rtAheadTranslationCache.clear()
         rtAheadTranslationSuppressedIds.clear()
-        rtJapaneseCanvasSlots.clear()
+        rtJapaneseCanvasSources.clear()
         rtAheadHold.clear()
     }
 
