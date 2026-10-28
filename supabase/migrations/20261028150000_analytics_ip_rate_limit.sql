@@ -39,7 +39,7 @@ begin
   values (p_key_hash, p_bucket_start, 1, clock_timestamp())
   on conflict (key_hash, bucket_start)
   do update set hits = limits.hits + 1, updated_at = clock_timestamp()
-  returning hits into v_hits;
+  returning limits.hits into v_hits;
 
   if random() < 0.02 then
     delete from private.analytics_rate_limits
