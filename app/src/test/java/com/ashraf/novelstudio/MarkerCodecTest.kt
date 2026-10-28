@@ -77,14 +77,14 @@ class MarkerCodecTest {
     }
 
     @Test fun `out of range marker is not reassigned to a different bubble`() {
-        val reply = "[001] one\\n[999] wrong bubble\\n[003] three"
+        val reply = "[001] one\n[999] wrong bubble\n[003] three"
         val firstPass = MarkerCodec.align(reply, 3)
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
         assertEquals(listOf("one", null, "three"), repaired)
     }
 
     @Test fun `duplicate marker body is not moved to the next bubble`() {
-        val reply = "[001] first\\n[001] ambiguous second\\n[003] third"
+        val reply = "[001] first\n[001] ambiguous second\n[003] third"
         val firstPass = MarkerCodec.align(reply, 3)
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(reply, 3, 0, firstPass, listOf(0, 1, 2))
         assertEquals(listOf("first", null, "third"), repaired)
@@ -101,14 +101,14 @@ class MarkerCodecTest {
 
     @Test fun `markerless paragraph count mismatch is not spatially guessed`() {
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
-            "upper whisper\\n\\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
+            "upper whisper\n\nmain bubble", 3, 0, listOf(null, null, null), listOf(2, 0, 1)
         )
         assertEquals(listOf(null, null, null), repaired)
     }
 
     @Test fun `markerless paragraphs align spatially only with exact bubble count`() {
         val repaired = MarkerCodec.recoverFailedMarkersBySpatialOrder(
-            "upper whisper\\n\\nmain bubble\\n\\nlower bubble", 3, 0,
+            "upper whisper\n\nmain bubble\n\nlower bubble", 3, 0,
             listOf(null, null, null), listOf(2, 0, 1)
         )
         assertEquals("main bubble", repaired[0])
