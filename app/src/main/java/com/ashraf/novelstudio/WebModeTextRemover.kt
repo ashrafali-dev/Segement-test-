@@ -91,20 +91,10 @@ internal object WebModeTextRemover {
                 .take(500)
                 .toList()
 
-            // Step 1 - bubbles whose SHAPE is known (closed flat speech bubble): paint the whole interior with the paper
-            // colour. This does not depend on the lettering test below, so Japanese columns, bold SFX and lettering the
-            // recogniser missed are wiped too, and the bubble counts as cleaned. (Before, any bubble that failed one of the
-            // strict glyph checks kept its old text and fell back to an ugly background box.)
-            // `soft` only says the ring around the OCR box is textured; the bubble interior itself can still be
-            // flat paper. Dense Japanese/Korean columns touch the ring and were tagged soft, which skipped this
-            // whole pass — the old lettering then stayed under the translation. wipeInterior() already refuses
-            // when the interior is mostly dark/coloured, so it is safe to try it for soft bubbles too.
-            for (bubble in boundedBubbles) {
-                if (bubble.cv.size < 4) continue
-                val n = try { wipeInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)) } catch (_: Exception) { 0 }
-                if (n > 0) { totalRemoved += n; erased.add(WebModeTextRemovalCache.bubbleKey(bubble)) }
-            }
-
+            // Do NOT paint the entire speech-bubble interior from cv: that flattens paper texture/gradients and
+            // can turn the bubble into a visibly boxy patch. cv is contour/placement guidance, not a text mask.
+            // The loop below edits only pixels selected as lettering inside the OCR box plus a small safety margin.
+            // If the local glyph mask is not confident, leave this bubble for the writer's conservative fallback.
             for (bubble in boundedBubbles) {
                 val cx = bubble.cx * width
                 val cy = bubble.cy * height
