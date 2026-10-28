@@ -128,7 +128,10 @@ assert.ok(remover.includes("val grow = (fontPx * 0.05f).toInt().coerceIn(1, 3)")
 // The balloon must never be repainted wholesale again: wipeInterior painted the whole interior rectangle.
 assert.ok(!remover.includes("private fun wipeInterior("),
   "text removal must not repaint the whole bubble interior");
-assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
+assert.ok(remover.includes("if (soft) 0 else eraseByBackgroundModel(") &&
+          remover.includes("if (soft && aiFill == null)") &&
+          writer.includes("if(!it.cl&&!it.er && !it.sf)"),
+  "non-AI artwork cleanup must preserve source art and avoid opaque sampled-colour covers");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
