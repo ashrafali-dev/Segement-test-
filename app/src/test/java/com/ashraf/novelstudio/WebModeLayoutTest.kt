@@ -199,6 +199,21 @@ class WebModeCanvasBubbleCacheIdentityTest {
         )
         assertTrue(first != null && second != null && first != second)
     }
+    @Test fun canvasCachePrefixIsStableAcrossResolutionChanges() {
+        val first = WebModeLayout.canvasBubbleCachePrefix("ns-canvas:0,47,420x597")
+        val second = WebModeLayout.canvasBubbleCachePrefix("ns-canvas:0,47,900x1280")
+        assertEquals(first, second)
+        assertTrue(first?.startsWith("jcanvas:") == true)
+    }
+
+    @Test fun readAheadCanCaptureGenerationBeforeCanvasBecomesVisible() {
+        val layout = WebModeLayout(0, listOf(
+            bubble("ns-canvas:0,947,420x597", "行こう！", 0.3f, 0.2f)
+        ))
+        val versions = WebModeLayoutStore.canvasCacheVersions("https://unseen-reader.test/chapter", layout)
+        assertEquals(1, versions.size)
+        assertTrue(versions.values.single() != Long.MIN_VALUE)
+    }
 
     @Test fun ordinaryImageDoesNotUseCanvasIdentity() {
         assertNull(WebModeLayout.canvasBubbleCacheIdentity(
