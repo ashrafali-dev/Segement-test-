@@ -62,8 +62,10 @@ internal object BubbleSegDetector {
     private val releaseExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "ns-mask-release").apply { isDaemon = true }
     }
+    @Volatile private var releaseGeneration = 0L
     private val idleRelease = Runnable {
         val queuedAt = SystemClock.elapsedRealtime()
+        val expectedGeneration = releaseGeneration
         try {
             releaseExecutor.execute {
                 val startedAt = SystemClock.elapsedRealtime()
@@ -71,14 +73,19 @@ internal object BubbleSegDetector {
                 // the mask session, so a scheduled idle cleanup cannot stall the reader or race another model.
                 OnnxHeavyGate.lock.lock()
                 try {
-                    release()
+                    // A new detection can begin after this timer callback has queued the release.
+                    if (expectedGeneration == releaseGeneration) {
+                        release()
+                        OcrDiag.log(
+                            "DETECT_SRC",
+                            "mask model released (idle) queueMs=${startedAt - queuedAt} releaseMs=${SystemClock.elapsedRealtime() - startedAt}"
+                        )
+                    } else {
+                        OcrDiag.log("DETECT_SRC", "mask model idle release skipped: session was used again")
+                    }
                 } finally {
                     OnnxHeavyGate.lock.unlock()
                 }
-                OcrDiag.log(
-                    "DETECT_SRC",
-                    "mask model released (idle) queueMs=${startedAt - queuedAt} releaseMs=${SystemClock.elapsedRealtime() - startedAt}"
-                )
             }
         } catch (_: RejectedExecutionException) {
             OcrDiag.log("DETECT_SRC", "mask model idle release skipped: release executor is shut down")
@@ -240,6 +247,8 @@ internal object BubbleSegDetector {
             OcrDiag.log("DETECT_SRC", "mask model $lastInfo")
             return null
         }
+        // Invalidate an idle release already queued by the main-thread Handler.
+        releaseGeneration++
         return try {
             val file = modelFile(c)
             var s = session
