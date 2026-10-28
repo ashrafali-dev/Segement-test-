@@ -36,14 +36,6 @@ internal object WebModeTextRemover {
     ): Boolean {
         if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
-        // A file-backed replacement cannot replace a blob: URL through WebResource interception. Returning the
-        // original blob as if it were cleaned would hide the text-cleaning fallback and place translation over old text.
-        // Let WebModeWriter cover only the OCR text box for blob panels; synthetic ns-canvas panels use the bounded
-        // in-memory data-URL path below and can safely use local pixel cleaning.
-        if (sourceUrl.startsWith("blob:", ignoreCase = true)) {
-            OcrDiag.log("CLEAN", "skipped blob source: no safe file-backed replacement; use local OCR-box cover")
-            return false
-        }
         if (isAnimatedOrUnsupported(encoded)) return false
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -435,15 +427,12 @@ internal object WebModeTextRemover {
             val cleaned = bytesOut.toByteArray()
             if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
             val mime = if (modern) "image/webp" else "image/png"
-            // A canvas panel has no image URL: its picture is drawn by page JS, so the overlay had nothing to
-            // swap in and the old lettering stayed visible under the translation. Hand the cleaned pixels to the
-            // overlay as a data: URL. Canvas entries stay in memory only (a new multi-MB file per scroll
-            // position would grow the disk cache without bound) and are keyed by the stable canvas slot.
-            if (sourceUrl.startsWith("ns-canvas:", true)) {
-                WebModeTextRemovalCache.storeCanvasCleaned(
-                    sourceUrl,
-                    "data:$mime;base64," + android.util.Base64.encodeToString(cleaned, android.util.Base64.NO_WRAP)
-                )
+            // Canvas and blob URLs cannot be replaced by the file-backed request interceptor. Keep only a small,
+            // size-bounded inline data URL so the writer can show the locally cleaned pixels without retaining large
+            // pages in memory. Oversized items use the small OCR-box cover instead of a false "cleaned" success.
+            if (sourceUrl.startsWith("ns-canvas:", true) || sourceUrl.startsWith("blob:", true)) {
+                val stored = WebModeTextRemovalCache.storeInlineCleanedBytes(sourceUrl, cleaned, mime)
+                if (!stored) return false
                 WebModeTextRemovalCache.setErased(sourceUrl, erased)
                 return true
             }
