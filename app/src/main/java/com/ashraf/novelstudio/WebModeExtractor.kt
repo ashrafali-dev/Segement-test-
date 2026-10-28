@@ -2075,8 +2075,8 @@ internal class WebModeExtractor(
             val detectionsForClean = ArrayList<BubbleDetectorCore.Det>()
             val detectorReturned = booleanArrayOf(false)
             fun finishResult(): PanelOcr {
-                // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
-                // coordinate system and must never be used to rewrite the underlying source image.
+                // A force-OCR crop is not a replacement bitmap. readSlice maps its OCR/detector boxes
+                // back into full-source coordinates, so cleaning must always use the ORIGINAL full image bytes.
                 // NOT limited to the slow pass: realtime/visible reads (fastMode) must erase the old lettering too, otherwise every
                 // visible panel keeps its Japanese text and the translation sits on a cover box.
                 // Canvas pages have no image URL (the picture is drawn by JS), so the old http(s)-only test
@@ -2096,7 +2096,7 @@ internal class WebModeExtractor(
                 } == true
                 // Menu OFF disables the legacy pixel/AI cleaner, not the model's segmentation mask.
                 // The mask-only path is attempted only when the detector actually returned balloon masks.
-                if (crop == null && cleanableSrc && (fullTextRemoverOn || hasBalloonMasks)) {
+                if (cleanableSrc && (fullTextRemoverOn || hasBalloonMasks)) {
                     try {
                         // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
                         val tClean = SystemClock.elapsedRealtime()
@@ -2159,7 +2159,9 @@ internal class WebModeExtractor(
                 try {
                     if (cropped.width < 16 || cropped.height < 16) throw DecodeException()
                     readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
-                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh)
+                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh,
+                        recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
+                        detectorReturned = detectorReturned)
                 } finally { cropped.recycle() }
                 return finishResult()
             }
