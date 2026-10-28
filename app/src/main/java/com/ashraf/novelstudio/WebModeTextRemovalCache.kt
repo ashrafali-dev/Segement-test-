@@ -115,6 +115,13 @@ internal object WebModeTextRemovalCache {
     }
 
     @Synchronized
+    fun storeBlobCleaned(sourceUrl: String, dataUrl: String): Boolean {
+        val identity = WebModeLogic.normalizeUrl(sourceUrl)
+        if (!identity.startsWith("blob:", true)) return false
+        return storeInlineUrl(identity, dataUrl)
+    }
+
+    @Synchronized
     private fun storeInlineUrl(sourceUrl: String, dataUrl: String): Boolean {
         val identity = WebModeLogic.normalizeUrl(sourceUrl)
         if (identity.isBlank() || dataUrl.isBlank() || dataUrl.length > MAX_INLINE_CLEAN_URL_CHARS) return false
@@ -136,7 +143,7 @@ internal object WebModeTextRemovalCache {
 
     @Synchronized
     fun urlFor(sourceUrl: String): String? {
-        // A canvas panel is served from the in-memory table, not the on-disk cache.
+        // Canvas/blob panels are served from the bounded in-memory table, not the on-disk cache.
         inlineUrlFor(sourceUrl)?.let { return it }
         // has() verifies the file is still there, so the overlay never receives a URL whose bytes are gone
         // (that left a broken <img>: no cleaned picture AND no cover box, original lettering showing through).
