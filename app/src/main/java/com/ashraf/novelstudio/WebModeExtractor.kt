@@ -850,9 +850,22 @@ internal class WebModeExtractor(
                 // bytes) was read by a recent job, log it. We deliberately do NOT substitute the earlier OCR here:
                 // the ahead cache is keyed by URL and several distinct Naver panels share one URL string, so
                 // reusing its bubbles attached the wrong geometry to this panel (DECODE_FAILED / wrong text).
+                // What IS reused is the ENGINE-level Lens result, keyed by the bytes themselves: in a Lens run a
+                // DEDUPE_HIT therefore short-circuits to LensCache instead of uploading the identical image again.
                 val prior = recentPanelHash[p.top]
-                if (prior != null && prior.hash == imgHash &&
-                    SystemClock.elapsedRealtime() - prior.atMs < PANEL_HASH_TTL_MS) {
+                val dedupeHit = prior != null && prior.hash == imgHash &&
+                    SystemClock.elapsedRealtime() - prior.atMs < PANEL_HASH_TTL_MS
+                if (dedupeHit && lensParallel) {
+                    val panelScript = ScriptState(script.current)
+                    val fromCache = ArrayList<WmBubble>()
+                    if (lensCacheHit(imgHash, bytes, panelScript.current, p, i, total, texts, fromCache)) {
+                        layouts[i] = fromCache
+                        diag.downloaded++; diag.decoded++; diag.ocrOk++
+                        diag.chars += texts[i].orEmpty().length
+                        continue
+                    }
+                }
+                if (dedupeHit) {
                     OcrDiag.log("DEDUPE_HIT", "panel ${i + 1}/$total top=${p.top} same image as a recent job (re-read)")
                 }
                 recentPanelHash[p.top] = PanelHash(imgHash, SystemClock.elapsedRealtime())
@@ -872,6 +885,8 @@ internal class WebModeExtractor(
                             // Local pre-filter on ITS OWN thread, so ML Kit inference never holds one of the
                             // Lens worker threads (and therefore never delays a network request).
                             val silent = if (req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false
+                                // A user-marked region is already routed through the must-succeed chain
+                                // (UserRegionOcr), which never consults the prefilter.
                                 else prefilterPool.submit(java.util.concurrent.Callable {
                                     scanPrefilterSaysEmpty(bytes, panelScript)
                                 }).get()
@@ -1941,13 +1956,49 @@ internal class WebModeExtractor(
             }
         }
 
+        /**
+         * A DEDUPE_HIT with a populated [LensCache] must not reach the network. The cached blocks are in the
+         * panel's own pixels, so they are written straight into this panel's text/layout slots.
+         *
+         * Returns false (=> caller proceeds to the normal read) when the cache has nothing for these bytes.
+         * A miss is shared through the raw-byte digest alias, so the next job over the identical panel hits.
+         */
+        private fun lensCacheHit(
+            imgHash: String, bytes: ByteArray, script: OcrScript, p: PanelRef,
+            slot: Int, total: Int, texts: Array<String?>, bubbles: MutableList<WmBubble>?
+        ): Boolean {
+            val cached = LensCache.get(imgHash, script) ?: return false
+            if (cached.isEmpty()) return false
+            OcrDiag.log("DEDUPE_HIT", "panel ${slot + 1}/$total top=${p.top} LensCache hit blocks=${cached.size} (no upload)")
+            texts[slot] = cached.joinToString("\n\n") { it.text.trim() }.trim()
+            if (bubbles != null) {
+                // Same conversion readSlice does: geometry in panel pixels / panel size, text as one paragraph.
+                for (b in cached) {
+                    val t = b.text.replace(NEWLINES, " ").trim()
+                    if (t.isBlank()) continue
+                    bubbles.add(WmBubble(
+                        src = p.src,
+                        cx = (b.cx / p.w).coerceIn(0f, 1f), cy = (b.cy / p.h).coerceIn(0f, 1f),
+                        w = (b.w / p.w).coerceIn(0f, 1f), h = (b.h / p.h).coerceIn(0f, 1f),
+                        angle = 0f, font = (b.fontPx / p.w).coerceIn(0f, 1f),
+                        bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(), sourceText = t
+                    ))
+                }
+            }
+            return true
+        }
+
         // ---- decode + OCR. Returns null for images too small to be a panel; no bubbles for a panel without text.
         /**
-         * Cheap local gate for a full scan: ML Kit in fast mode on the panel's own pixels.
+         * Cheap local gate for a full scan: ML Kit in fast mode on the panel's own pixels, checked against how
+         * much ink the panel contains.
          *
-         * Returns true only when a bounded decode succeeded and found no text at all. Anything uncertain
-         * (decode failure, exception, too few pixels) returns false so the panel still goes to Lens — the gate
-         * must never lose text, only skip panels that are certainly empty.
+         * ML Kit being empty is NOT proof the panel is empty: small Korean credits ("작화도움") and tiny
+         * lettering on textured artwork routinely come back empty from ML Kit and are still read by Lens.
+         * So the gate only skips when ML Kit is empty AND the panel has too little ink to be text (see
+         * [edgeDensity]); an ink-rich panel always goes to Lens. Anything uncertain (decode failure, engine not
+         * routing, exception, too few pixels) returns false so the panel is still read. Every decision is
+         * logged so a skipped panel is never a mystery.
          */
         private fun scanPrefilterSaysEmpty(bytes: ByteArray, st: ScriptState): Boolean {
             if (!Prefs.bool(wv.context, "scanLocalPrefilter", true)) return false
@@ -1962,15 +2013,52 @@ internal class WebModeExtractor(
                 bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
                     BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 })
                     ?: return false
-                val r = (engine as? RoutingOcrEngine)?.recognizeLocalFast(bmp, st.current) ?: return false
+                val routing = engine as? RoutingOcrEngine ?: return false
+                val r = routing.recognizeLocalFast(bmp, st.current)
                 val empty = r.blocks.none { it.text.count { c -> c.isLetterOrDigit() } >= 2 }
-                if (empty) OcrDiag.log("PREFILTER", "skip Lens: ML Kit found no text on this panel")
-                empty
+                val density = edgeDensity(bmp, dense = true)
+                // Empty ML Kit + ink present => Lens runs anyway (the prefilter must never lose readable text).
+                val skip = empty && density < PREFILTER_MIN_EDGE_DENSITY
+                OcrDiag.log("PREFILTER_DECISION", "empty_mlkit=$empty edgeDensity=" +
+                    String.format(java.util.Locale.US, "%.2f", density) +
+                    " decision=${if (skip) "skip" else "run_lens"} panel=${w}x$h")
+                skip
             } catch (_: Throwable) {
                 false
             } finally {
                 try { bmp?.recycle() } catch (_: Throwable) {}
             }
+        }
+
+        /**
+         * How much ink (high-contrast edge) the picture holds, normalised to 0..1 of the pixel count.
+         *
+         * Pure integer work on a subsampled grid: it answers "is there anything here that could be text?" and
+         * costs a few ms on a phone. Text panels sit far above 0.01; blank gutters and flat gradients near 0.
+         * [dense] also counts busy texture (art panels), because small lettering on artwork still has edges.
+         */
+        private fun edgeDensity(bmp: Bitmap, dense: Boolean): Float {
+            val step = if (dense) 3 else 6
+            val w = bmp.width; val h = bmp.height
+            if (w < 8 || h < 8) return 0f
+            var edges = 0; var cells = 0
+            var y = step
+            while (y < h) {
+                var x = step
+                while (x < w) {
+                    val c = bmp.getPixel(x, y)
+                    val luma = ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 151 + (c and 0xFF) * 28) shr 8
+                    val left = bmp.getPixel(x - step, y)
+                    val leftL = ((left shr 16 and 0xFF) * 77 + (left shr 8 and 0xFF) * 151 + (left and 0xFF) * 28) shr 8
+                    val up = bmp.getPixel(x, y - step)
+                    val upL = ((up shr 16 and 0xFF) * 77 + (up shr 8 and 0xFF) * 151 + (up and 0xFF) * 28) shr 8
+                    if (Math.abs(luma - leftL) >= PREFILTER_EDGE_STEP || Math.abs(luma - upL) >= PREFILTER_EDGE_STEP) edges++
+                    cells++
+                    x += step
+                }
+                y += step
+            }
+            return if (cells == 0) 0f else edges.toFloat() / cells
         }
 
         private fun ocrBytes(
@@ -2719,6 +2807,13 @@ internal class WebModeExtractor(
             // Lens is a single-pass remote OCR engine, including when it returns no text. Never send
             // the same image through a second audit request; it only adds another upload/cache encode.
             if (lensSelected) {
+                // One retry ONLY when Lens read nothing on a panel that plainly contains ink (small credits,
+                // low-contrast lettering). Same pixels, full quality, 2x upscale: no new information is
+                // invented, and a panel that is genuinely blank is not retried (edge density gate).
+                if (core.blocks.isEmpty() && !fastMode && edgeDensity(bmp, dense = true) >= PREFILTER_MIN_EDGE_DENSITY) {
+                    val retried = secondaryLensPass(bmp, st)
+                    if (retried != null) return retried
+                }
                 // Shonen Jump+ renders manga into CORS-tainted canvases. The viewport screenshot already
                 // contains the whole visible page, while the pixel audit sees artwork/UI edges as uncovered
                 // lettering and previously launched several useless 100x96 Lens requests per scroll.
@@ -2740,6 +2835,34 @@ internal class WebModeExtractor(
                 core
             } catch (_: OutOfMemoryError) {
                 core
+            }
+        }
+
+        /**
+         * Second Lens look at a panel whose first read was empty: full quality (fastMode=false, the longest
+         * network deadline) on a 2x upscale, geometry mapped back to the panel pixels. Returns null when the
+         * retry is unavailable or also empty (the caller then keeps the original empty result).
+         */
+        private fun secondaryLensPass(bmp: Bitmap, st: ScriptState): OcrResult? {
+            if (!alive()) return null
+            var up: Bitmap? = null
+            try {
+                val k = minOf(2f, 3000f / maxOf(bmp.width, bmp.height).coerceAtLeast(1))
+                if (k <= 1.05f) return null
+                up = Bitmap.createScaledBitmap(bmp, (bmp.width * k).toInt().coerceAtLeast(1),
+                    (bmp.height * k).toInt().coerceAtLeast(1), true)
+                val lens = engine as? RoutingOcrEngine ?: return null
+                val r = lens.recognizeFresh(up, st.current, fastMode = false)
+                val letters = r.blocks.sumOf { b -> b.text.count { it.isLetterOrDigit() } }
+                OcrDiag.log("LENS_RETRY", "panel=${bmp.width}x${bmp.height} upscale=${String.format(java.util.Locale.US, "%.1f", k)}x " +
+                    "blocks=${r.blocks.size} letters=$letters")
+                if (letters < 2) return null
+                return scaleBack(r, k)
+            } catch (e: Throwable) {
+                OcrDiag.log("LENS_RETRY", "failed ${e.javaClass.simpleName}: ${e.message?.take(100)}")
+                return null
+            } finally {
+                try { up?.recycle() } catch (_: Throwable) {}
             }
         }
 
@@ -2907,6 +3030,17 @@ internal class WebModeExtractor(
         private const val MIN_W = 120
         private const val MIN_H = 60
         private const val SCREEN_OCR_SOURCE = "__ns_screen_ocr__"
+        /**
+         * Luma step (0..255) that counts as an edge in [edgeDensity]. 48 separates lettering/line art from
+         * flat fills, soft gradients and JPEG noise.
+         */
+        private const val PREFILTER_EDGE_STEP = 48
+        /**
+         * Below this share of edge cells a panel with no ML Kit text is treated as empty and Lens is skipped.
+         * Calibrated conservatively: blank gutters sit under 0.01, any panel with lettering (even two small
+         * credit lines on artwork) sits well above 0.03.
+         */
+        private const val PREFILTER_MIN_EDGE_DENSITY = 0.03f
 
         private fun hostOf(u: String): String =
             u.substringAfter("://", "").substringBefore('/').substringBefore('?').substringBefore(':')

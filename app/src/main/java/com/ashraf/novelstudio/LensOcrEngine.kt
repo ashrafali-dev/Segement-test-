@@ -82,7 +82,7 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
      */
     override fun recognizeFallback(bitmap: Bitmap, script: OcrScript): OcrResult = read(bitmap, script)
 
-    override fun close() { synchronized(cache) { cache.clear() } }
+    override fun close() { synchronized(cache) { cache.clear() }; LensCache.clear() }
 
     // ---------------------------------------------------------------------------------------------
 
@@ -232,6 +232,11 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         Log.i(TAG, "ok lines=${lines.size} sent=${prepared.w}x${prepared.h} bytes=${prepared.jpeg.size} ms=$totalMs")
         Log.i(TAG, "TIMING imageId=${java.lang.Long.toHexString(key)} cacheHit=false prepareMs=$prepareMs keyCacheMs=$keyCacheMs " +
             "payloadBuildMs=$payloadBuildMs networkMs=$networkMs parseMs=$parseMs mapMs=$mapMs totalMs=$totalMs")
+        // Small bounded LRU shared with the scanner: a duplicate panel in a later job can short-circuit without
+        // an upload. Geometry stays in this bitmap's own pixels (the scanner's md5(bytes) is linked as an alias).
+        if (!bypassCache && lines.isNotEmpty()) {
+            LensCache.put(panelSignature(bitmap), LensCache.Entry(lines, bitmap.width, bitmap.height, script))
+        }
         val mergeStart = SystemClock.elapsedRealtime()
         val finished = finish(lines, bitmap, script)
         OcrDiag.log("LENS_MERGE", "mergeNeighbours ms=${SystemClock.elapsedRealtime() - mergeStart} blocksIn=${lines.size} blocksOut=${finished.blocks.size} " +
@@ -402,6 +407,13 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
     }
 
     /** Cheap, compression-stable fingerprint: 8x8 binary luma sampled on a coarse grid. */
+    /** 32x32 luma signature of a panel (the key of the shared [LensCache]). */
+    private fun panelSignature(bmp: Bitmap): String =
+        LensCache.signatureOf(bmp.width, bmp.height) { x, y ->
+            val c = bmp.getPixel(x, y)
+            ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 151 + (c and 0xFF) * 28) shr 8
+        }
+
     private fun coarseSignature(bmp: Bitmap): Long {
         val px = IntArray(8 * 8)
         val stepX = (bmp.width / 8).coerceAtLeast(1)
