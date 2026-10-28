@@ -85,6 +85,11 @@ dependencies {
     // ONNX Runtime: runs the optional speech-bubble/text detector (BubbleDetector) and the optional LaMa inpainter.
     // OCR itself is ML Kit (above) or Google Lens; there is no downloadable OCR engine any more.
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.21.1'
+
+    // MI-GAN LiteRT/TFLite fp16 inpainting model. Use the GPU delegate when available;
+    // the model is downloaded on demand, not packaged into the APK.
+    implementation 'org.tensorflow:tensorflow-lite:2.17.0'
+    implementation 'org.tensorflow:tensorflow-lite-gpu:2.17.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
     testImplementation 'junit:junit:4.13.2'
