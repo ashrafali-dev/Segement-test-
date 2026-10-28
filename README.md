@@ -1,6 +1,10 @@
 <div align="center">
 
-# Novel Studio — Reading & Translation Overlay
+# ToonSensei — Novel, Manga & Webtoon Translator
+
+**Read Beyond Languages.**
+
+*Translate novels, manga & webtoons using your favorite AI websites.*
 
 [English](README.md) · [বাংলা](README_bn.md)
 
@@ -8,11 +12,11 @@
 
 ---
 
-## What is Novel Studio?
+## What is ToonSensei?
 
-Novel Studio is an Android reading app that works as a middleman between the page you are reading and the AI chatbot you choose. For web novels, it can extract chapter text from the page and send it to the chatbot for translation. For image-based webtoons and manga, it can use OCR to recognize text in the images, send that text through the translation workflow, and place the translated result back over the original page. The idea is simple: keep reading on the page you already use while Novel Studio handles the steps between the source text and its translation.
+ToonSensei is an Android reading app that works as a middleman between the page you are reading and the AI chatbot you choose. For web novels, it can extract chapter text from the page and send it to the chatbot for translation. For image-based webtoons and manga, it can use OCR to recognize text in the images, send that text through the translation workflow, and place the translated result back over the original page. The idea is simple: keep reading on the page you already use while ToonSensei handles the steps between the source text and its translation.
 
-Novel Studio uses a chatbot's web interface rather than shipping its own general-purpose translation model. It does not host or redistribute the website's original chapters. Some features can save translated text locally, such as the translation library.
+ToonSensei uses a chatbot's web interface rather than shipping its own general-purpose translation model. It does not host or redistribute the website's original chapters. Some features can save translated text locally, such as the translation library.
 
 ## What it can do
 
@@ -41,7 +45,7 @@ The results and available controls depend on the website, the selected mode, and
 ## The four main modes
 
 ### 1. Novel
-Made for text-based web novels, including Chinese, Korean, and Japanese novels. Novel Studio extracts chapter text from the reader page and sends it to the chatbot you choose so you can read the story in your target language. **Auto Ahead** can prepare the next **7 chapters** in advance, where the site and settings support it.
+Made for text-based web novels, including Chinese, Korean, and Japanese novels. ToonSensei extracts chapter text from the reader page and sends it to the chatbot you choose so you can read the story in your target language. **Auto Ahead** can prepare the next **7 chapters** in advance, where the site and settings support it.
 
 ### 2. Scanning
 Scans a chapter's image panels in one pass and prepares the chapter for translated reading, rather than making you handle each panel separately. In the developer's tests, a Fast Scan run processed **64 panels in 52 seconds**; chapter size, phone resources, and other conditions affect the time.
@@ -54,13 +58,49 @@ Designed for phones with limited RAM. Like Real-Time, it works with the visible 
 
 
 
+## Screenshots
+
+These screenshots show ToonSensei in use for text-based novels and image-based webtoons/manga.
+
+### Novel reading,webtoon&manga translation
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_052425.jpg" alt="Novel reading and translation 1" width="220" />
+  <img src="docs/screenshots/Screenshot_20261025_065845.jpg" alt="Novel reading and translation 2" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_071827.jpg" alt="Novel reading and translation 3" width="220" />
+  <img src="docs/screenshots/Screenshot_20261025_100050.jpg" alt="Novel reading and translation 4" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261025_201219.jpg" alt="Novel reading and translation 5" width="220" />
+</p>
+
+
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261026_210736.jpg" alt="Webtoon and manga translation 1" width="220" />
+  <img src="docs/screenshots/Screenshot_20261026_210830.jpg" alt="Webtoon and manga translation 2" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261026_211501.jpg" alt="Webtoon and manga translation 3" width="220" />
+  <img src="docs/screenshots/Screenshot_20261026_212350.jpg" alt="Webtoon and manga translation 4" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261027_161510_Video%20Player.jpg" alt="Webtoon and manga translation 5" width="220" />
+  <img src="docs/screenshots/Screenshot_20261027_161539_Video%20Player.jpg" alt="Webtoon and manga translation 6" width="220" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/Screenshot_20261027_161601_Video%20Player.jpg" alt="Webtoon and manga translation 7" width="220" />
+  <img src="docs/screenshots/Screenshot_20261027_162357.jpg" alt="Webtoon and manga translation 8" width="220" />
+</p>
+
 ## How it works
 
-**For a web novel:** Novel Studio reads the chapter text available from the reader page, sends it to the selected chatbot, and then places or saves the translated result.
+**For a web novel:** ToonSensei reads the chapter text available from the reader page, sends it to the selected chatbot, and then places or saves the translated result.
 
-**For an image-based chapter:** Novel Studio reads the page images or visible screen area, runs OCR to identify text and its position, sends the extracted text through the translation workflow, and renders the translated text over the corresponding areas. OCR and translation are separate steps: recognizing the source text correctly does not automatically guarantee a perfect translation.
+**For an image-based chapter:** ToonSensei reads the page images or visible screen area, runs OCR to identify text and its position, sends the extracted text through the translation workflow, and renders the translated text over the corresponding areas. OCR and translation are separate steps: recognizing the source text correctly does not automatically guarantee a perfect translation.
 
-Novel Studio does not require a Novel Studio-specific AI API key for its web-chatbot workflow. You use the chatbot website configured in the app; that service's own sign-in requirements, access rules, and usage limits still apply.
+ToonSensei does not require a ToonSensei-specific AI API key for its web-chatbot workflow. You use the chatbot website configured in the app; that service's own sign-in requirements, access rules, and usage limits still apply.
 
 ## OCR languages and reader-reported results
 
@@ -113,4 +153,4 @@ The original project source code is licensed under the [MIT License](LICENSE). T
 
 ---
 
-Novel Studio is intended as a reading aid. Please respect the terms of the websites you use and the authors who create the original work.
+ToonSensei is intended as a reading aid. Please respect the terms of the websites you use and the authors who create the original work.
