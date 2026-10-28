@@ -155,7 +155,10 @@ internal class ManualExtractPipeline(
         if (live.isEmpty()) return emptyList()
         val allRects = live.map { com.ashraf.novelstudio.WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
         val groups = com.ashraf.novelstudio.BubbleGrouping.groups(live, live.indices.toList()) { a, b ->
-            try { com.ashraf.novelstudio.OcrPost.outlineBetween(bmp, a, b) } catch (_: Throwable) { false }
+            try {
+                com.ashraf.novelstudio.OcrPost.outlineBetween(bmp, a, b) ||
+                    com.ashraf.novelstudio.OcrPost.outlineCrossing(bmp, a, b, live)
+            } catch (_: Throwable) { false }
         }
         val ordered = groups.map { g -> g.sortedWith(compareBy({ live[it].cy }, { live[it].cx })) }
             .sortedWith(compareBy({ g -> live[g.first()].cy }, { g -> live[g.first()].cx }))
