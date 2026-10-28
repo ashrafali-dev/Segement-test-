@@ -119,35 +119,35 @@ class WebModePartialAlignmentTest {
     private fun layout(n: Int = 3) = WebModeLayout(0, (1..n).map { bubble("source $it", it) })
 
     @Test fun blankMarkerDoesNotDiscardOtherTranslations() {
-        val aligned = WebModeLayout.align("[001] হ্যালো\\n\\n[002]   \\n\\n[003] কেমন আছো", layout())
+        val aligned = WebModeLayout.align("[001] হ্যালো\n\n[002]   \n\n[003] কেমন আছো", layout())
         assertEquals(listOf("হ্যালো", null, "কেমন আছো"), aligned)
     }
 
     @Test fun omittedMarkerLeavesItsOwnSlotEmptyWithoutShiftingLaterAnswers() {
-        val aligned = WebModeLayout.align("[001] প্রথম\\n\\n[003] তৃতীয়", layout())
+        val aligned = WebModeLayout.align("[001] প্রথম\n\n[003] তৃতীয়", layout())
         assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
     }
 
     @Test fun outOfOrderMarkersStillMapByTheirExplicitIds() {
-        val aligned = WebModeLayout.align("[003] তৃতীয়\\n\\n[001] প্রথম", layout())
+        val aligned = WebModeLayout.align("[003] তৃতীয়\n\n[001] প্রথম", layout())
         assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
     }
 
     @Test fun duplicateMarkerOnlyInvalidatesThatAmbiguousSlot() {
         val aligned = WebModeLayout.align(
-            "[001] প্রথম উত্তর\\n\\n[001] অন্য উত্তর\\n\\n[002] দ্বিতীয়\\n\\n[003] তৃতীয়",
+            "[001] প্রথম উত্তর\n\n[001] অন্য উত্তর\n\n[002] দ্বিতীয়\n\n[003] তৃতীয়",
             layout()
         )
         assertEquals(listOf(null, "দ্বিতীয়", "তৃতীয়"), aligned)
     }
 
     @Test fun tildePlaceholderDoesNotDiscardOtherTranslations() {
-        val aligned = WebModeLayout.align("[001] প্রথম\\n\\n[002] ~\\n\\n[003] তৃতীয়", layout())
+        val aligned = WebModeLayout.align("[001] প্রথম\n\n[002] ~\n\n[003] তৃতীয়", layout())
         assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
     }
 
     @Test fun allEmptyEntriesAreRejectedRatherThanReportedAsSuccess() {
-        assertNull(WebModeLayout.align("[001]\\n\\n[002]\\n\\n[003] ~", layout()))
+        assertNull(WebModeLayout.align("[001]\n\n[002]\n\n[003] ~", layout()))
     }
 }
 
