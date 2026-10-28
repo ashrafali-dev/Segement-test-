@@ -17,7 +17,7 @@ class WebModeLayoutTest {
         b("where are you going", 0.3f, 0.2f), b("I have to leave now", 0.7f, 0.4f), b("please wait for me", 0.4f, 0.7f))
 
     @Test fun canvasLifecycleIsSelectedByCanvasSourceNotHost() {
-        assertTrue(WebModeLayoutStore.hasCanvasSources(WebModeLayout(0, pageA)))
+        assertTrue(WebModeLayoutStore.hasCanvasSources(WebModeLayout(0, markerBubbles)))
         val ordinaryImageLayout = WebModeLayout(0, pageA.map {
             it.copy(src = "https://cdn.example.test/manga/page-1.jpg")
         })
@@ -91,6 +91,12 @@ class WebModeSamePositionTest {
         WmBubble(src = src, cx = cx, cy = cy, w = w, h = h, angle = 0f, font = 0.01f,
             bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(), sourceText = "x")
 
+    private val markerBubbles = listOf(
+        b(0.30f, 0.20f, 0.22f, 0.10f).copy(sourceText = "first"),
+        b(0.70f, 0.50f, 0.22f, 0.10f).copy(sourceText = "second"),
+        b(0.45f, 0.80f, 0.22f, 0.10f).copy(sourceText = "third")
+    )
+
     @Test fun twoBubblesOneUnderTheOtherOnATallStripAreNotTheSame() {
         // 12000 px tall strip: 0.009 of the height is ~108 px. The old fixed 0.012 tolerance called these "the same".
         assertFalse(WebModeLayoutStore.samePosition(b(0.5f, 0.500f, 0.6f, 0.008f), b(0.5f, 0.509f, 0.6f, 0.008f)))
@@ -105,14 +111,14 @@ class WebModeSamePositionTest {
     }
 
     @Test fun malformedExplicitMarkerIsNeverPlacedByParagraphFallback() {
-        val layout = WebModeLayout(0, pageA)
+        val layout = WebModeLayout(0, markerBubbles)
         assertEquals(null, WebModeLayout.align("[999] not safe to guess", layout))
     }
 
     @Test fun duplicateMarkerLeavesOnlyItsAmbiguousBubbleUntranslated() {
-        val layout = WebModeLayout(0, pageA)
+        val layout = WebModeLayout(0, markerBubbles)
         val placed = WebModeLayout.align(
-            "[001] first translation\\n[001] ambiguous second\\n[003] third translation",
+            "[001] first translation\n[001] ambiguous second\n[003] third translation",
             layout
         )
         assertEquals("first translation", placed?.get(0))
