@@ -231,10 +231,426 @@ class MainActivity : Activity() {
         requestForceOcrArea(src, x, y, rw, rh)
     }
 
+    // ---- Manual extract: active while Auto Real-time OCR is off (menu ⚡ row) -------------------------------
+    // Turning "Auto Real-time OCR" off does not disable real-time mode; it switches one-tap crop extracts on.
+    private fun manualExtractOn(): Boolean = !Prefs.bool(this, "rtAutoOcrEnabled", true)
+
+    private fun manualExtractScript(): OcrScript = when (Prefs.get(this, "ocrLang", "auto")) {
+        "ko" -> OcrScript.KOREAN
+        "ja" -> OcrScript.JAPANESE
+        "zh" -> OcrScript.CHINESE
+        "en" -> OcrScript.LATIN
+        else -> WebModeLogic.pickScript("auto", novelWv.url.orEmpty())
+    }
+
+    /**
+     * Crop [x,y,w,h] (fractions of the source image) out of [full] as an independent bitmap.
+     * Always a copy: createBitmap(src,...) shares pixels with src, and recycling src then killed the crop.
+     */
+    private fun cropFraction(full: android.graphics.Bitmap, x: Float, y: Float, w: Float, h: Float): android.graphics.Bitmap {
+        val l = (x.coerceIn(0f, 1f) * full.width).toInt().coerceIn(0, full.width - 1)
+        val t = (y.coerceIn(0f, 1f) * full.height).toInt().coerceIn(0, full.height - 1)
+        val r = ((x + w).coerceIn(0f, 1f) * full.width).toInt().coerceIn(l + 1, full.width)
+        val b = ((y + h).coerceIn(0f, 1f) * full.height).toInt().coerceIn(t + 1, full.height)
+        return android.graphics.Bitmap.createBitmap(full, l, t, r - l, b - t)
+            .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+    }
+
+    /** Run [js] in the page and wait (bounded) for its value; returns null when the page does not answer. */
+    private fun evaluateJavascriptSync(js: String, timeoutMs: Long): String? {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var out: String? = null
+        handler.post {
+            try {
+                novelWv.evaluateJavascript(js) { raw ->
+                    out = decode(raw)
+                    latch.countDown()
+                }
+            } catch (_: Throwable) { latch.countDown() }
+        }
+        return try {
+            if (latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) out else null
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
+    }
+
+    /**
+     * Draw the WebView into [bitmap] with every app-owned overlay temporarily hidden.
+     *
+     * A manual recovery must read the ORIGINAL pixels: the translation bubbles, cover boxes and the cleaned
+     * image layer are composited over the artwork, so drawing with them visible makes OCR read our own
+     * translation back. The overlays are hidden in the page, the WebView is drawn, and the overlays are
+     * restored in a `finally` — so a crash inside `draw()` cannot leave the reader with a blank image.
+     *
+     * @return true when the WebView was actually drawn.
+     */
+    private fun drawWebViewWithoutOverlays(bitmap: android.graphics.Bitmap): Boolean {
+        val hide = evaluateJavascriptSync(
+            com.ashraf.novelstudio.manualextract.ManualCaptureOverlays.hideScript, 800L
+        )
+        val hidden = hide?.startsWith("hid:") == true
+        if (!hidden) OcrDiag.log("MANUAL", "capture: overlay hide unavailable (${hide?.take(40)}); drawing as-is")
+        try {
+            // Draw on the main thread and WAIT for it, so the restore below can never run before the pixels
+            // are taken (a posted-but-unfinished draw followed by a restore would re-paint the overlays on the
+            // page and the capture would read the translations again).
+            val drawnLatch = java.util.concurrent.CountDownLatch(1)
+            var drawn = false
+            handler.post {
+                try {
+                    novelWv.draw(android.graphics.Canvas(bitmap))
+                    drawn = true
+                } catch (e: Throwable) {
+                    OcrDiag.log("MANUAL", "capture: WebView draw failed ${e.javaClass.simpleName}")
+                } finally { drawnLatch.countDown() }
+            }
+            try { drawnLatch.await(1800, java.util.concurrent.TimeUnit.MILLISECONDS) }
+            catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            return drawn
+        } finally {
+            // Guaranteed restore even when draw() threw: leaving overlays hidden would blank every translation.
+            val restore = evaluateJavascriptSync(
+                com.ashraf.novelstudio.manualextract.ManualCaptureOverlays.restoreScript, 800L
+            )
+            OcrDiag.log("MANUAL", "capture: overlays restore=${restore?.take(40)} hidden=$hidden")
+        }
+    }
+
+    /**
+     * Last-resort capture for manual extract: draw the WebView and crop the region that covers the tapped
+     * image. Used when the page's image was never intercepted (memory cache, lazy loader, blocked host), which
+     * is exactly the case where the bytes cache is empty and manual mode used to fail with nothing on screen.
+     *
+     * Deliberately its own path: it never starts a WebMode job, never scrolls, and returns null rather than
+     * widening to a whole-panel OCR when the image is not on screen.
+     */
+    private fun captureManualRegionLive(
+        src: String, x: Float, y: Float, w: Float, h: Float
+    ): android.graphics.Bitmap? {
+        // Ask the page where this image sits on screen (CSS px), so the drawn viewport can be cropped exactly.
+        val js = "(function(){var t=${JSONObject.quote(WebModeLogic.normalizeUrl(src))};" +
+            "var ims=document.images;for(var i=0;i<ims.length;i++){var im=ims[i];" +
+            "var s=im.currentSrc||im.src||'';if(s!==t)continue;var r=im.getBoundingClientRect();" +
+            "return JSON.stringify({l:r.left,t:r.top,w:r.width,h:r.height,vw:window.innerWidth||0,vh:window.innerHeight||0});}" +
+            "return 'null';})()"
+        var rect: JSONObject? = null
+        try {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            handler.post {
+                try {
+                    novelWv.evaluateJavascript(js) { raw ->
+                        rect = try { JSONObject(decode(raw)) } catch (_: Exception) { null }
+                        latch.countDown()
+                    }
+                } catch (_: Throwable) { latch.countDown() }
+            }
+            if (!latch.await(1200, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                OcrDiag.log("MANUAL", "live capture: page did not answer the image-rect probe")
+                return null
+            }
+        } catch (e: Throwable) {
+            OcrDiag.log("MANUAL", "live capture: probe failed ${e.javaClass.simpleName}")
+            return null
+        }
+        val r = rect
+        if (r == null || r.optDouble("w", 0.0) < 8.0 || r.optDouble("vw", 0.0) <= 0.0) {
+            OcrDiag.log("MANUAL", "live capture: tapped image is not on screen (scrolled away or not loaded)")
+            return null
+        }
+        val vw = r.optDouble("vw").toFloat()
+        val vh = r.optDouble("vh").toFloat()
+        // Draw the WebView on the main thread with app overlays hidden; draw() keeps the page's own pixels.
+        val cw = novelWv.width; val ch = novelWv.height
+        if (cw <= 0 || ch <= 0) {
+            OcrDiag.log("MANUAL", "live capture: WebView has no size")
+            return null
+        }
+        val view = try {
+            val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+            b.eraseColor(android.graphics.Color.WHITE)
+            if (!drawWebViewWithoutOverlays(b)) { b.recycle(); null } else b
+        } catch (_: Throwable) { null }
+        if (view == null) {
+            OcrDiag.log("MANUAL", "live capture: WebView draw returned nothing")
+            return null
+        }
+        try {
+            // draw() only contains the WebView, so our own buttons cannot be in here — but a WebView drawn
+            // under a native overlay can still show that overlay if it is a sibling composited above. Mask the
+            // app's own floating controls anyway: they are never comic lettering, and the 6-dot button sits
+            // right where a bubble often is.
+            maskNativeControls(view)
+            val k = if (vw > 0f) view.width / vw else 1f
+            val il = r.optDouble("l").toFloat() * k
+            val it = r.optDouble("t").toFloat() * k
+            val iw = r.optDouble("w").toFloat() * k
+            val ih = r.optDouble("h").toFloat() * k
+            // The requested crop is a fraction OF THE IMAGE; convert to a fraction of the drawn viewport.
+            val cx = il + x.coerceIn(0f, 1f) * iw
+            val cy = it + y.coerceIn(0f, 1f) * ih
+            val cw = (w.coerceAtLeast(0.01f) * iw)
+            val chh = (h.coerceAtLeast(0.01f) * ih)
+            val l = cx.coerceIn(0f, view.width - 2f).toInt()
+            val t = cy.coerceIn(0f, view.height - 2f).toInt()
+            val rr = (cx + cw).coerceIn(l + 2f, view.width.toFloat()).toInt()
+            val bb = (cy + chh).coerceIn(t + 2f, view.height.toFloat()).toInt()
+            OcrDiag.log("MANUAL", "live capture ok view=${view.width}x${view.height} img=${iw.toInt()}x${ih.toInt()} crop=${rr - l}x${bb - t}")
+            return android.graphics.Bitmap.createBitmap(view, l, t, rr - l, bb - t)
+                .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        } catch (e: Throwable) {
+            OcrDiag.log("MANUAL", "live capture: crop failed ${e.javaClass.simpleName}: ${e.message?.take(70)}")
+            return null
+        } finally {
+            view.recycle()
+        }
+    }
+
+    /**
+     * Paint over the app's own floating controls in a captured frame.
+     *
+     * These are native views (the 6-dot re-scan button, Extract, the progress chip). They must never reach OCR:
+     * a box drawn on top of a bubble hides lettering, and their own labels came back as "text" in past reports.
+     * Colours are sampled from just outside each rect so the mask matches the page behind it.
+     */
+    private fun maskNativeControls(bmp: android.graphics.Bitmap) {
+        val targets = listOfNotNull(reOcrBtn, if (::extractBtn.isInitialized) extractBtn else null)
+            .filter { it.isShown && it.width > 0 && it.height > 0 }
+        if (targets.isEmpty()) return
+        val loc = IntArray(2)
+        val wvLoc = IntArray(2)
+        novelWv.getLocationInWindow(wvLoc)
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint()
+        for (v in targets) {
+            v.getLocationInWindow(loc)
+            val l = loc[0] - wvLoc[0]
+            val t = loc[1] - wvLoc[1]
+            val r = l + v.width
+            val b = t + v.height
+            if (r <= 0 || b <= 0 || l >= bmp.width || t >= bmp.height) continue
+            val x0 = l.coerceAtLeast(0); val y0 = t.coerceAtLeast(0)
+            val x1 = r.coerceAtMost(bmp.width); val y1 = b.coerceAtMost(bmp.height)
+            if (x1 - x0 < 2 || y1 - y0 < 2) continue
+            // Sample the page colour a little outside the control so the cover blends in.
+            val sx = ((x0 + x1) / 2).coerceIn(0, bmp.width - 1)
+            val sy = (y1 + 4).coerceIn(0, bmp.height - 1)
+            paint.color = try { bmp.getPixel(sx, sy) } catch (_: Throwable) { android.graphics.Color.WHITE }
+            canvas.drawRect(x0.toFloat(), y0.toFloat(), x1.toFloat(), y1.toFloat(), paint)
+        }
+        OcrDiag.log("MANUAL", "live capture: masked ${targets.size} native control(s)")
+    }
+
+    /**
+     * Crop the user's 6-dot frame straight out of the live WebView (fractions of the view).
+     *
+     * This is the path used when the frame does not cover a <img> — canvas readers, background-image panels,
+     * or a box drawn over page art. It is the user's explicit selection, so nothing is filtered out first.
+     */
+    private fun captureManualRegionFromView(fx0: Float, fy0: Float, fx1: Float, fy1: Float): android.graphics.Bitmap? {
+        val cw = novelWv.width; val ch = novelWv.height
+        if (cw <= 0 || ch <= 0) {
+            OcrDiag.log("MANUAL", "frame capture: WebView has no size")
+            return null
+        }
+        // The frame is a deliberate recovery of what the page really shows: hide our translation/cover/clean
+        // layers or the crop contains our own output, whatever the user framed.
+        val v = try {
+            val b = android.graphics.Bitmap.createBitmap(cw, ch, android.graphics.Bitmap.Config.ARGB_8888)
+            b.eraseColor(android.graphics.Color.WHITE)
+            if (!drawWebViewWithoutOverlays(b)) { b.recycle(); null } else b
+        } catch (_: Throwable) { null }
+        if (v == null) {
+            OcrDiag.log("MANUAL", "frame capture: WebView draw returned nothing")
+            return null
+        }
+        try {
+            maskNativeControls(v)
+            val l = (fx0.coerceIn(0f, 1f) * v.width).toInt().coerceIn(0, v.width - 2)
+            val t = (fy0.coerceIn(0f, 1f) * v.height).toInt().coerceIn(0, v.height - 2)
+            val r = (fx1.coerceIn(0f, 1f) * v.width).toInt().coerceIn(l + 2, v.width)
+            val b = (fy1.coerceIn(0f, 1f) * v.height).toInt().coerceIn(t + 2, v.height)
+            OcrDiag.log("MANUAL", "frame capture ok view=${v.width}x${v.height} crop=${r - l}x${b - t}")
+            return android.graphics.Bitmap.createBitmap(v, l, t, r - l, b - t)
+                .copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        } catch (e: Throwable) {
+            OcrDiag.log("MANUAL", "frame capture: crop failed ${e.javaClass.simpleName}: ${e.message?.take(70)}")
+            return null
+        } finally {
+            v.recycle()
+        }
+    }
+
+    /**
+     * Best-effort image URL for the overlay anchor under a frame: the largest image overlapping it, else the
+     * first one in the document. Returns null when the page has no <img> there at all.
+     */
+    private fun nearbyImageSource(fx0: Float, fy0: Float, fx1: Float, fy1: Float): String? {
+        val js = "(function(a,b,c,d){var vw=window.innerWidth||0,vh=window.innerHeight||0," +
+            "L=a*vw,T=b*vh,R=c*vw,B=d*vh,best='',ba=0,first='',ims=document.images;" +
+            "for(var i=0;i<ims.length;i++){var im=ims[i],s=im.currentSrc||im.src||'';if(!s)continue;" +
+            "if(!first)first=s;var r=im.getBoundingClientRect();" +
+            "var il=Math.max(L,r.left),it=Math.max(T,r.top),ir=Math.min(R,r.right),ib=Math.min(B,r.bottom);" +
+            "if(ir<=il||ib<=it)continue;var ar=(ir-il)*(ib-it);if(ar>ba){ba=ar;best=s;}}" +
+            "return best||first;})($fx0,$fy0,$fx1,$fy1)"
+        var out: String? = null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        handler.post {
+            try {
+                novelWv.evaluateJavascript(js) { raw ->
+                    out = decode(raw).takeIf { it.isNotBlank() }
+                    latch.countDown()
+                }
+            } catch (_: Throwable) { latch.countDown() }
+        }
+        try { latch.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
+        return out
+    }
+
+    /**
+     * Run the manual pipeline on an already-captured bitmap (no second screenshot, no image lookup).
+     * [src] is the image the ovelay anchors to; without it the writer hides the bubble entirely.
+     */
+    private fun startManualExtractOnBitmap(src: String, bmp: android.graphics.Bitmap) {
+        OcrDiag.setMode("manual")
+        com.ashraf.novelstudio.manualextract.ManualExtractHost.startOnBitmap(this, src, bmp, manualExtractScript())
+    }
+
+    /** Installs the manual-extract host: capture a crop of the tapped image; translate+place via the built-in mask. */
+    private fun installManualExtractHost() {
+        com.ashraf.novelstudio.manualextract.ManualExtractHost.install(
+            capture = { src, x, y, w, h ->
+                // Every early return here used to be silent, which made a failed manual tap look like a dead menu.
+                val key = WebModeLogic.normalizeUrl(src)
+                if (key.isBlank()) {
+                    OcrDiag.log("MANUAL", "capture: blank image url (src=${src.take(80)})")
+                    return@install null
+                }
+                val bytes = ImageTap.get(key)
+                if (bytes == null) {
+                    // Expected in manual-only reading: nothing guarantees this page's images were intercepted.
+                    // Read the pixels the user is looking at instead of giving up.
+                    OcrDiag.log("MANUAL", "capture: no cached bytes for ${key.take(110)} -> live WebView capture")
+                    return@install captureManualRegionLive(src, x, y, w, h)
+                }
+                val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (full == null) {
+                    OcrDiag.log("MANUAL", "capture: decode failed ${bytes.size}B -> live WebView capture")
+                    return@install captureManualRegionLive(src, x, y, w, h)
+                }
+                try {
+                    val out = cropFraction(full, x, y, w, h)
+                    OcrDiag.log("MANUAL", "capture ok image=${full.width}x${full.height} crop=${out.width}x${out.height}")
+                    out
+                } catch (e: Throwable) {
+                    OcrDiag.log("MANUAL", "capture: crop failed ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+                    null
+                } finally { full.recycle() }
+            },
+            translateAndPlace = { bubble, text, _script, onDone ->
+                handler.post {
+                    val url = cleanUrl(novelWv.url.orEmpty())
+                    if (url.isBlank()) { onDone(""); return@post }
+                    val chapter = Chapter(
+                        title = "", text = text, next = null, prev = null, url = url,
+                        novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
+                        number = "", contentSel = ""
+                    )
+                    // Same rule as translateAndPlaceAll: the page keys the layout, the bubble is anchored to
+                    // the image it came from so the overlay can actually draw it.
+                    val imageSrc = WebModeLogic.normalizeUrl(bubble.src)
+                    val anchored = if (imageSrc.isBlank()) bubble else bubble.copy(src = imageSrc)
+                    val layout = WebModeLayout(0, listOf(anchored))
+                    WebModeLayoutStore.setScan(url, layout)
+                    // One tap = one translation. Deliberately NOT registerRealtimeBatch here: that marks the
+                    // chapter as a realtime batch, and the realtime loop then keeps re-reading panels as the
+                    // user scrolls. Manual mode is supposed to stay idle until the next tap — the auto-scan it
+                    // started was what pushed memory over the edge (WebView renderer killed at 11/192 MB).
+                    handleChapter(chapter, useSavedTranslation = false)
+                    onDone("")
+                }
+            },
+            translateAndPlaceAll = { bubbles, prompt, _script, onDone ->
+                handler.post {
+                    val url = cleanUrl(novelWv.url.orEmpty())
+                    if (url.isBlank()) { onDone(emptyList()); return@post }
+                    if (bubbles.isEmpty()) { onDone(emptyList()); return@post }
+                    // `url` is the PAGE and keys the saved layout. Each bubble must additionally be anchored to
+                    // the IMAGE it was read from, which is the only thing the overlay can draw on. Before this,
+                    // Manual Lite passed the page URL as the anchor, the writer found no <img> for it and the
+                    // translation was never drawn — which read as "text and bubble land in the wrong place".
+                    val anchored = bubbles.mapNotNull { b ->
+                        val imageSrc = WebModeLogic.normalizeUrl(b.src)
+                        if (imageSrc.isBlank()) null else b.copy(src = imageSrc)
+                    }
+                    if (anchored.isEmpty()) {
+                        OcrDiag.log("MANUAL", "place: no image anchor for ${bubbles.size} bubble(s); src=${bubbles.firstOrNull()?.src?.take(80)}")
+                        onDone(emptyList())
+                        return@post
+                    }
+                    // The whole selection goes to the chatbot as ONE marked request (markers number the bubbles
+                    // directly), so three bubbles on screen become three separately placed translations instead
+                    // of one block. Same rule as above: no realtime batch registration, the mode stays idle.
+                    val layout = WebModeLayout(0, anchored)
+                    WebModeLayoutStore.setScan(url, layout)
+                    val chapter = Chapter(
+                        title = "", text = prompt, next = null, prev = null, url = url,
+                        novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
+                        number = "", contentSel = ""
+                    )
+                    OcrDiag.log("MANUAL", "place: page=${url.take(80)} anchored=${
+                        anchored.groupingBy { it.src }.eachCount().entries.joinToString(",") { (s, n) -> "${s.take(60)}=$n" }
+                    }")
+                    handleChapter(chapter, useSavedTranslation = false)
+                    // Placement is driven by applyTranslation once the chatbot answers; the caller only needs
+                    // to know the request started.
+                    onDone(emptyList())
+                }
+            },
+            detectPage = { src ->
+                // Detector masks must come from the whole page image: a crop-only detection binds the mask to
+                // a throwaway bitmap, so the balloon outline never reaches the page. Reuses the same cached
+                // image bytes the capture path reads and the same enabled check the realtime scan uses.
+                val key = WebModeLogic.normalizeUrl(src)
+                if (key.isBlank() || !BubbleDetector.enabled(this)) null
+                else try {
+                    val bytes = ImageTap.get(key) ?: return@install null
+                    val full = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        ?: return@install null
+                    try {
+                        BubbleDetector.detect(this, full)?.also { dets ->
+                            OcrDiag.log("MANUAL", "detect: full image=${full.width}x${full.height} dets=${dets.size} masks=${dets.count { it.mask != null }} status=${BubbleDetector.lastInfo}")
+                        }
+                    } finally { full.recycle() }
+                } catch (e: Throwable) {
+                    OcrDiag.log("MANUAL", "detect: ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+                    null
+                }
+            },
+            pageSize = { src ->
+                // Header-only decode: no full bitmap, so asking for the size never doubles peak memory.
+                val key = WebModeLogic.normalizeUrl(src)
+                val bytes = if (key.isBlank()) null else ImageTap.get(key)
+                if (bytes == null) null else try {
+                    val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                    if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
+                } catch (_: Throwable) { null }
+            },
+            onFailure = { reason -> handler.post { toast(reason) } }
+        )
+    }
+
     private fun requestForceOcrArea(
         src: String, x: Float, y: Float, w: Float, h: Float,
         fromReOcr: Boolean = false, expanded: Boolean = false, onFinished: (() -> Unit)? = null
     ) {
+        // Manual mode (Auto Real-time OCR off): one tap = one lean crop-only run, no realtime pipeline.
+        if (manualExtractOn()) {
+            com.ashraf.novelstudio.manualextract.ManualExtractHost.start(this, src, x, y, w, h, manualExtractScript())
+            return
+        }
         if (!webModeOn()) {
             toast("🔎 Area re-scan needs Scanning or Real-time mode")
             return
@@ -265,6 +681,12 @@ class MainActivity : Activity() {
         val rh = (bottom - ry).coerceIn(0.006f, 1f - ry)
         val region = WebModeOcrRegion(rx, ry, rw, rh)
         val source = WebModeLogic.normalizeUrl(src)
+        val currentHost = android.net.Uri.parse(url).host.orEmpty().lowercase().removePrefix("www.")
+        // Shonen Jump+ exposes link-slot promo images alongside its canvas-rendered manga. A tap/overlay
+        // can resolve to that unrelated 430x614 asset; applying manga coordinates to it yields page-header OCR.
+        // When that exact asset family is selected, ignore its URL/crop and OCR the visible WebView viewport.
+        val forceScreenOcr = (currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")) &&
+            source.lowercase().contains("/public/uploaded-content/link_slo")
         val token = navToken
 
         aheadOcrHandle?.cancel()
@@ -273,7 +695,7 @@ class MainActivity : Activity() {
         aheadOcrStage = ""
         aheadOcrPct = -1
         webModePct = 1
-        webModeStage = "Force OCR [b3]: selected area"
+        webModeStage = if (forceScreenOcr) "Force OCR: reading visible manga screen" else "Force OCR [b3]: selected area"
         updateProgressUi()
         webModeHandle = webMode.start(WebModeRequest(
             webView = novelWv,
@@ -342,8 +764,9 @@ class MainActivity : Activity() {
                 }
                 onFinished?.invoke()
             },
-            forceOcrSrc = source,
-            forceOcrRegion = region
+            forceOcrSrc = if (forceScreenOcr) null else source,
+            forceOcrRegion = if (forceScreenOcr) null else region,
+            forceScreenOcr = forceScreenOcr
         ))
     }
 
@@ -354,6 +777,34 @@ class MainActivity : Activity() {
      * is already streaming is allowed to finish, then the screen's panels are re-read and translated one by
      * one, and finally everything resumes.
      */
+    /**
+     * Manual lite, started from the Extract button: read the largest image visible on screen once, translate
+     * it, stop. Nothing is queued and the realtime pipeline is not touched — that path is what used to run
+     * for minutes under a "Reading this page" chip without producing a result.
+     */
+    private fun startManualExtractForVisibleImage() {
+        val js = "(function(){var vh=window.innerHeight||0,vw=window.innerWidth||0,best='',area=0,ims=document.images;" +
+            "for(var i=0;i<ims.length;i++){var im=ims[i],r=im.getBoundingClientRect();" +
+            "if(r.width<120||r.height<120)continue;" +
+            "var t=Math.max(0,r.top),b=Math.min(vh,r.bottom),vis=b-t;if(vis<=0)continue;" +
+            "var w=Math.max(0,Math.min(vw,r.right)-Math.max(0,r.left));if(vis*w>area){area=vis*w;best=im.currentSrc||im.src||'';}}" +
+            // No JSON.stringify here: evaluateJavascript already JSON-encodes the returned string, so wrapping
+            // it added a second layer of quotes and the URL reached the image lookup as "https://..." (with the
+            // quotes), which matched no DOM image. decode() unwraps exactly one layer.
+            "return best;})()"
+        novelWv.evaluateJavascript(js) { raw ->
+            val src = decode(raw)
+            if (src.isBlank()) {
+                OcrDiag.log("MANUAL", "extract: no visible image on this screen")
+                toast("🔎 No visible page image — scroll to the panel and try again")
+                return@evaluateJavascript
+            }
+            OcrDiag.setMode("manual")
+            com.ashraf.novelstudio.manualextract.ManualExtractHost.start(
+                this, src, 0f, 0f, 1f, 1f, manualExtractScript())
+        }
+    }
+
     private fun reOcrVisiblePanels() {
         if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) {
             toast("⟳ This button works in Real-time mode")
@@ -406,7 +857,18 @@ class MainActivity : Activity() {
                 val arr = JSONArray(decode(raw))
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotBlank() }?.let { srcs.add(it) }
             } catch (_: Exception) { }
-            if (srcs.isEmpty()) { finish("⚠️ No panels found on the screen"); return@evaluateJavascript }
+            if (srcs.isEmpty()) {
+                whenIdle(0) {
+                    navToken++
+                    toast("🔎 No image URL found; trying fresh OCR on the visible reader")
+                    // Keep Auto Real-time paused until screenshot OCR has been handed to translation;
+                    // resuming here used to start a competing OCR job and cancel the manual read.
+                    startWebModeExtract(navToken, realtimeViewport = true, forceFresh = true, onHandled = {
+                        handler.postDelayed({ finish(null) }, 900L)
+                    })
+                }
+                return@evaluateJavascript
+            }
             fun step(i: Int) {
                 whenIdle(0) {
                     if (i >= srcs.size) { finish("✅ OCR finished — other work is running again"); return@whenIdle }
@@ -484,7 +946,10 @@ class MainActivity : Activity() {
         reOcrBusy = true
         val run = ++reOcrRun
         rtPausedForReOcr = true
-        toast("⟳ Reading the selected area — other work is paused")
+        // The 6-dot frame is the user saying "there is text here": manual mode runs the dedicated fresh-capture,
+        // zero-filter pipeline and shows progress, instead of waiting for the realtime queue to drain.
+        val manual = manualExtractOn()
+        toast(if (manual) "⟳ Reading the marked area…" else "⟳ Reading the selected area — other work is paused")
         fun finish(msg: String?) {
             if (run != reOcrRun) return
             reOcrBusy = false
@@ -515,7 +980,35 @@ class MainActivity : Activity() {
         novelWv.evaluateJavascript(js) { raw ->
             val txt = decode(raw)
             val o = try { JSONObject(txt) } catch (_: Exception) { null }
-            if (o == null || o.optString("s").isBlank()) { finish("⚠️ No page image under the frame"); return@evaluateJavascript }
+            if (o == null || o.optString("s").isBlank()) {
+                // No image element under the frame (canvas reader, or the box sits over a background image).
+                // Manual mode still honours the intent: read exactly what was framed, from the live screen.
+                if (manual) {
+                    val hit = captureManualRegionFromView(fx0, fy0, fx1, fy1)
+                    if (hit == null) { finish("⚠️ Nothing under the frame — try again"); return@evaluateJavascript }
+                    // Anchor for the overlay. The frame may cover no <img> at all (background artwork, CSS
+                    // layers), so fall back to a canvas-style identity describing the whole WebView, which the
+                    // writer already knows how to position against.
+                    val anchor = nearbyImageSource(fx0, fy0, fx1, fy1) ?: run {
+                        val vw = novelWv.width.coerceAtLeast(1)
+                        val vh = novelWv.height.coerceAtLeast(1)
+                        "ns-canvas:0,0,${vw}x${vh}"
+                    }
+                    startManualExtractOnBitmap(anchor, hit)
+                    finish(null)
+                    return@evaluateJavascript
+                }
+                finish("⚠️ No page image under the frame"); return@evaluateJavascript
+            }
+            if (manual) {
+                // Straight into the manual pipeline: no realtime queue to wait for, no pause/resume dance.
+                requestForceOcrArea(
+                    o.optString("s"), o.optDouble("x").toFloat(), o.optDouble("y").toFloat(),
+                    o.optDouble("w").toFloat(), o.optDouble("h").toFloat(), fromReOcr = true
+                )
+                finish(null)
+                return@evaluateJavascript
+            }
             whenIdle(0) {
                 requestForceOcrArea(
                     o.optString("s"), o.optDouble("x").toFloat(), o.optDouble("y").toFloat(),
@@ -815,7 +1308,7 @@ class MainActivity : Activity() {
     private val REALTIME_AHEAD_COLLECT_FLUSH_MS: Long get() = if (lensRealtimeFastPath()) 450L else longArrayOf(2000L, 3500L, 6000L, 9000L)[rtBatchLevel()]
 
     private fun startAheadOcr() {
-        if (rtPausedForReOcr) return
+        if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val n = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
         deepSeekAheadAtMs = System.currentTimeMillis()
         if (n == 0) return
@@ -850,7 +1343,7 @@ class MainActivity : Activity() {
             webView = novelWv,
             visibleOnly = true,
             isOccluded = { mode == Mode.CHAT },
-            isValid = { token == navToken && DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() },
+            isValid = { token == navToken && DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() && Prefs.bool(this, "rtAutoOcrEnabled", true) },
             onProgress = { stage, pct ->
                 if (seq == aheadOcrSeq) {
                     aheadOcrStage = stage
@@ -1035,16 +1528,18 @@ class MainActivity : Activity() {
             .joinToString("") { "%02x".format(it) }.take(24)
     }
 
-    /** Stable cross-quality identity: OCR models can shift bubble geometry by a few pixels. */
-    // The cache key is the bubble's TEXT only. Image URLs change between visits (signed/tokenised CDN
-    // links, different image hosts) and OCR box positions shift slightly between fast/detailed passes,
-    // so either of them used to cause cache misses for a bubble that was already translated.
-    // Punctuation/spacing are ignored so tiny OCR differences still hit the cache.
-    private fun rtAheadBubbleCacheKey(bubble: WmBubble): String {
-        val text = WebModeLayout.normalizeOcrText(bubble.sourceText)
-        val letters = text.filter { it.isLetterOrDigit() }
-        return if (letters.isNotEmpty()) letters else text
-    }
+    /**
+     * Key for the realtime translation cache.
+     *
+     * It MUST include the bubble's position, not just its text. OCR lettering is often identical across
+     * bubbles ("!", "?!", "...", a repeated name), and keying only on the text let two different bubbles
+     * collapse onto one entry: the translation produced for bubble A was then drawn over bubble B.
+     * Position is quantised (see [WebModeLayout.bubbleIdentity]) so a sub-pixel jitter of the same bubble
+     * still hits the cache, while two distinct bubbles never share a key. This is the same identity used
+     * by [WebModeLayout.fingerprint], so the two stay in lock-step.
+     */
+    private fun rtAheadBubbleCacheKey(bubble: WmBubble): String =
+        WebModeLayout.bubbleIdentity(bubble)
 
     /**
      * Put already-cached bubble translations straight onto the page overlay (no chatbot request)
@@ -1130,7 +1625,7 @@ class MainActivity : Activity() {
 
     private fun queueRealtimeAheadTranslations(pageUrl: String, panels: List<WebModeAheadPanel>, force: Boolean = false) {
         refreshRtScroll()
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this)) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val page = cleanUrl(pageUrl)
         if (page != rtAheadHoldPage) { rtAheadHold.clear(); rtAheadHoldPage = page }
         if (page.isBlank() || page != cleanUrl(novelWv.url.orEmpty()) ||
@@ -1398,8 +1893,10 @@ class MainActivity : Activity() {
     }
 
     private fun buildRealtimeAheadPrompt(task: RtAheadTranslationTask): Pair<String, Int> {
-        val source = task.layout.bubbles.joinToString("\n\n") { it.sourceText.trim() }
-        val marked = addInternalMarkers(source)
+        // One marker per bubble, numbered by bubble index. Joining with blank lines and re-splitting (the old
+        // addInternalMarkers path) shifted every marker when a bubble contained a blank line, was empty, was
+        // long, or the batch was small — which is why most translations landed on the wrong bubble.
+        val marked = MarkerCodec.build(task.layout.bubbles, titleOffset = 0)
         val markerCount = Regex("(?m)^\\[\\d{3,}] ").findAll(marked).count()
         val markerInstruction = """
 [Internal paragraph markers]
@@ -1513,9 +2010,16 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 queueRtAheadTask(task, front = true)
                 return
             }
-            val syntheticUrl = Uri.parse(queued.pageUrl).buildUpon()
-                .appendQueryParameter("__ns_rt_ahead", id)
-                .build().toString()
+            // buildUpon() throws unless the URI is hierarchical. Read-ahead page URLs are normally http(s),
+            // but a canvas/about:/blob: identity must not take the app down here either.
+            val syntheticUrl = try {
+                Uri.parse(queued.pageUrl).buildUpon()
+                    .appendQueryParameter("__ns_rt_ahead", id)
+                    .build().toString()
+            } catch (_: Throwable) {
+                val sep = if ('?' in queued.pageUrl) "&" else "?"
+                queued.pageUrl + sep + "__ns_rt_ahead=" + id
+            }
             val aheadChapter = base.copy(
                 title = base.title.ifBlank { "Upcoming panels" },
                 number = "rtAhead-${id.take(16)}",
@@ -1769,7 +2273,11 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     }
 
     private fun finishRealtimeAheadTranslation(jobKey: String, task: RtAheadTranslationTask, raw: String) {
-        val aligned = WebModeLayout.align(cleanReply(raw), task.layout)
+        val aligned = WebModeLayout.alignWithFallback(cleanReply(raw), task.layout)
+        if (aligned == null) {
+            val nums = Regex("\\[(\\d{3,})\\]").findAll(raw).map { it.groupValues[1] }.take(30).joinToString(",")
+            OcrDiag.log("ALIGN_FAIL", "ahead reply not matched to its bubbles: bubbles=${task.layout.bubbles.size} replyChars=${raw.length} markers=[$nums]")
+        }
         if (aligned != null) {
             for (i in task.layout.bubbles.indices) {
                 val value = aligned.getOrNull(i)?.trim().orEmpty()
@@ -1838,7 +2346,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     private var deepSeekStallBlockedSignature = ""
     private val deepSeekVisiblePoll = object : Runnable {
         override fun run() {
-            if (!DeepSeekRealtimeTranslation.isEnabled(this@MainActivity) || !webModeOn()) {
+            if (!DeepSeekRealtimeTranslation.isEnabled(this@MainActivity) || !webModeOn() || !Prefs.bool(this@MainActivity, "rtAutoOcrEnabled", true)) {
                 deepSeekPollBusy = false
                 return
             }
@@ -1918,8 +2426,14 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
 var v=[],seen={},now=Date.now(),vw=window.innerWidth||0,vh=window.innerHeight||0,hasLargeImage=false;
 var LAZY=['data-src','data-lazy-src','data-original','data-original-src','data-src-original','data-image','data-img','data-bg','data-background','data-background-image','data-url','data-ks-lazyload','data-cfsrc'];
 var PH=/placeholder|blank\.|spacer|loading|lazy[-_.]?(img|load)|1x1|transparen|pixel\.gif/i;
+function blockedTracker(s){
+ try{
+  var h=new URL(String(s||'').trim(),document.baseURI).hostname.toLowerCase();
+  return /(^|\.)(?:doubleclick\.net|googleadservices\.com|googlesyndication\.com|amazon-adsystem\.com|adsrvr\.org|criteo\.com|adnxs\.com|scorecardresearch\.com|treasuredata\.com)$/.test(h);
+ }catch(e){return false;}
+}
 function absolute(s){try{return s?new URL(String(s).trim(),document.baseURI).href:'';}catch(e){return '';}}
-function good(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s);}
+function good(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!blockedTracker(s);}
 function srcset(ss){
  if(!ss)return '';
  var best='',score=-1,parts=String(ss).split(',');
@@ -1940,7 +2454,7 @@ function imageSrc(e){
  return absolute(primary);
 }
 function add(kind,s,r,extra){
- s=absolute(s);if(!s||seen[kind+':'+s])return;
+ s=absolute(s);if(!s||blockedTracker(s)||seen[kind+':'+s])return;
  seen[kind+':'+s]=1;
  v.push(kind+':'+s+'@'+Math.round(r.width)+'x'+Math.round(r.height)+(extra||''));
 }
@@ -1974,7 +2488,7 @@ var vids=document.querySelectorAll('video[poster]');
 for(var vi=0;vi<vids.length;vi++){var ve=vids[vi],vr=ve.getBoundingClientRect();if(vr.width>=80&&vr.height>=60&&vr.right>0&&vr.bottom>0&&vr.left<vw&&vr.top<vh)add('POSTER',ve.getAttribute('poster'),vr,'');}
 var cvs=document.querySelectorAll('canvas');
 for(var ci=0;ci<cvs.length;ci++){var ce=cvs[ci],cr=ce.getBoundingClientRect();if(cr.width>=100&&cr.height>=70&&cr.right>0&&cr.bottom>0&&cr.left<vw&&cr.top<vh&&cr.width*cr.height>12000){if(cr.width*cr.height>=Math.max(18000,vw*vh*0.12))hasLargeImage=true;var cs='';try{var tc=window.__nsRtTc||(window.__nsRtTc=document.createElement('canvas'));tc.width=8;tc.height=8;var tx=tc.getContext('2d');tx.drawImage(ce,0,0,8,8);var px=tx.getImageData(0,0,8,8).data,hv=0;for(var pi=0;pi<px.length;pi+=4){hv=(hv*31+(px[pi]>>3)*3+(px[pi+1]>>3)*5+(px[pi+2]>>3))|0;}cs=':'+hv;}catch(ignore){}
-add('CANVAS','canvas:'+location.hostname+':'+Math.round(cr.width)+'x'+Math.round(cr.height)+cs,cr,'#'+(ce.width||0)+'x'+(ce.height||0));}}
+add('CANVAS','canvas:'+location.hostname+':'+Math.round(cr.width)+'x'+Math.round(cr.height)+'@'+Math.round(cr.left)+','+Math.round(cr.top)+cs,cr,'#'+(ce.width||0)+'x'+(ce.height||0));}}
 // CSS-background scanning is a slow fallback, not the normal path. In particular,
 // never let an empty cached result force a 7,000-node sweep on every 150 ms poll.
 var bgSig=window.__nsRtBgSignature||'';
@@ -2059,18 +2573,25 @@ return t.length>=40?'TXT:'+t:'';
                 // New image URLs trigger immediately; a long safety recheck only catches readers that mutate
                 // pixels without changing their image URL. Avoid re-OCRing the same panel every 3 s.
                 val runningAhead = running?.let { rtAheadTranslationTasksByJobKey.containsKey(keyOf(it)) } == true
-                val periodicRecheck = hasImages && !runningAhead &&
+                // A fast flick through the page is not read: the panel is gone before OCR could finish. Slow
+                // reading and standing still are never held back (see ScrollGate).
+                val scrollHold = ScrollGate.holdOcr(android.os.SystemClock.elapsedRealtime(), novelWv.height)
+                val periodicRecheck = hasImages && !runningAhead && !scrollHold &&
                     signature != deepSeekStallBlockedSignature &&
-                    now - deepSeekLastOcrAtMs >= 10000L
-                // While the reader is still flicking through panels, let the current image settle briefly
-                // without imposing a full 300 ms pause before the real-time OCR can start.
+                    now - deepSeekLastOcrAtMs >= 45000L
+                // Wait for scrolling to settle before starting network OCR. This ~300 ms debounce
+                // avoids competing with fast flick-scrolls and prevents repeated OCR on transient panels.
                 if (signature != deepSeekPendingSig) { deepSeekPendingSig = signature; deepSeekPendingSince = now }
-                val settled = now - deepSeekPendingSince >= 120L
+                val settled = now - deepSeekPendingSince >= 300L && !scrollHold
                 // Foreground OCR may pre-empt only an ahead-translation job; it must never interrupt
                 // a visible-panel translation or a user-initiated extraction.
+                // Reading the screen (OCR) does not use the chatbot, so it must not wait for the chatbot to finish
+                // translating an earlier batch of bubbles (OCR / sending / answer-checking are separate jobs).
+                // The new batch is queued behind the running one by the existing queue; only whole-chapter jobs still block.
+                val runNow = running
                 val idle = webModeHandle == null &&
-                    (running == null || runningAhead) &&
-                    (queue.isEmpty() || runningAhead)
+                    (runNow == null || runningAhead || isRealtimeBubbleBatch(runNow)) &&
+                    (runningAhead || queue.all { isRealtimeBubbleBatch(it) })
                 if (idle && signature.isNotEmpty() &&
                     ((hasImages && ((changed && settled) || periodicRecheck)) || textFallbackDue)) {
                     if (runningAhead && changed && settled) interruptRealtimeAheadForVisiblePanel()
@@ -2086,7 +2607,7 @@ return t.length>=40?'TXT:'+t:'';
                 // Keep the DOM probe light enough that it does not compete with touch scrolling.
                 // Rule: the panel in front of the reader comes first. Look ahead only when the visible screen is
                 // already read (nothing new waiting) - never while a changed screen is still waiting for its turn.
-                if (hasImages && webModeHandle == null && aheadOcrHandle == null && !changed &&
+                if (hasImages && !scrollHold && webModeHandle == null && aheadOcrHandle == null && !changed &&
                     // Keep a bounded OCR/translation pipeline: allow the next ten-panel batch
                     // to be prepared while the previous batch is still being translated.
                     rtAheadTranslationQueue.size < 4 &&
@@ -2137,6 +2658,15 @@ return t.length>=40?'TXT:'+t:'';
         val stage = webModeStage.lowercase()
         val prefetchStage = webModePrefetchStage.lowercase()
         val aheadStage = aheadOcrStage.lowercase()
+
+        if (reOcrBusy) {
+            statuses.add(ActivityDotStatus(
+                "manual-extract", 0xFF64B5F6.toInt(),
+                if (webModeHandle == null) "Manual Extract: waiting for current OCR/translation to finish"
+                else "Manual Extract: reading visible panels with fresh OCR",
+                blinking = true
+            ))
+        }
 
         if (aheadOcrHandle != null) {
             val color = when {
@@ -2246,15 +2776,18 @@ return t.length>=40?'TXT:'+t:'';
      */
     private fun updateActivityChip(statuses: List<ActivityDotStatus>) {
         val chip = activityChip ?: return
-        CrashLog.context = novelWv.url.orEmpty().take(160) + " | mode=" + mode + " | webMode=" + webModeOn() +
-            " | realtime=" + DeepSeekRealtimeTranslation.isEnabled(this) + " | forceLoad=" + forceLoadOn()
+        // This method is invoked by scanIndicatorRunnable every 450 ms on the UI thread.
+        // Never query Prefs, hash/check model files, or inspect inpainting readiness here.
+        refreshChipRuntimeSnapshot()
+        val snapshot = chipRuntimeSnapshot
+        CrashLog.context = novelWv.url.orEmpty().take(160) + " | mode=" + mode + " | " + snapshot.contextFlags
         reOcrBtn?.let { b ->
-            val show = webModeOn() && mode == Mode.NOVEL
+            val show = snapshot.webModeEnabled && mode == Mode.NOVEL
             val want = if (show) View.VISIBLE else View.GONE
             if (b.visibility != want) b.visibility = want
         }
         glossaryFab?.let { b ->
-            val want = if (webModeOn() && mode == Mode.NOVEL) View.VISIBLE else View.GONE
+            val want = if (snapshot.webModeEnabled && mode == Mode.NOVEL) View.VISIBLE else View.GONE
             if (b.visibility != want) b.visibility = want
         }
         val sending = chatSendingAtMs > 0L && System.currentTimeMillis() - chatSendingAtMs < 15_000L
@@ -2268,11 +2801,11 @@ return t.length>=40?'TXT:'+t:'';
             // Say WHICH reading is running and with WHICH engine. One merged "Reading the page" label (and one
             // timer) hid whether the 56 s were spent on the screen in front of the reader or on panels ahead.
             keys.contains("visible-ocr") ->
-                { text = "Reading this screen · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
+                { text = "Reading this screen · " + snapshot.ocrEngine; color = 0xFFB388FF.toInt() }
             keys.contains("next-chapter-ocr") ->
-                { text = "Reading next chapter · " + shortOcrEngineName(); color = 0xFFB388FF.toInt() }
+                { text = "Reading next chapter · " + snapshot.ocrEngine; color = 0xFFB388FF.toInt() }
             keys.contains("read-ahead-ocr") ->
-                { text = "Reading ahead · " + shortOcrEngineName(); color = 0xFF7E57C2.toInt() }
+                { text = "Reading ahead · " + snapshot.ocrEngine; color = 0xFF7E57C2.toInt() }
             keys.contains("placement") -> { text = "Adding the translation"; color = 0xFF64FFDA.toInt() }
             keys.any { it == "chatbot-translation" || it == "ahead-translation" || it == "prefetch-translation" } -> {
                 val fresh = android.os.SystemClock.elapsedRealtime() - chatPhaseAtMs < 2_500L
@@ -2292,7 +2825,7 @@ return t.length>=40?'TXT:'+t:'';
             val nowMs = android.os.SystemClock.elapsedRealtime()
             if (text != chipStageText) { chipStageText = text; chipStageSinceMs = nowMs }
             val secs = ((nowMs - chipStageSinceMs) / 1000L).toInt()
-            chip.update(if (secs >= 3) "$text · ${secs}s" else text, color)
+            chip.update((if (secs >= 3) "$text · ${secs}s" else text) + "\n" + snapshot.detail, color)
         } else if (++chipIdleTicks >= 2) {
             chipStageText = ""
             chip.update(null, 0)
@@ -2301,6 +2834,87 @@ return t.length>=40?'TXT:'+t:'';
 
     private var chipStageText = ""
     private var chipStageSinceMs = 0L
+
+    private data class ChipRuntimeSnapshot(
+        val detail: String,
+        val ocrEngine: String,
+        val webModeEnabled: Boolean,
+        val contextFlags: String
+    )
+
+    // Disk/model status can take hundreds or thousands of milliseconds on low-memory phones. Refresh
+    // it on a single background worker and let the 450 ms UI ticker read only this immutable snapshot.
+    private val chipStatusExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ns-chip-status").apply { isDaemon = true }
+    }
+    private val chipStatusRefreshPending = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var chipStatusUpdatedAtMs = 0L
+    @Volatile private var chipRuntimeSnapshot = ChipRuntimeSnapshot(
+        detail = "OCR ML Kit · Detector checking · AI painter checking",
+        ocrEngine = "ML Kit",
+        webModeEnabled = false,
+        contextFlags = "runtime status loading"
+    )
+
+    private fun refreshChipRuntimeSnapshot(force: Boolean = false) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - chipStatusUpdatedAtMs < 2_000L) return
+        if (!chipStatusRefreshPending.compareAndSet(false, true)) return
+        try {
+            chipStatusExecutor.execute {
+                try {
+                    val web = webModeOn()
+                    val realtime = DeepSeekRealtimeTranslation.isEnabled(this@MainActivity)
+                    val forceLoad = forceLoadOn()
+                    val ocr = shortOcrEngineName()
+                    val detail = chipDetailLine()
+                    chipRuntimeSnapshot = ChipRuntimeSnapshot(
+                        detail = detail,
+                        ocrEngine = ocr,
+                        webModeEnabled = web,
+                        contextFlags = "webMode=$web | realtime=$realtime | forceLoad=$forceLoad"
+                    )
+                    chipStatusUpdatedAtMs = android.os.SystemClock.elapsedRealtime()
+                } catch (t: Throwable) {
+                    // A status read must never block or break the visible OCR loop.
+                    chipRuntimeSnapshot = ChipRuntimeSnapshot(
+                        detail = "OCR status unavailable",
+                        ocrEngine = "OCR",
+                        webModeEnabled = chipRuntimeSnapshot.webModeEnabled,
+                        contextFlags = "runtime status unavailable"
+                    )
+                    chipStatusUpdatedAtMs = android.os.SystemClock.elapsedRealtime()
+                    Log.w("NsChip", "background status refresh failed", t)
+                } finally {
+                    chipStatusRefreshPending.set(false)
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            chipStatusRefreshPending.set(false)
+        }
+    }
+
+    /** Called only by chipStatusExecutor, never by updateActivityChip on the UI thread. */
+    private fun chipDetailLine(): String {
+        val det = when {
+            BubbleDetector.isDownloading() -> "downloading"
+            // Always name the reason when off: a silent "off" was indistinguishable from "not installed" and
+            // hid the fact that the default auto mode never enabled it on this phone.
+            BubbleDetector.disabledReason(this) == null ->
+                "ON" + (BubbleDetector.lastInfo.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
+            else -> "OFF (" + BubbleDetector.disabledReason(this) + ")"
+        }
+        val paint = when {
+            !WebModeInpainter.isReady(this) -> "not installed"
+            !Prefs.bool(this, "wmAiInpaint", true) -> "off"
+            Prefs.get(this, "wmAiInpaintCrashed", "") == "1" -> "OFF (crashed before)"
+            !android.os.Process.is64Bit() && Prefs.get(this, "wmAiForce32", "") != "1" -> "OFF (32-bit phone)"
+            WebModeInpainter.tooSlow -> "paused (slow)"
+            WebModeInpainter.isLoaded() -> "ON" + (WebModeInpainter.lastNote.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
+            else -> "loading"
+        }
+        return "OCR " + shortOcrEngineName() + " · Detector " + det + " · AI painter " + paint
+    }
 
     private val scanIndicatorRunnable = object : Runnable {
         override fun run() {
@@ -2629,23 +3243,43 @@ return t.length>=40?'TXT:'+t:'';
     }
 
     // ---- "reading the page" that never ends: point new users to the search (re-scan) button
-    private var readingSinceMs = 0L
+    @Volatile private var readingSinceMs = 0L
+    private val longReadingTipPending = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private fun trackLongReading(reading: Boolean) {
         if (!reading) { readingSinceMs = 0L; return }
         val now = android.os.SystemClock.elapsedRealtime()
         if (readingSinceMs == 0L) { readingSinceMs = now; return }
-        if (now - readingSinceMs < 75_000L || !webModeOn() || isFinishing) return
-        val shown = Prefs.get(this, "ocrTipCount", "0").toIntOrNull() ?: 0
-        val usage = Prefs.get(this, "usageMin", "0").toIntOrNull() ?: 0
-        if (shown >= 2 || usage > 180) return
-        readingSinceMs = now + 600_000L   // not again for 10 minutes
-        Prefs.put(this, "ocrTipCount", (shown + 1).toString())
-        AlertDialog.Builder(this)
-            .setTitle("Taking a long time?")
-            .setMessage("If the reading animation keeps running, tap the search button on the right side of the screen and frame the bubble, so the model can find it. Not every text sits in a bubble — sometimes it is plain text on the image.")
-            .setPositiveButton("Got it", null)
-            .show()
+        if (now - readingSinceMs < 75_000L || isFinishing) return
+        // Do not hit SharedPreferences from updateActivityChip's 450 ms UI ticker. Reserve the
+        // cooldown before enqueueing so a slow disk cannot queue hundreds of duplicate checks.
+        readingSinceMs = now + 600_000L
+        if (!longReadingTipPending.compareAndSet(false, true)) return
+        try {
+            chipStatusExecutor.execute {
+                try {
+                    if (!webModeOn() || isFinishing) return@execute
+                    val shown = Prefs.get(this@MainActivity, "ocrTipCount", "0").toIntOrNull() ?: 0
+                    val usage = Prefs.get(this@MainActivity, "usageMin", "0").toIntOrNull() ?: 0
+                    if (shown >= 2 || usage > 180) return@execute
+                    Prefs.put(this@MainActivity, "ocrTipCount", (shown + 1).toString())
+                    handler.post {
+                        if (isFinishing || isDestroyed) return@post
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Taking a long time?")
+                            .setMessage("If the reading animation keeps running, tap the search button on the right side of the screen and frame the bubble, so the model can find it. Not every text sits in a bubble — sometimes it is plain text on the image.")
+                            .setPositiveButton("Got it", null)
+                            .show()
+                    }
+                } catch (t: Throwable) {
+                    Log.w("NsChip", "long-reading tip check failed", t)
+                } finally {
+                    longReadingTipPending.set(false)
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            longReadingTipPending.set(false)
+        }
     }
     private val communityTelegram = "https://t.me/c/4373541125/2"
     private val communityReddit = "https://www.reddit.com/r/NovelStudio/s/BWuOYCZSUe"
@@ -3192,7 +3826,11 @@ return t.length>=40?'TXT:'+t:'';
         var pullDownStartX = 0f
         var barMoveLastY = 0f
         var barMoveAccum = 0f
-        novelWv.setOnScrollChangeListener { _, _, _, _, _ -> novelActivityAtMs = android.os.SystemClock.elapsedRealtime() }
+        novelWv.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+            val tNow = android.os.SystemClock.elapsedRealtime()
+            novelActivityAtMs = tNow
+            ScrollGate.onScroll(tNow, scrollY, novelWv.height)
+        }
         novelWv.setOnTouchListener { view, event ->
             activeWv = novelWv
             novelActivityAtMs = android.os.SystemClock.elapsedRealtime()
@@ -3597,12 +4235,19 @@ return t.length>=40?'TXT:'+t:'';
             val tapDetector = GestureDetector(this@MainActivity,
                 object : GestureDetector.SimpleOnGestureListener() {
                     override fun onDown(e: MotionEvent): Boolean = true
+                    override fun onSingleTapUp(e: MotionEvent): Boolean {
+                        if (manualRealtimeExtractEnabled()) {
+                            extractCopy()
+                            return true
+                        }
+                        return true
+                    }
                     override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                        extractCopy()
+                        if (!manualRealtimeExtractEnabled()) extractCopy()
                         return true
                     }
                     override fun onDoubleTap(e: MotionEvent): Boolean {
-                        insertSavedTranslation()
+                        if (manualRealtimeExtractEnabled()) extractCopy() else insertSavedTranslation()
                         return true
                     }
                     override fun onLongPress(e: MotionEvent) {
@@ -3694,6 +4339,7 @@ return t.length>=40?'TXT:'+t:'';
         }
         setContentView(root)
         handler.post(scanIndicatorRunnable)
+        installManualExtractHost()
 
         buildStrip()
         buildSiteShortcuts()
@@ -3897,7 +4543,7 @@ return t.length>=40?'TXT:'+t:'';
                 dlg.dismiss()
                 toast("Translating " + (if (src == Langs.AUTO) "any language" else src) + " to " + tgt)
                 downloadLanguageFont(tgt)
-                if (firstRun) handler.postDelayed({ if (!isFinishing) showFirstPromptChoice() }, 400L)
+                if (firstRun) Handler(Looper.getMainLooper()).postDelayed({ if (!isFinishing && !isDestroyed) showFirstPromptChoice() }, 400L)
             }
         }
         col.addView(save, LinearLayout.LayoutParams(MP, dp(52)).also { it.topMargin = dp(18) })
@@ -4092,6 +4738,9 @@ return t.length>=40?'TXT:'+t:'';
         super.onTrimMemory(level)
         if (level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) {
             CrashLog.note("memory pressure level=$level")
+            // Free the largest optional live-memory consumers without blocking Android's UI callback.
+            WebModeExtractor.trimDetectorCaches()
+            BubbleDetector.onMemoryPressure(level)
         }
     }
 
@@ -5036,6 +5685,44 @@ return t.length>=40?'TXT:'+t:'';
         scheduleDeepSeekAutoTranslation(novelWv.url.orEmpty())
     }
 
+    /** Toggle auto page/panel detection separately from the overall Real-time reading mode. */
+    private fun setRealtimeAutoOcrEnabled(enabled: Boolean) {
+        Prefs.putBool(this, "rtAutoOcrEnabled", enabled)
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) {
+            toast("Auto Real-time OCR " + (if (enabled) "ON" else "OFF (manual)") + " — applies when Real-time mode is enabled")
+            return
+        }
+        if (enabled) {
+            deepSeekVisibleSignature = ""
+            deepSeekLastOcrAtMs = 0L
+            scheduleDeepSeekAutoTranslation(novelWv.url.orEmpty())
+            scheduleRealtimeAheadPump(0L)
+            toast("⚡ Auto Real-time OCR ON — new visible panels will be read automatically")
+        } else {
+            handler.removeCallbacks(deepSeekVisiblePoll)
+            deepSeekPollBusy = false
+            deepSeekProbeInFlight = false
+            deepSeekPollEvalSeq++
+            aheadOcrHandle?.cancel()
+            aheadOcrHandle = null
+            aheadOcrSeq++
+            aheadOcrStage = ""
+            aheadOcrPct = -1
+            cancelRealtimeAheadWorker(requeue = false)
+            rtAheadTranslationQueue.clear()
+            rtAheadTranslationQueuedIds.clear()
+            rtAheadTranslationTasksByJobKey.clear()
+            rtAheadTranslationCache.clear()
+            rtAheadTranslationSuppressedIds.clear()
+            rtAheadHold.clear()
+            rtAheadHoldFlushRunnable?.let { handler.removeCallbacks(it) }
+            rtAheadHoldFlushRunnable = null
+            rtAheadHoldSince = 0L
+            toast("⚡ Auto Real-time OCR OFF — manual mode: tap any bubble to read and translate it")
+        }
+        updateProgressUi()
+    }
+
     /** Same work the menu's "AI Real-time Translation" row did when turning it off. */
     private fun disableRealtimeMode() {
         deepSeekPollEvalSeq++
@@ -5298,6 +5985,10 @@ return t.length>=40?'TXT:'+t:'';
             else -> "Auto (guess from page)"
         }
 
+    private fun menuRealtimeAutoOcrLabel(): String =
+        if (Prefs.bool(this, "rtAutoOcrEnabled", true)) "✅ ⚡ Auto Real-time OCR"
+        else "⬜ ⚡ Auto Real-time OCR — off (manual tap mode)"
+
     private fun menuOcrRescanLabel(): String =
         (if (Prefs.bool(this, "ocrRescan", true)) "✅" else "⬜") + " 🩹 OCR rescan (find missed lines)"
 
@@ -5308,31 +5999,20 @@ return t.length>=40?'TXT:'+t:'';
         "🧠 OCR Engine: " + currentOcrEngineLabel() + "\nLast actually used: " + lastActuallyUsedOcrEngine()
 
     private fun shortOcrEngineName(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
-        "paddle_small", "paddle_heavy" -> "Paddle"
-        "rapid_onnx" -> "RapidOCR"
-        "manga" -> "Manga OCR"
         "lens" -> "Lens"
         else -> "ML Kit"
     }
 
     private fun currentOcrEngineLabel(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
-        "paddle_small" -> "PaddleOCR Small"
-        "paddle_heavy" -> "PaddleOCR Heavy"
-        "rapid_onnx" -> "RapidOCR / legacy ONNX"
-        "manga" -> "Japanese Manga OCR"
         "lens" -> "Google Lens (online)"
         else -> "ML Kit · Default"
     }
 
     private fun chooseOcrEngine() {
-        val keys = arrayOf("mlkit", "paddle_small", "paddle_heavy", "rapid_onnx", "manga", "lens")
+        val keys = arrayOf("mlkit", "lens")
         val labels = arrayOf(
-            "ML Kit — Default (fast, built-in)",
-            "PaddleOCR PP-OCRv6 Small — fast (English/Chinese/Japanese; Korean uses ML Kit)",
-            "PaddleOCR PP-OCRv6 Medium / Heavy — accuracy option (English/Chinese/Japanese; Korean uses ML Kit)",
-            "RapidOCR ONNX — legacy optional engine",
-            "Japanese Manga OCR — if its model is installed",
-            "Google Lens — online, independent OCR engine; reads text and layout from the image"
+            "ML Kit — Default (on-device, works offline)",
+            "Google Lens — online; reads text and layout from the image (falls back to ML Kit if it fails)"
         )
         val selected = keys.indexOf(Prefs.get(this, "ocrEngine", "mlkit")).coerceAtLeast(0)
         AlertDialog.Builder(this)
@@ -5340,53 +6020,22 @@ return t.length>=40?'TXT:'+t:'';
             .setSingleChoiceItems(labels, selected) { dialog, which ->
                 Prefs.put(this, "ocrEngine", keys[which])
                 dialog.dismiss()
-                val engineNote = if (keys[which] == "lens") {
-                    " Google Lens runs independently; it does not merge with ML Kit."
-                } else {
-                    " Unavailable local models automatically fall back to ML Kit."
-                }
-                toast("OCR engine: " + labels[which] + "." + engineNote +
-                    (if (keys[which] == "lens") " Needs internet; the pictures being read are uploaded to Google." else ""))
+                toast("OCR engine: " + labels[which].substringBefore(" — ") +
+                    (if (keys[which] == "lens") ". Needs internet; the pictures being read are uploaded to Google." else "."))
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
     private fun ocrModelsDialog() {
-        OcrModels.init(this)
-        PaddleOcrModels.init(this)
-        val legacyPacks = OcrModels.PACKS
-        val paddlePacks = PaddleOcrModels.PACKS
         val labels = ArrayList<String>()
         labels.add("⚙️ Selected engine: " + currentOcrEngineLabel() +
             "\n✅ Last foreground OCR: " + lastActuallyUsedOcrEngine() +
             "\nGoogle Lens and ML Kit run independently; read-ahead results do not replace the visible scan status.")
-
-        for (p in legacyPacks) {
-            val state = when {
-                !p.available -> "link not configured yet"
-                OcrModels.isBusy(p) -> "downloading…"
-                OcrModels.isInstalled(p) -> "installed · " + OcrModels.sizeMb(p) + " MB — tap to delete"
-                else -> "not installed · tap to download (~" + OcrModels.approxMb(p) + " MB)"
-            }
-            labels.add(p.label + "\n" + state + " · " + ocrPackHint(OcrModels.approxMb(p)))
-        }
-
-        for (p in paddlePacks) {
-            val state = when {
-                PaddleOcrModels.isBusy(p) -> "downloading…"
-                PaddleOcrModels.isInstalled(p) -> "installed · " + PaddleOcrModels.sizeMb(p) + " MB — tap to delete"
-                else -> "not installed · tap to download (~" + p.approximateMb + " MB)"
-            }
-            labels.add("🧠 " + p.label + "\n" + state + " · " + ocrPackHint(p.approximateMb))
-        }
-
-        val deleteIndex = 1 + legacyPacks.size + paddlePacks.size
-        val err = OcrModels.lastError
-        val paddleErr = PaddleOcrModels.lastError
-        val lastError = if (paddleErr.isNotBlank()) paddleErr else err
-        labels.add("🗑 Delete all optional OCR models\n" +
-            (if (lastError.isNotBlank()) "Last model error: " + lastError.take(70) else "ML Kit stays available as the default engine"))
+        val detectorIndex = labels.size
+        labels.add(detectorRowLabel())
+        val inpaintIndex = labels.size
+        labels.add(inpaintRowLabel())
         val lensDiagnosticIndex = labels.size
         labels.add("🧪 Google Lens diagnostic — tap to copy\n" +
             OcrEngineStatus.lastLensDiagnostic.take(220))
@@ -5395,91 +6044,22 @@ return t.length>=40?'TXT:'+t:'';
             OcrEngineStatus.lastError.take(220).ifBlank { "No OCR runtime issue captured yet" })
 
         listDialog("🧠 OCR engine & models", labels, { i ->
-            when {
-                i == lensDiagnosticIndex -> {
+            when (i) {
+                lensDiagnosticIndex -> {
                     copy(OcrEngineStatus.lastLensDiagnostic)
                     toast("✅ Lens diagnostic copied. Paste it here.")
                 }
-                i == runtimeErrorIndex -> {
+                runtimeErrorIndex -> {
                     if (OcrEngineStatus.lastError.isNotBlank()) {
                         copy(OcrEngineStatus.lastError)
                         toast("✅ OCR runtime issue copied. Paste it into the bug report.")
                     } else toast("No OCR runtime issue captured yet")
                 }
-                i == 0 -> chooseOcrEngine()
-                i in 1..legacyPacks.size -> {
-                    val p = legacyPacks[i - 1]
-                    when {
-                        !p.available -> toast("⚠ ${p.label}: download link not configured yet")
-                        OcrModels.isBusy(p) -> toast("⬇️ ${p.label} is still downloading")
-                        OcrModels.isInstalled(p) -> AlertDialog.Builder(this)
-                            .setMessage("Delete the ${p.label} legacy OCR model?")
-                            .setPositiveButton("Delete") { _, _ ->
-                                OcrModels.delete(p)
-                                toast("🗑 ${p.label} deleted")
-                            }
-                            .setNegativeButton("Cancel", null)
-                            .show()
-                        else -> {
-                            toast("⬇️ Downloading ${p.label}…")
-                            Thread {
-                                try {
-                                    OcrModels.download(p) { name, pct ->
-                                        if (pct % 25 == 0) runOnUiThread { toast("⬇️ $name $pct%") }
-                                    }
-                                    runOnUiThread { toast("✅ ${p.label} installed. Select it in OCR Engine if needed.") }
-                                } catch (e: Exception) {
-                                    runOnUiThread { toast("❌ ${p.label}: " + (e.message ?: "download failed")) }
-                                }
-                            }.start()
-                        }
-                    }
-                }
-                i < deleteIndex -> {
-                    val p = paddlePacks[i - (1 + legacyPacks.size)]
-                    when {
-                        PaddleOcrModels.isBusy(p) -> toast("⬇️ ${p.label} is still downloading")
-                        PaddleOcrModels.isInstalled(p) -> AlertDialog.Builder(this)
-                            .setMessage("Delete ${p.label}? ML Kit remains available as fallback.")
-                            .setPositiveButton("Delete") { _, _ ->
-                                PaddleOcrModels.delete(p)
-                                toast("🗑 ${p.label} deleted")
-                            }
-                            .setNegativeButton("Cancel", null)
-                            .show()
-                        else -> {
-                            toast("⬇️ Downloading ${p.label}…")
-                            Thread {
-                                try {
-                                    PaddleOcrModels.download(p) { name, pct ->
-                                        if (pct % 25 == 0) runOnUiThread { toast("⬇️ PaddleOCR $name $pct%") }
-                                    }
-                                    runOnUiThread { toast("✅ ${p.label} installed. Select it in OCR Engine to use it.") }
-                                } catch (e: Exception) {
-                                    runOnUiThread { toast("❌ ${p.label}: " + (e.message ?: "download failed")) }
-                                }
-                            }.start()
-                        }
-                    }
-                }
-                else -> AlertDialog.Builder(this)
-                    .setMessage("Delete all downloaded optional OCR models? ML Kit will remain as the default engine.")
-                    .setPositiveButton("Delete") { _, _ ->
-                        OcrModels.deleteAll()
-                        PaddleOcrModels.deleteAll()
-                        toast("🗑 Optional OCR models deleted")
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+                detectorIndex -> detectorDialog { }
+                inpaintIndex -> inpaintDialog()
+                else -> chooseOcrEngine()
             }
         }, null)
-    }
-
-    /** One-line advice shown next to every downloadable OCR model. */
-    private fun ocrPackHint(mb: Int): String = when {
-        mb >= 60 -> "★★★★★ most accurate · needs a powerful phone (4 GB+ RAM)"
-        mb >= 25 -> "★★★★☆ accurate · good on mid-range phones"
-        else -> "★★★☆☆ light · fast on any phone"
     }
 
     private fun menuOcrDebugLabel(): String =
@@ -6506,12 +7086,15 @@ return t.length>=40?'TXT:'+t:'';
      */
     private var deepSeekLastFailToastAtMs = 0L
 
-    private fun startWebModeExtract(token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false) {
+    private fun startWebModeExtract(
+        token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false,
+        onHandled: (() -> Unit)? = null
+    ) {
         // In real-time mode the ahead worker has its own low-priority executor and does not scroll
         // the page. Let it finish caching upcoming panels while the visible panel is scanned and
         // translated; cancelling it on every viewport change made the 9-panel read-ahead starve.
         // For a manual/full-chapter extraction, stop read-ahead so foreground extraction gets priority.
-        if (!realtimeViewport) {
+        if (!realtimeViewport || forceFresh) {
             aheadOcrHandle?.cancel()
             aheadOcrHandle = null
             aheadOcrSeq++
@@ -6527,6 +7110,12 @@ return t.length>=40?'TXT:'+t:'';
             rtAheadHoldFlushRunnable = null
             rtAheadHoldSince = 0L
         }
+        // One word in every OCR log line: which reading path this job is actually using.
+        OcrDiag.setMode(when {
+            realtimeViewport -> "realtime"
+            forceFresh -> "manual"          // Auto Real-time OCR off: one tap, one crop
+            else -> "scanning"
+        })
         val jobSeq = ++webModeJobSerial
         webModeHandle?.cancel()
         webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()
@@ -6540,6 +7129,7 @@ return t.length>=40?'TXT:'+t:'';
             isOccluded = { mode == Mode.CHAT },
             // Force Extract may scroll the screen; real-time OCR must stay viewport-only.
             force = Prefs.bool(this, "wmForce") && !realtimeViewport,
+            forceFreshOcr = forceFresh,
             isValid = { token == navToken && jobSeq == webModeJobSerial },
             onProgress = { stage, pct ->
                 if (token == navToken && jobSeq == webModeJobSerial) {
@@ -6580,10 +7170,12 @@ return t.length>=40?'TXT:'+t:'';
                                             if (hash in deepSeekInFlightTextHashes) continue
                                             // A bubble the reader long-pressed is sent again even though it was translated.
                                             val forced = retranslateTargetFor(bubble)
-                                            if (hash !in deepSeekTranslatedTextHashes || forced != null) {
+                                            val forceAgain = forceFresh || forced != null
+                                            if (hash !in deepSeekTranslatedTextHashes || forceAgain) {
                                                 selected.add(bubble)
                                                 hashes.add(hash)
-                                                if (forced != null) { usedTargets.add(forced); forcedHashes.add(hash) }
+                                                if (forced != null) usedTargets.add(forced)
+                                                if (forceAgain) forcedHashes.add(hash)
                                             }
                                         }
                                         deepSeekInFlightTextHashes.addAll(hashes)
@@ -6730,6 +7322,7 @@ return t.length>=40?'TXT:'+t:'';
                         }
                     }
                 }
+                onHandled?.invoke()
             }
         ))
     }
@@ -6774,7 +7367,7 @@ return t.length>=40?'TXT:'+t:'';
      * remains responsible for sending the OCR result to the chatbot and applying the reply.
      */
     private fun scheduleDeepSeekAutoTranslation(pageUrl: String) {
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn()) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val url = pageUrl.trim()
         if (!url.startsWith("http", ignoreCase = true)) return
         val host = Uri.parse(url).host.orEmpty().lowercase()
@@ -6792,7 +7385,19 @@ return t.length>=40?'TXT:'+t:'';
         handler.postDelayed(overlayGuard, 1500L)
     }
 
+    private fun manualRealtimeExtractEnabled(): Boolean =
+        DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
+            !Prefs.bool(this, "rtAutoOcrEnabled", true)
+
     private fun extractCopy() {
+        // Auto Real-time OFF = manual lite: read the visible image once, translate it, stop. This used to
+        // call reOcrVisiblePanels(), which drives the realtime pipeline (and pauses it for up to 240 s), so
+        // pressing Extract showed "Reading this page" for minutes without producing anything.
+        if (DeepSeekRealtimeTranslation.isEnabled(this) && webModeOn() &&
+            !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
+            startManualExtractForVisibleImage()
+            return
+        }
         // ● is always a real extraction. Never wait for WebView.progress and
         // never turn it into the original/translation toggle.
         // Tapping again after a failed translation sends the very same text again (no new OCR / extraction).
@@ -6862,6 +7467,8 @@ return t.length>=40?'TXT:'+t:'';
     private fun inferEpisodeUrl(url: String, dir: String): String? {
         val delta = if (dir == "next") 1 else if (dir == "prev") -1 else return null
         val uri = try { Uri.parse(url) } catch (_: Exception) { return null }
+        // getQueryParameter below throws on a non-hierarchical URI (about:, blob:, data:).
+        if (!uri.isHierarchical) return null
         // NAVER Webtoon mobile episode URLs use ?titleId=<series>&no=<episode>.
         // Do not treat arbitrary "no" parameters as chapter numbers on unrelated sites.
         val isNaverWebtoon = (uri.host.orEmpty().equals("m.comic.naver.com", true) ||
@@ -7388,7 +7995,7 @@ return t.length>=40?'TXT:'+t:'';
         if (Prefs.auto(this)) autoFlow(ch) else copyChapter(ch)
         // A live OCR batch represents only newly visible bubbles, not a complete chapter.
         // Do not let chapter prefetch compete with its real-time chat submission.
-        if (!livePanelBatch && !JapaneseMangaSession.isManaged(ch)) schedulePrefetch(ch)
+        if (!livePanelBatch) schedulePrefetch(ch)
     }
 
     // ---- WTR-LAB SPA watcher ---------------------------------------------------
@@ -8054,6 +8661,25 @@ return t.length>=40?'TXT:'+t:'';
         }
     }
 
+    /**
+     * Abort an image job before sending when OCR region identity is missing. Raw source text is not a valid
+     * fallback for Webtoon translation because it cannot be anchored to a bubble after the chatbot responds.
+     */
+    private fun abortImageTranslationWithoutRegions(tok: Int, ch: Chapter, reason: String) {
+        if (tok != runToken) return
+        OcrDiag.log("ALIGN_GUARD", "not sent: $reason page=${ch.url.take(90)}")
+        releaseDeepSeekHashBatch(ch)
+        if (isScanRegionBatch(ch)) {
+            scanRegionChapter = null
+            restoreChapterAfterBubbleJob(ch.url)
+        }
+        running = null
+        toast("❌ No valid OCR text regions were attached; nothing was sent. Reselect the missing area and run OCR again.")
+        updateProgressUi()
+        startNext()
+        handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
+    }
+
     private fun sendJob(tok: Int, ch: Chapter) {
         NovelStudioAnalytics.track(
             this, "translation_started",
@@ -8065,8 +8691,36 @@ return t.length>=40?'TXT:'+t:'';
         // the novel page and are removed from the final saved/clipboard translation.
         val host = Uri.parse(ch.url).host?.lowercase().orEmpty()
         val isWtrLab = host == "wtr-lab.com" || host.endsWith(".wtr-lab.com")
-        val marked = addInternalMarkers(ch.text, splitSingleLines = isWtrLab)
-        jobMarkers = Regex("(?m)^\\[\\d{3,}\\] ").findAll(marked).count()
+        val imageMode = webModeOn() && ch.contentSel.isBlank()
+        // An image translation is valid only when the OCR supplied positioned text regions. Never turn a missing
+        // layout into ordinary paragraph markers: that sends text with no coordinates and cannot be placed safely.
+        val storedLayout = if (imageMode)
+            (WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)) else null
+        if (imageMode && (storedLayout == null || storedLayout.bubbles.isEmpty() ||
+                storedLayout.bubbles.none { it.sourceText.isNotBlank() })) {
+            abortImageTranslationWithoutRegions(tok, ch, "OCR returned no positioned text regions")
+            return
+        }
+        // Keep the marker offset and request body in sync. If a title marker is requested, include its body too;
+        // a bare titleOffset=1 used to shift all bubble markers while the prompt actually started at [001].
+        val comicLayout = if (imageMode && storedLayout != null) {
+            val offset = if (storedLayout.titleOffset > 0 && ch.title.isNotBlank()) 1 else 0
+            if (storedLayout.titleOffset == offset) storedLayout
+            else WebModeLayout(offset, storedLayout.bubbles).also { WebModeLayoutStore.setScan(ch.url, it) }
+        } else storedLayout
+        val markerTitle = if (imageMode && comicLayout?.titleOffset == 1) ch.title else ""
+        val marked = if (imageMode && comicLayout != null) {
+            MarkerCodec.build(comicLayout.bubbles, comicLayout.titleOffset, title = markerTitle)
+        } else {
+            addInternalMarkers(ch.text, splitSingleLines = isWtrLab)
+        }
+        val markerCount = Regex("(?m)^\\[\\d{3,}\\] ").findAll(marked).count()
+        if (imageMode && (comicLayout == null ||
+                markerCount != MarkerCodec.expectedMarkers(comicLayout.bubbles, comicLayout.titleOffset, markerTitle))) {
+            abortImageTranslationWithoutRegions(tok, ch, "OCR region markers did not match the bubble layout")
+            return
+        }
+        jobMarkers = markerCount
         val markerInstruction = """
 [Internal paragraph markers]
 Each paragraph starts with a marker such as [001], [002], [003].
@@ -8074,8 +8728,6 @@ Keep every marker exactly once, in the same order. Do not translate, remove,
 merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
-        val mangaSession = JapaneseMangaSession.isManaged(ch)
-        val imageMode = (webModeOn() && ch.contentSel.isBlank()) || mangaSession
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
@@ -8411,10 +9063,10 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             }
             // Scanning: a reply that cannot be matched to the bubbles used to be saved as a good translation
             // (the AI always answers something). Treat it as a failure instead.
-            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank() && !JapaneseMangaSession.isManaged(ch)) {
+            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
                 val lay = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (lay != null) {
-                    val placed = WebModeLayout.align(rawTranslation, lay)
+                    val placed = WebModeLayout.alignWithFallback(rawTranslation, lay)
                     if (placed == null || placed.none { !it.isNullOrBlank() }) {
                         failJob(tok, ch, "The chatbot answer could not be matched to the page.", fallback = true)
                         return@evaluateJavascript
@@ -8533,13 +9185,31 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             handler.postDelayed({ pumpRealtimeAheadTranslation() }, 600L)
             return
         }
-        val manualText = promptWithGlossary(Prefs.activeTranslationPrompt(this), ch.text) + ch.text
+        val isImageRegionJob = webModeOn() && ch.contentSel.isBlank()
         val willRetry = retryList.isNotEmpty() && (failedRetryTries[keyOf(ch)] ?: 0) < 2
-        val retryNote = if (willRetry) "\n⏳ Retrying automatically in 15 s…" else ""
-        // The chapter goes straight into the chatbot box (just press Send); the clipboard is the fallback only.
+        if (isImageRegionJob) {
+            // A failed Send must not strand the OCR source text in the composer. Retry the exact marked,
+            // region-aware request instead; never ask the user to submit unanchored source paragraphs.
+            chatWv.evaluateJavascript(Js.clearSendState(), null)
+            chatWv.evaluateJavascript(Js.clearBox(), null)
+            if (willRetry) scheduleFailedRetry(retryList)
+            val recovery = if (willRetry) {
+                "The marked OCR request will retry automatically; no unanchored text was left in the composer."
+            } else {
+                "No unanchored text was left in the composer. Check the chatbot connection, then run OCR again."
+            }
+            toast("❌ $msg\n" + recovery)
+            updateProgressUi()
+            restoreChapterAfterBubbleJob()
+            handler.postDelayed({ pumpRealtimeAheadTranslation() }, 600L)
+            return
+        }
+        val manualText = promptWithGlossary(Prefs.activeTranslationPrompt(this), ch.text) + ch.text
+        // Non-image novels may expose paragraph text for a manual retry. Image/OCR jobs never do:
+        // without markers and their region map the source cannot be placed correctly.
         insertIntoChatBox(manualText) { ok ->
             if (!ok) copy(manualText)
-            toast("❌ $msg\n" + (if (ok) "✍️ Chapter text is in the chatbot box — press Send, then Copy → 💾." else "📋 Chapter copied. Paste it into the chatbot and tap Copy → 💾.") + retryNote)
+            toast("❌ $msg\n" + (if (ok) "✍️ Chapter text is in the chatbot box — press Send, then Copy → 💾." else "📋 Chapter copied. Paste it into the chatbot and tap Copy → 💾."))
         }
         if (retryList.isNotEmpty()) scheduleFailedRetry(retryList)
         updateProgressUi()
@@ -8648,7 +9318,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     }
 
     private fun isDeepSeekLivePanel(ch: Chapter): Boolean =
-        !JapaneseMangaSession.isManaged(ch) && webModeOn() && ch.contentSel.isBlank() &&
+        webModeOn() && ch.contentSel.isBlank() &&
+            // Manual lite is a single-shot read of one tapped crop. Treating it as a live panel let the
+            // realtime machinery adopt the chapter and keep scanning after the tap, which is exactly the
+            // memory pressure the mode exists to avoid.
+            !manualExtractOn() &&
             (DeepSeekRealtimeTranslation.isEnabled(this) || isScanRegionBatch(ch))
 
     /**
@@ -8799,35 +9473,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     }
 
     private fun applyTranslation(ch: Chapter, text: String, retry: Boolean) {
-        // Dedicated Japanese manga result: reuse the existing bubble writer, without switching
-        // the standard Web Mode toggle or changing the normal Webtoon extraction pipeline.
-        if (JapaneseMangaSession.isManaged(ch) && ch.contentSel.isBlank()) {
-            shownTrRaw = text
-            if (lastChapter !== ch) return
-            injectBengaliFont()
-            val mangaLayout = WebModeLayoutStore.getScan(ch.url)
-            val aligned = mangaLayout?.let { WebModeLayout.align(text, it) }
-            val script = if (mangaLayout != null && aligned != null) {
-                WebModeLayoutStore.replace(this, ch.url, WebModeLayout.translated(mangaLayout, aligned))
-                WebModeWriter.bubbleScript(mangaLayout, aligned, Prefs.fontFile(this), pageKey(ch.url))
-            } else {
-                toast("Something went wrong. Please use Realtime mode.")
-                return
-            }
-            val placementId = beginTranslationPlacement()
-            novelWv.evaluateJavascript(script) { result ->
-                finishTranslationPlacement(placementId)
-                if (lastChapter !== ch) return@evaluateJavascript
-                if (result != null && result.contains("ok")) {
-                    hasTr = true
-                    shownTranslated = true
-                    updatePill()
-                } else {
-                    toast("⚠️ Could not place manga translation; it remains saved in the library")
-                }
-            }
-            return
-        }
         // Web Mode (image chapters): there is no text node to replace, so show a reader panel instead.
         if (webModeOn() && ch.contentSel.isBlank()) {
             shownTrRaw = text
@@ -8840,7 +9485,9 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // use the layout captured with its own request; if absent, fail closed rather than guess.
             val wmLayout = if (livePanelBatch) realtimeBatchLayout(ch)
                 else WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
-            val wmPlaced = wmLayout?.let { WebModeLayout.align(text, it) }
+            // Strict marker alignment first; a single-bubble layout falls back to its one box instead of
+            // dropping the answer ("marker not found" used to leave the bubble untranslated).
+            val wmPlaced = wmLayout?.let { WebModeLayout.alignWithFallback(text, it) }
             val wmScript: String
             if (livePanelBatch) {
                 if (wmLayout == null || wmPlaced == null) {
@@ -8850,10 +9497,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     return
                 }
                 val cumulative = WebModeLayoutStore.mergeTranslated(this, ch.url, wmLayout, wmPlaced)
+                val requiredPlacementKeys = wmLayout.bubbles.mapIndexedNotNull { index, bubble ->
+                    if (wmPlaced.getOrNull(index).isNullOrBlank()) null else WebModeLayout.bubbleIdentity(bubble)
+                }.toSet()
                 wmScript = WebModeWriter.bubbleScript(
                     cumulative,
                     cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-                    Prefs.fontFile(this), pageKey(ch.url)
+                    Prefs.fontFile(this), pageKey(ch.url),
+                    requiredBubbleKeys = requiredPlacementKeys
                 )
             } else if (wmLayout != null && wmPlaced != null) {
                 val translatedLayout = WebModeLayout.translated(wmLayout, wmPlaced)
@@ -8865,13 +9516,16 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 return
             }
             val placementId = beginTranslationPlacement()
-            novelWv.evaluateJavascript(wmScript) { r ->
+            var placementFinished = false
+            fun finishPlacement(ok: Boolean) {
+                if (placementFinished) return
+                placementFinished = true
                 finishTranslationPlacement(placementId)
                 if (lastChapter !== ch) {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
-                    return@evaluateJavascript
+                    return
                 }
-                if (r != null && r.contains("ok")) {
+                if (ok) {
                     if (livePanelBatch) {
                         val matched = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
                             if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else WebModeLayout.fingerprint(bubble)
@@ -8882,10 +9536,34 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     shownTranslated = true
                     updatePill()
                 } else {
-                    if (livePanelBatch) releaseDeepSeekHashBatch(ch)
-                    toast("⚠️ Could not show the translation on this page; it is saved in the library")
+                    if (livePanelBatch) {
+                        releaseDeepSeekHashBatch(ch)
+                        toast("⚠️ The translation could not be attached to the visible bubbles; they can be retried by the next scan")
+                    } else {
+                        toast("⚠️ Could not show the translation on this page; it is saved in the library")
+                    }
                 }
                 if (livePanelBatch) restoreChapterAfterBubbleJob(ch.url)
+            }
+            fun waitForRequiredPlacement(attemptsLeft: Int) {
+                if (lastChapter !== ch) { finishPlacement(false); return }
+                novelWv.evaluateJavascript(
+                    "(function(){var r=window.__nsLayoutReport;" +
+                        "return r&&r.requiredTotal>0&&r.requiredVisible>=r.requiredTotal?'ok':'pending';})()"
+                ) { status ->
+                    if (status != null && status.contains("ok")) finishPlacement(true)
+                    else if (attemptsLeft > 0) handler.postDelayed({ waitForRequiredPlacement(attemptsLeft - 1) }, 250L)
+                    else finishPlacement(false)
+                }
+            }
+            novelWv.evaluateJavascript(wmScript) { r ->
+                if (livePanelBatch && r != null && r.contains("pending")) {
+                    // The overlay will retry geometry binding as the canvas settles. Confirm a real placement
+                    // before marking these OCR hashes complete, otherwise the scanner silently skips them forever.
+                    waitForRequiredPlacement(6)
+                } else {
+                    finishPlacement(r != null && r.contains("ok"))
+                }
             }
             return
         }
@@ -9429,7 +10107,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "✏️ AdBlock Rules (paste)", menuPrefetchDepthLabel(), menuWebModeLabel(), DeepSeekRealtimeTranslation.menuLabel(this),
             "📝 Edit Prompt For Live Translation", menuForceLabel(),
             "🤖 AI Scan Page Links & Update AdBlock", menuRtPromptLabel(),
-            "🎌 Japanese Manga Engine (optional)", menuTextRemovalLabel(),
+            "(removed)", menuTextRemovalLabel(),
             menuAutoFreshChatLabel(), menuExtraChatDelayLabel(), menuScanIntervalLabel(),
             "🖼 Scan Report: images (Copy)", menuForceLoadLabel(), menuSendHoldLabel(),
             "🐞 Copy crash / freeze log", menuBatchLabel(),
@@ -9441,7 +10119,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
             "🧹 Clear OCR Log (then reproduce the problem)",
-            menuYoloLabel()
+            menuDetectorLabel(), menuRealtimeAutoOcrLabel()
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -9450,7 +10128,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
             27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT,
-            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH
+            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH, 61 to Ic.BOLT
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
@@ -9463,7 +10141,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         )
         val advanced = listOf(
             "TRANSLATION" to listOf(47, 12, 19, 14, 26, 30, 39, 40, 44, 46),
-            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 37, 38, 41, 43, 48, 49, 51),
+            "WEBTOON TOOLS" to listOf(31, 32, 36, 34, 38, 41, 43, 48, 49, 51, 61),
             "BROWSER" to listOf(15, 16, 21, 24, 29, 35),
             "DIAGNOSTICS" to listOf(22, 27, 28, 42, 45, 52)
         )
@@ -9591,11 +10269,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     val on = !Prefs.bool(this, "wmTextRemoval2", true)
                     Prefs.putBool(this, "wmTextRemoval2", on)
                     if (on) {
-                        toast("🧽 Text Remover ON — next Web Mode/Japanese Manga OCR scan will clean only safe text pixels.")
+                        toast("🧽 Text Remover ON — next OCR pass uses the full safe pixel-cleaner path.")
                     } else {
                         WebModeTextRemovalCache.clear(this)
                         novelWv.evaluateJavascript("(function(){var l=document.getElementById('__ns_wm_clean_layer');if(l&&l.parentNode)l.parentNode.removeChild(l);var w=document.getElementById('__ns_wm_overlay');if(w){var bs=w.querySelectorAll('.__ns_b[data-cl]');for(var i=0;i<bs.length;i++){var b=bs[i],bg=b.getAttribute('data-bg')||'#FFFFFF',sf=b.getAttribute('data-sf')==='1';b.style.background=bg;b.style.borderRadius=sf?'12px':'4px';b.style.boxShadow=sf?'0 0 7px 5px '+bg:'0 0 0 3px '+bg;b.removeAttribute('data-cl');}}})()", null)
-                        toast("🧽 Text Remover OFF — active cleaned overlay removed; original page remains intact.")
+                        toast("🫧 Mask-only mode ON — next OCR pass uses detected balloon masks with OCR text regions; unmatched text keeps the safe cover overlay.")
                     }
                     refresh(i, menuTextRemovalLabel())
                 }
@@ -9663,7 +10341,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     copy(full)
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
-                60 -> { yoloDialog { refresh(i, menuYoloLabel()) } }
+                60 -> { detectorDialog { refresh(i, menuDetectorLabel()) } }
+                61 -> { setRealtimeAutoOcrEnabled(!Prefs.bool(this, "rtAutoOcrEnabled", true)); refresh(i, menuRealtimeAutoOcrLabel()) }
                 59 -> {
                     OcrDiag.clear()
                     toast("🧹 OCR log cleared — now open the page, scan, then copy the log")
@@ -9699,17 +10378,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     Prefs.put(this, "chatExtraDelayMs", next.toString())
                     refresh(i, menuExtraChatDelayLabel())
                     toast("⏱ Extra request delay: " + menuExtraChatDelayLabel().substringAfter(": "))
-                }
-                37 -> {
-                    val sourceUrl = novelWv.url.orEmpty()
-                    dlg.dismiss()
-                    startActivityForResult(Intent(
-                        this,
-                        com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity::class.java
-                    ).putExtra(
-                        com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.EXTRA_PAGE_URL,
-                        sourceUrl
-                    ), com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.REQUEST_CODE)
                 }
                 19 -> { dlg.dismiss(); glossaryDialog() }
                 20 -> {
@@ -10269,40 +10937,96 @@ ${rows.take(220).joinToString("\n")}
     private fun menuAdBlockLabel(): String =
         (if (Prefs.adblock(this)) "✅" else "⬜") + " Ad Block"
 
-    private fun menuYoloLabel(): String =
-        "🫧 Bubble Detector (YOLO, optional): " + (if (YoloBubbleDetector.enabled(this)) "ACTIVE" else if (YoloBubbleDetector.isInstalled(this)) "installed" else "light mode")
+    private fun detectorRowLabel(): String {
+        val state = when {
+            BubbleDetector.isDownloading() && BubbleDetector.downloadPercent() >= 100 -> "download complete · validating…"
+            BubbleDetector.isDownloading() -> "downloading… " + BubbleDetector.downloadPercent() + "%"
+            BubbleDetector.enabled(this) -> "ACTIVE"
+            BubbleDetector.isInstalled(this) -> "installed (mode: " + BubbleDetector.mode(this) + ")"
+            else -> "not installed · tap to download (≈ 42 MB)"
+        }
+        return "🫧 Bubble & text detector\n" + state +
+            (if (BubbleDetector.lastError.isNotBlank()) " · " + BubbleDetector.lastError.take(60) else "")
+    }
+
+    private fun inpaintRowLabel(): String {
+        val state = when {
+            WebModeInpainter.isDownloading() -> "downloading…"
+            WebModeInpainter.tooSlow -> "installed · paused for a few minutes (this phone was too slow)"
+            WebModeInpainter.isReady(this) -> "installed · used automatically for lettering on artwork"
+            else -> "not installed · tap to download (≈ 37 MB)"
+        }
+        return "🎨 AI text eraser (LaMa)\n" + state
+    }
+
+    private fun inpaintDialog() {
+        if (WebModeInpainter.isDownloading()) { toast("⬇️ Still downloading…"); return }
+        if (WebModeInpainter.isReady(this)) {
+            AlertDialog.Builder(this)
+                .setMessage("Delete the AI text eraser model? Flat bubbles are still cleaned without it.")
+                .setPositiveButton("Delete") { _, _ -> WebModeInpainter.delete(this); toast("🗑 AI text eraser deleted") }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        toast("⬇️ Downloading the AI text eraser…")
+        var lastPct = -25
+        WebModeInpainter.download(this, { done, total ->
+            val pct = if (total > 0) (done * 100 / total).toInt() else 0
+            if (pct >= lastPct + 25) { lastPct = pct; runOnUiThread { toast("⬇️ AI text eraser $pct%") } }
+        }, { err ->
+            runOnUiThread { toast(if (err == null) "✅ AI text eraser installed and tested" else "❌ AI text eraser: $err") }
+        })
+    }
+
+    private fun menuDetectorLabel(): String =
+        "🫧 Bubble & text detector: " + (if (BubbleDetector.enabled(this)) "ACTIVE" else if (BubbleDetector.isInstalled(this)) "installed" else "not installed")
 
     /**
-     * Optional precise bubble detector for phones with plenty of RAM. The model file is downloaded by the user (from the
-     * Manga Translator project) and imported here with a file picker: the app copies it to its own folder, so no path has
-     * to be typed or fixed afterwards.
+     * Koharu YOLO26s ONNX segmentation model (≈ 42 MB). The file is downloaded from inside the app and accepted
+     * only after the exact size, pinned SHA-256, output-contract self-test and real inference smoke test succeed.
      */
-    private fun yoloDialog(onChanged: () -> Unit) {
-        AlertDialog.Builder(this)
-            .setTitle("Bubble Detector (YOLO)")
-            .setMessage(YoloBubbleDetector.status(this) +
-                "\n\nThe app already finds bubble shapes without any download (light mode). This model is only for phones " +
-                "with 6 GB RAM or more and gives exact balloon outlines. File needed: mixed-dual-s-e5_float16.tflite")
-            .setPositiveButton("Import model file") { _, _ ->
-                val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                }
-                startActivityForResult(i, REQ_YOLO_MODEL)
+    private fun detectorDialog(onChanged: () -> Unit) {
+        val installed = BubbleDetector.isInstalled(this)
+        val b = AlertDialog.Builder(this)
+            .setTitle("Bubble & text detector")
+            .setMessage(BubbleDetector.status(this) +
+                "\n\nKoharu segments frame, dialogue_text, balloon and onomatopoeia_text regions and returns instance masks. " +
+                "Input resolution adapts to available RAM; low-memory phones use smaller stride-aligned inputs.")
+        if (!installed && !BubbleDetector.isDownloading()) {
+            b.setPositiveButton("Download (≈ 42 MB)") { _, _ ->
+                toast("⬇️ Downloading the detector…")
+                BubbleDetector.download(this, { pct ->
+                    if (pct == 100) {
+                        runOnUiThread { toast("✅ Download complete · checking model safely…") }
+                    } else if (pct > 0 && pct % 25 == 0) {
+                        runOnUiThread { toast("⬇️ Detector download $pct%") }
+                    }
+                }, { err ->
+                    runOnUiThread {
+                        toast(if (err == null) "✅ Koharu installed and tested on this phone" else "❌ Koharu: $err")
+                        onChanged()
+                    }
+                })
             }
-            .setNeutralButton("Mode: " + YoloBubbleDetector.mode(this)) { _, _ ->
-                val next = when (YoloBubbleDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
-                Prefs.put(this, "wmYoloMode", next)
-                if (next == "off") YoloBubbleDetector.release()
+        }
+        if (installed) {
+            b.setPositiveButton("Mode: " + BubbleDetector.mode(this)) { _, _ ->
+                val next = when (BubbleDetector.mode(this)) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
+                BubbleDetector.setMode(this, next)
                 toast("Bubble detector mode: $next")
                 onChanged()
             }
-            .setNegativeButton("Remove model") { _, _ -> YoloBubbleDetector.delete(this); toast("Model removed"); onChanged() }
-            .show()
+            b.setNegativeButton("Remove model") { _, _ -> BubbleDetector.delete(this); toast("Model removed"); onChanged() }
+        } else {
+            b.setNegativeButton("Close", null)
+        }
+        b.show()
     }
 
     private fun menuTextRemovalLabel(): String =
-        (if (Prefs.bool(this, "wmTextRemoval2", true)) "✅" else "⬜") + " 🧽 Text Remover (Webtoon + Manga)"
+        if (Prefs.bool(this, "wmTextRemoval2", true)) "✅ 🧽 Text Remover (Webtoon + Manga)"
+        else "🫧 Balloon Mask Mode (Webtoon + Manga)"
 
     /** Glass bottom sheet with one tappable row per label (long-press optional). */
     /** A sheet with a search box on top; used for the long language lists. */
@@ -10472,7 +11196,6 @@ ${rows.take(220).joinToString("\n")}
         startActivityForResult(i, 42)
     }
 
-    private val REQ_YOLO_MODEL = 4731
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -10484,58 +11207,7 @@ ${rows.take(220).joinToString("\n")}
             } catch (e: Exception) {
                 toast("❌ " + (e.message ?: "Failed"))
             }
-        } else if (requestCode == REQ_YOLO_MODEL) {
-            val u = data?.data
-            if (resultCode == RESULT_OK && u != null) {
-                toast("Importing model...")
-                Thread {
-                    val err = YoloBubbleDetector.importFrom(this, u)
-                    runOnUiThread {
-                        toast(if (err == null) "✅ Model imported. " + (if (YoloBubbleDetector.libraryPresent()) "" else "Add the LiteRT line to app/build.gradle to use it.") else "❌ $err")
-                    }
-                }.start()
-            }
-        } else if (requestCode == com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.REQUEST_CODE &&
-            resultCode == RESULT_OK) {
-            handleJapaneseMangaResult(data)
         }
-    }
-
-    private fun handleJapaneseMangaResult(data: Intent?) {
-        val raw = data?.getStringExtra(
-            com.ashraf.novelstudio.japanesemanga.JapaneseMangaEngineActivity.EXTRA_RESULT_JSON
-        ).orEmpty()
-        if (raw.isBlank()) return toast("⚠️ Japanese Manga OCR result is empty")
-        val parsed = JapaneseMangaResultParser.parse(raw)
-            ?: return toast("⚠️ Japanese Manga OCR result is invalid; nothing was sent")
-        val pageUrl = parsed.pageUrl
-        if (cleanUrl(pageUrl) != cleanUrl(novelWv.url.orEmpty())) {
-            toast("⚠️ Page changed while OCR was running; no translation was started")
-            return
-        }
-        val layout = parsed.layout
-        if (layout.bubbles.isEmpty()) return toast("⚠️ No manga text regions to translate")
-        val sourceText = layout.bubbles.joinToString("\n\n") { it.sourceText.trim() }
-        if (sourceText.isBlank()) return toast("⚠️ OCR text is empty")
-        WebModeLayoutStore.setScan(pageUrl, layout)
-        val host = Uri.parse(pageUrl).host.orEmpty().lowercase().removePrefix("www.")
-        val title = novelWv.title.orEmpty().trim().ifBlank { "Japanese Manga" }
-        val chapter = Chapter(
-            title = title,
-            text = sourceText,
-            next = null,
-            prev = null,
-            url = pageUrl,
-            novel = host.ifBlank { "Japanese Manga" },
-            number = "",
-            contentSel = "",
-            titleSel = "",
-            nextSel = "",
-            prevSel = ""
-        )
-        JapaneseMangaSession.register(chapter)
-        toast("🎌 Manga OCR: ${layout.bubbles.size} text regions · sending for translation")
-        handleChapter(chapter, useSavedTranslation = false)
     }
 
     // ---------- bookmarks ----------
@@ -10686,6 +11358,7 @@ ${rows.take(220).joinToString("\n")}
     }
 
     override fun onDestroy() {
+        try { com.ashraf.novelstudio.manualextract.ManualExtractController.release() } catch (_: Throwable) {}
         ScanKeepAlive.stop(this)
         aheadOcrHandle?.cancel()
         webModeHandle?.cancel()
@@ -10720,6 +11393,7 @@ ${rows.take(220).joinToString("\n")}
         try { prefetchWv.destroy() } catch (_: Exception) {}
         botWebViews.values.toSet().forEach { wv -> try { wv.destroy() } catch (_: Exception) {} }
         botWebViews.clear()
+        chipStatusExecutor.shutdownNow()
         super.onDestroy()
     }
 }

@@ -3,7 +3,7 @@ package com.ashraf.novelstudio
 import android.app.ActivityManager
 import android.content.Context
 
-/** RAM-based device class used to pick safe-but-fast OCR defaults (Paddle detector size, threads, recommendation). */
+/** RAM-based device class used to pick safe-but-fast defaults (bubble detector on/off, inpainting). */
 internal object DeviceTier {
     enum class Tier { LOW, MID, HIGH }
 
@@ -27,24 +27,5 @@ internal object DeviceTier {
         }
         cached = t
         t
-    }
-
-    fun detMaxPixels(c: Context): Long = when (tier(c)) {
-        Tier.LOW -> 1_200_000L
-        Tier.MID -> 2_000_000L
-        Tier.HIGH -> 3_000_000L
-    }
-
-    fun threads(c: Context, packDefault: Int): Int = when (tier(c)) {
-        Tier.LOW -> packDefault
-        Tier.MID -> maxOf(packDefault, 3)
-        Tier.HIGH -> maxOf(packDefault, 4)
-    }
-
-    /** Engine key to flag as "Recommended" in the picker. */
-    fun recommendedEngine(c: Context): String = when (tier(c)) {
-        Tier.HIGH -> "paddle_heavy"
-        Tier.MID -> "paddle_small"
-        Tier.LOW -> "mlkit"
     }
 }

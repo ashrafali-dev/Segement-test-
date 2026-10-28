@@ -26,25 +26,102 @@ internal object WebModeTextRemovalCache {
     private var usedBytes = 0L
     /** Per source image: keys of the artwork (soft) bubbles whose lettering the remover really erased. */
     private val erasedSoft = LinkedHashMap<String, Set<String>>()
+    /** Hash of the unmodified source pixels. URL alone is not enough for virtualized/recycled images or canvas slots. */
+    private val originalDigests = LinkedHashMap<String, String>(16, 0.75f, true)
 
-    /** Stable id of a bubble by its (rounded) position; the writer looks it up with the same function. */
+    /**
+     * Stable id of a bubble by its rounded cover geometry AND original OCR-ink geometry.
+     * If a later scan recovers another row inside the same cover shape, its OCR box changes and an earlier
+     * partial erase must not be mistaken for proof that the whole bubble is clean.
+     */
     fun bubbleKey(b: WmBubble): String =
-        "${k(b.cx)}:${k(b.cy)}:${k(b.w)}:${k(b.h)}"
+        "${k(b.cx)}:${k(b.cy)}:${k(b.w)}:${k(b.h)}:${k(b.ocrCx)}:${k(b.ocrCy)}:${k(b.ocrW)}:${k(b.ocrH)}"
 
     // The saved layout stores every number rounded to 5 decimals. Rounding to 5 decimals FIRST makes the key of the freshly
     // read bubble and of the same bubble after the save/load round trip identical (before, ~3 % of the bubbles landed on
     // the other side of a .0005 boundary, lost their "erased" mark and fell back to a background box).
     private fun k(v: Float): Long = Math.round((Math.round(v * 100000.0) / 100000.0) * 1000.0)
 
+    /**
+     * Validate the source pixels before reusing a cleaned image. A virtualized WebView can recycle one URL/slot
+     * for new pixels; carrying the old cleaned bitmap across that boundary erased artwork from the next panel.
+     * Returns true when a stale/unverifiable cache was invalidated.
+     */
+    @Synchronized
+    fun prepareSource(sourceUrl: String, originalImage: ByteArray): Boolean {
+        if (sourceUrl.isBlank() || originalImage.isEmpty()) return false
+        val state = stateKey(sourceUrl)
+        val digest = sha256Bytes(originalImage)
+        val previous = originalDigests[state]
+        if (previous == digest) return false
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl)
+        val hasCachedPixels = if (slot != null) canvasUrls.containsKey(slot)
+            else entries.containsKey(key(sourceUrl))
+        val hadState = erasedSoft.containsKey(state)
+        val stale = previous != null || hasCachedPixels || hadState
+        if (stale) invalidateLocked(sourceUrl)
+        originalDigests[state] = digest
+        while (originalDigests.size > 200) originalDigests.remove(originalDigests.keys.first())
+        return stale
+    }
+
+    private fun invalidateLocked(sourceUrl: String) {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl)
+        if (slot != null) canvasUrls.remove(slot)
+        val cacheKey = key(sourceUrl)
+        entries.remove(cacheKey)?.let { entry ->
+            usedBytes -= entry.bytes
+            runCatching { entry.file.delete() }
+        }
+        val state = stateKey(sourceUrl)
+        erasedSoft.remove(state)
+        originalDigests.remove(state)
+    }
+
     @Synchronized
     fun setErased(sourceUrl: String, keys: Set<String>) {
-        erasedSoft[key(sourceUrl)] = keys
+        erasedSoft[stateKey(sourceUrl)] = keys
         while (erasedSoft.size > 200) erasedSoft.remove(erasedSoft.keys.first())
     }
 
     @Synchronized
     fun isErased(sourceUrl: String, bubbleKey: String): Boolean =
-        erasedSoft[key(sourceUrl)]?.contains(bubbleKey) == true
+        erasedSoft[stateKey(sourceUrl)]?.contains(bubbleKey) == true
+
+    /** Snapshot of the verified bubbles for this source. Used when multiple OCR passes clean one panel. */
+    @Synchronized
+    fun erasedKeys(sourceUrl: String): Set<String> = erasedSoft[stateKey(sourceUrl)]?.toSet() ?: emptySet()
+
+    /**
+     * Return the existing cleaned image bytes so a later pass can add newly recovered lines WITHOUT
+     * rebuilding from the original and accidentally bringing already-cleaned bubbles back.
+     * Only one caller decodes/cleans at a time; the byte-size cap matches the cleaner's input limit.
+     */
+    @Synchronized
+    fun readCleanedBytes(sourceUrl: String): ByteArray? {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl)
+        if (slot != null) {
+            val data = canvasUrls[slot] ?: return null
+            val comma = data.indexOf(',')
+            if (comma < 0) return null
+            return try {
+                android.util.Base64.decode(data.substring(comma + 1), android.util.Base64.DEFAULT)
+                    .takeIf { it.isNotEmpty() && it.size <= 18 * 1024 * 1024 }
+            } catch (_: Throwable) { null }
+        }
+        val k = key(sourceUrl)
+        val entry = entries[k] ?: return null
+        if (!entry.file.isFile || entry.file.length() != entry.bytes ||
+            entry.bytes !in 1..(18L * 1024 * 1024)) {
+            entries.remove(k)
+            usedBytes = entries.values.sumOf { it.bytes }
+            return null
+        }
+        return try {
+            entry.file.readBytes().takeIf { it.size.toLong() == entry.bytes && it.isNotEmpty() }
+        } catch (_: Throwable) { null }
+    }
+
     private var root: File? = null
 
     @Synchronized
@@ -82,11 +159,44 @@ internal object WebModeTextRemovalCache {
         return false
     }
 
+    /**
+     * Cleaned pixels for a canvas panel, as a data: URL, keyed by the canvas slot.
+     *
+     * Canvas panels have no image URL to store a file under and their synthetic source changes with every
+     * scroll position, so these live in memory only and are bounded. Without this the overlay had nothing to
+     * draw and the original Japanese lettering stayed visible under the translation.
+     */
+    private val canvasUrls = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 12
+    }
+
+    @Synchronized
+    fun storeCanvasCleaned(sourceUrl: String, dataUrl: String) {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return
+        canvasUrls[slot] = dataUrl
+    }
+
+    @Synchronized
+    private fun canvasUrlFor(sourceUrl: String): String? {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return null
+        return canvasUrls[slot]
+    }
+
     @Synchronized
     fun urlFor(sourceUrl: String): String? {
+        // A canvas panel is served from the in-memory table, not the on-disk cache.
+        canvasUrlFor(sourceUrl)?.let { return it }
+        // has() verifies the file is still there, so the overlay never receives a URL whose bytes are gone
+        // (that left a broken <img>: no cleaned picture AND no cover box, original lettering showing through).
         if (!has(sourceUrl)) return null
         val raw = sourceUrl.substringBefore('#')
-        if (Uri.parse(raw).getQueryParameter(MARKER) == "1") return raw
+        // getQueryParameter() throws UnsupportedOperationException unless the URI is hierarchical.
+        // blob:, data: and a canvas panel's synthetic identity ("ns-canvas:<left>,<top>,WxH") are all
+        // non-hierarchical, so they must never be parsed — the whole app died here just as a translation
+        // was about to be placed. Non-hierarchical sources are used verbatim as the cache key instead.
+        val parsed = try { Uri.parse(raw) } catch (_: Throwable) { null }
+        if (parsed == null || !parsed.isHierarchical) return raw
+        if (parsed.getQueryParameter(MARKER) == "1") return raw
         val sep = when {
             '?' !in raw -> "?"
             raw.endsWith("?") || raw.endsWith("&") -> ""
@@ -97,6 +207,8 @@ internal object WebModeTextRemovalCache {
 
     /** Called by NovelClient.shouldInterceptRequest; non-remover requests always fall through. */
     fun intercept(uri: Uri): WebResourceResponse? {
+        // Same guard: a non-hierarchical URI (blob:, data:) would throw here too, on the WebView's own thread.
+        if (!uri.isHierarchical) return null
         if (uri.getQueryParameter(MARKER) != "1") return null
         val source = stripMarker(uri.toString())
         val entry = synchronized(this) {
@@ -122,6 +234,8 @@ internal object WebModeTextRemovalCache {
         entries.values.forEach { runCatching { it.file.delete() } }
         entries.clear()
         erasedSoft.clear()
+        originalDigests.clear()
+        canvasUrls.clear()
         usedBytes = 0L
         val dir = root ?: File(context.cacheDir, "wm_text_removed")
         runCatching { if (dir.exists()) dir.deleteRecursively() }
@@ -147,6 +261,9 @@ internal object WebModeTextRemovalCache {
         }
     }
 
+    private fun stateKey(url: String): String =
+        WebModeLayoutStore.canvasSourceSlot(url) ?: key(url)
+
     private fun key(url: String): String = stripMarker(url).substringBefore('#').trim()
 
     private fun stripMarker(raw: String): String {
@@ -161,6 +278,11 @@ internal object WebModeTextRemovalCache {
 
     private fun sha256(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256Bytes(value: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value)
         return digest.joinToString("") { "%02x".format(it) }
     }
 }

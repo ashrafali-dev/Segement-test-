@@ -167,6 +167,7 @@ internal object BubbleFitCore {
         val sh = (h + ds - 1) / ds
         // A cell is paper only if EVERY pixel of its block is paper coloured: thin outlines must survive the shrink.
         val paper = BooleanArray(sw * sh)
+        val darkest = IntArray(sw * sh) { 255 }   // darkest pixel of each cell: tells an inked outline from a soft edge
         for (sy in 0 until sh) {
             val y0 = sy * ds
             val y1 = minOf(h, y0 + ds)
@@ -174,17 +175,22 @@ internal object BubbleFitCore {
                 val x0 = sx * ds
                 val x1 = minOf(w, x0 + ds)
                 var ok = true
+                var dk = 255
                 var y = y0
-                while (ok && y < y1) {
+                while (y < y1) {
                     val row = y * w
                     var x = x0
                     while (x < x1) {
-                        if (dist(px[row + x], bg) > TOL) { ok = false; break }
+                        val c = px[row + x]
+                        if (ok && dist(c, bg) > TOL) ok = false
+                        val lum = (ch(c, 16) * 30 + ch(c, 8) * 59 + ch(c, 0) * 11) / 100
+                        if (lum < dk) dk = lum
                         x++
                     }
                     y++
                 }
                 paper[sy * sw + sx] = ok
+                darkest[sy * sw + sx] = dk
             }
         }
 
@@ -217,6 +223,24 @@ internal object BubbleFitCore {
         for (cx in 0 until sw) { if (filled[cx]) edge++; if (filled[(sh - 1) * sw + cx]) edge++ }
         for (cy in 0 until sh) { if (filled[cy * sw]) edge++; if (filled[cy * sw + sw - 1]) edge++ }
         if (edge * 100 > 2 * (sw + sh) * 15) return null
+
+        // A speech bubble is closed by an INKED outline. Light wall, sign or sky areas that merely differ a little
+        // from the art around them have no dark rim: they are scenery, not a bubble.
+        var rim = 0
+        var rimDark = 0
+        for (cy in 0 until sh) for (cx in 0 until sw) {
+            if (!filled[cy * sw + cx]) continue
+            for (k in 0..3) {
+                val nx = cx + (if (k == 0) 1 else if (k == 1) -1 else 0)
+                val ny = cy + (if (k == 2) 1 else if (k == 3) -1 else 0)
+                if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue
+                val j = ny * sw + nx
+                if (filled[j]) continue
+                rim++
+                if (darkest[j] < 120) rimDark++
+            }
+        }
+        if (rim > 0 && rimDark * 100 < rim * 45) return null
 
         // Lettering is not paper coloured: count the recognised boxes as inside, then close every pocket that is
         // completely surrounded by bubble (glyph islands, lettering the recogniser missed).
@@ -261,6 +285,14 @@ internal object BubbleFitCore {
             pushOut(cx + 1, cy); pushOut(cx - 1, cy); pushOut(cx, cy + 1); pushOut(cx, cy - 1)
         }
         var area = 0
+        var base = 0
+        var pockets = 0
+        for (i in filled.indices) {
+            if (filled[i]) base++ else if (!outside[i]) pockets++
+        }
+        // A real bubble only encloses small islands (the inside of letters, a missed word). A "bubble" that swallows a big
+        // island is an open page background around some artwork (a bowl, a character): not a bubble at all.
+        if (pockets * 100 > base * 30) return null
         for (i in filled.indices) {
             if (!filled[i] && !outside[i]) filled[i] = true
             if (filled[i]) area++

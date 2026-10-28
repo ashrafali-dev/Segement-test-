@@ -41,6 +41,12 @@ internal data class OcrBlock(
 
 internal class OcrResult(val blocks: List<OcrBlock>) {
     val text: String get() = blocks.joinToString("\n\n") { it.text.trim() }.trim()
+
+    /**
+     * Label of the engine that actually produced THIS result (e.g. "Google Lens", "ML Kit"). Stored per result so
+     * diagnostics never read the racy process-global [OcrEngineStatus.label]. Set by [RoutingOcrEngine] before return.
+     */
+    @Volatile var engineLabel: String = ""
 }
 
 /** Failure reported by an engine (model missing, init failure, ...). */
@@ -291,7 +297,7 @@ internal object OcrPost {
      * sit right next to each other. Before, vertical blocks were never joined, so each column became its own bubble:
      * one got the translation and the other kept its original lettering, and the sentence reached the chatbot in pieces.
      */
-    private fun joinableColumns(a: OcrBlock, b: OcrBlock): Boolean {
+    internal fun joinableColumns(a: OcrBlock, b: OcrBlock): Boolean {
         if (Math.abs(a.angle) >= 6f || Math.abs(b.angle) >= 6f) return false
         val fa = if (a.fontPx > 0f) a.fontPx else a.w
         val fb = if (b.fontPx > 0f) b.fontPx else b.w
@@ -340,6 +346,14 @@ internal object OcrPost {
         val bot = if (top === a) b else a
         val gap = (bot.cy - bot.h / 2) - (top.cy + top.h / 2)
         if (gap > f * 1.7f || gap < -f * 0.6f) return false
+        // A big title above a small side note is NOT one sentence. (The report: the title and two side notes of a
+        // recipe panel became ONE paragraph - one marker - and the Bengali was written at the title's place.)
+        // Very different sizes are only one bubble when they are tightly stacked and share the same middle,
+        // like an emphasised word inside a speech bubble.
+        if (ratio < 0.62f || ratio > 1.6f) {
+            if (gap > f * 0.8f) return false
+            if (Math.abs(a.cx - b.cx) > Math.max(a.w, b.w) * 0.2f) return false
+        }
         val ox = Math.min(a.cx + a.w / 2, b.cx + b.w / 2) - Math.max(a.cx - a.w / 2, b.cx - b.w / 2)
         val narrow = Math.min(a.w, b.w)
         if (narrow <= 0f || ox < narrow * 0.3f) return false
@@ -358,7 +372,7 @@ internal object OcrPost {
             val t = Math.min(a.cy - a.h / 2, b.cy - b.h / 2)
             val bt = Math.max(a.cy + a.h / 2, b.cy + b.h / 2)
             return OcrBlock(
-                rightB.text.trim() + " " + leftB.text.trim(), t.toInt(), l.toInt(),
+                rightB.text.trim() + leftB.text.trim(), t.toInt(), l.toInt(),
                 (l + r) / 2f, (t + bt) / 2f, r - l, bt - t, 0f,
                 Math.max(a.fontPx, b.fontPx), true
             )

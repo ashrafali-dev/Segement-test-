@@ -1,0 +1,38 @@
+package com.ashraf.novelstudio.manualextract
+
+import android.util.Log
+import com.ashraf.novelstudio.OcrDiag
+
+/** Per-step timings for one manual-extract run, emitted under [ManualExtractConfig.TAG]. */
+internal class ManualExtractMetrics {
+    private val marks = LinkedHashMap<String, Long>()
+    private val start = android.os.SystemClock.elapsedRealtime()
+    var engine: String = "-"
+    var cropW: Int = 0
+    var cropH: Int = 0
+    var ocrW: Int = 0
+    var ocrH: Int = 0
+    var blocks: Int = 0
+    var letters: Int = 0
+    /** OCR reads performed for this run: 1 = the first pass was good enough, more = recovery passes ran. */
+    var reads: Int = 0
+
+    fun mark(step: String) { marks[step] = android.os.SystemClock.elapsedRealtime() }
+
+    /** Writes one line: total + the delta between consecutive marks. */
+    fun log(ok: Boolean, note: String = "") {
+        val total = android.os.SystemClock.elapsedRealtime() - start
+        val sb = StringBuilder()
+        sb.append("run ok=").append(ok).append(" total=").append(total).append("ms engine=").append(engine)
+        sb.append(" crop=").append(cropW).append('x').append(cropH)
+        sb.append(" ocr=").append(ocrW).append('x').append(ocrH)
+        sb.append(" blocks=").append(blocks).append(" letters=").append(letters).append(" reads=").append(reads)
+        var prev = start
+        for ((k, v) in marks) { sb.append(' ').append(k).append('=').append(v - prev); prev = v }
+        if (note.isNotBlank()) sb.append(" note=").append(note)
+        val line = sb.toString()
+        Log.i(ManualExtractConfig.TAG, line)
+        // Also goes into the in-app OCR report: logcat is not reachable on the user's phone.
+        try { OcrDiag.log("MANUAL", line) } catch (_: Throwable) {}
+    }
+}

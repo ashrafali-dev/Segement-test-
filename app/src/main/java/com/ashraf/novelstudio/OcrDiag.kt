@@ -21,7 +21,11 @@ internal object OcrDiag {
     private const val MAX_CHARS = 150_000
     private val lock = Any()
     private val buf = StringBuilder()
-    private val bootMs = SystemClock.elapsedRealtime()
+    // SystemClock's Android stub throws in local JVM unit tests; fall back to Java's monotonic clock.
+    private fun elapsedRealtimeSafe(): Long = try { SystemClock.elapsedRealtime() } catch (_: Throwable) {
+        System.nanoTime() / 1_000_000L
+    }
+    private val bootMs = elapsedRealtimeSafe()
     private val clock = object : ThreadLocal<SimpleDateFormat>() {
         override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
@@ -37,9 +41,23 @@ internal object OcrDiag {
     fun snip(s: String?, n: Int = 40): String =
         (s ?: "").replace(Regex("\\s+"), " ").trim().let { if (it.length > n) it.take(n) + "…" else it }
 
+    /**
+     * Which reading mode is actually running, in one word, prefixed to every line.
+     *
+     * Realtime, scanning and manual-lite all call into the same OCR code, so a log full of numbers did not
+     * say which path produced them. Publishing it here (instead of threading a parameter through every call
+     * site) keeps one source of truth: callers set it when the mode changes and every line then carries it.
+     */
+    @Volatile
+    var mode: String = "idle"
+        private set
+
+    fun setMode(value: String) { mode = value }
+
     fun log(tag: String, msg: String) {
-        val line = "${clock.get()!!.format(Date())} [${Thread.currentThread().name.take(18)}] $tag: $msg\n"
-        try { Log.i("NovelStudioOcrDiag", "$tag: $msg") } catch (_: Throwable) {}
+        val line = "${clock.get()!!.format(Date())} [${Thread.currentThread().name.take(18)}] " +
+            "[$mode] $tag: $msg\n"
+        try { Log.i("NovelStudioOcrDiag", "[$mode] $tag: $msg") } catch (_: Throwable) {}
         synchronized(lock) {
             buf.append(line)
             if (buf.length > MAX_CHARS) buf.delete(0, buf.length - (MAX_CHARS * 3 / 4))
@@ -75,7 +93,7 @@ internal object OcrDiag {
         sb.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
             .append(" | Android ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n")
         sb.append("memory: ").append((rt.totalMemory() - rt.freeMemory()) shr 20).append('/')
-            .append(rt.maxMemory() shr 20).append(" MB | uptime ").append((SystemClock.elapsedRealtime() - bootMs) / 1000).append("s\n")
+            .append(rt.maxMemory() shr 20).append(" MB | uptime ").append((elapsedRealtimeSafe() - bootMs) / 1000).append("s\n")
         sb.append("page: ").append(pageUrl.take(220)).append("\n\n")
 
         sb.append("--- SETTINGS ---\n")

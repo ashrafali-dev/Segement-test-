@@ -68,7 +68,7 @@ internal object WebModeWriter {
             .replace("__SIZE__", sizePx.toString())
             .replace("__PID__", JSONObject.quote(pageId))
 
-    private const val BUBBLES = """
+    private const val BUBBLES_PART_1 = """
 (function(items,sources,font,pid){
   try{
     if(window.__nsWmStop){try{window.__nsWmStop();}catch(e){}}
@@ -88,6 +88,14 @@ internal object WebModeWriter {
     var cleanLayer=document.createElement('div'); cleanLayer.id='__ns_wm_clean_layer';
     cleanLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:0;';
     w.appendChild(cleanLayer);
+    // Keep opaque bubble fills below every translated label. A text box can move horizontally
+    // to resolve collisions without carrying its background over a neighbouring translation.
+    var coverLayer=document.createElement('div'); coverLayer.id='__ns_wm_cover_layer';
+    coverLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:1;';
+    w.appendChild(coverLayer);
+    var textLayer=document.createElement('div'); textLayer.id='__ns_wm_text_layer';
+    textLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2;';
+    w.appendChild(textLayer);
     var cleanImgs=Object.create(null);
     var holes=Object.create(null);   // per picture: rectangles (image fractions) where the ORIGINAL must show through
     function ensureCleanImage(im,s,url,r,o0){
@@ -120,24 +128,32 @@ internal object WebModeWriter {
       if(it.hole){var hk=norm(it.s);(holes[hk]=holes[hk]||[]);for(var hq=0;hq<it.r.length;hq++)holes[hk].push(it.r[hq]);continue;}
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
+      if(it.rq===1)b.setAttribute('data-rq','1');
       b.setAttribute('data-cl',it.cl||'');
+      // Erased in place (canvas panel): the old lettering is already gone from the page pixels, so no cover box.
+      b.setAttribute('data-er',it.er?'1':'');
       b.setAttribute('data-bg',it.bg);
       b.setAttribute('data-sf',it.sf?'1':'0');
       b.setAttribute('data-g',[it.cx,it.cy,it.w,it.h,it.a,it.f].join(','));
       // Largest rectangle INSIDE the speech bubble (fractions of the cover box: left,top,right,bottom margins).
       if(it.tb&&it.tb.length===4)b.setAttribute('data-tb',it.tb.join(','));
-      b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+      // Conservative interior bands from the detector/pixel mask. The fitter may use more of the balloon only
+      // when every measured text line remains inside these real shape bands.
+      if(it.cv&&it.cv.length>=4)b.setAttribute('data-cv',it.cv.join(','));
+      // Model-mask geometry is a fixed shape; the shape-aware fitter below proves any wider layout stays inside it.
+      if(it.mf)b.setAttribute('data-mf','1');
+      // This element is text-only. Opaque bubble fills are rendered separately in coverLayer.
+      // overflow:hidden is what keeps a long translation inside its mask. fit() still shrinks the font to
+      // avoid clipping, so this is a hard backstop rather than the normal path.
+      b.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:hidden;'
         +'align-items:center;justify-content:center;padding:3px;pointer-events:none;will-change:transform;'
-        // If the underlying source image was cleaned, do not put an opaque box over it:
-        // untouched nearby lettering/line art stays visible instead of disappearing under the translation.
-        +'background:'+((it.cl||(it.cv&&it.cv.length>=4))?'transparent':it.bg)+';color:'+it.fg+';font-family:'+fam+';font-weight:600;'
-        +((it.cl||(it.cv&&it.cv.length>=4))?'border-radius:0;box-shadow:none;':(it.sf?'border-radius:12px;box-shadow:0 0 7px 5px '+it.bg+';':'border-radius:4px;box-shadow:0 0 0 3px '+it.bg+';'));
+        +'background:transparent;color:'+it.fg+';font-family:'+fam+';font-weight:600;border-radius:0;box-shadow:none;';
       var t=document.createElement('div'); t.textContent=it.t;
       // Preserve Bengali grapheme clusters/ conjuncts and use a shaping-friendly text layout.
       // OCR bubble bounds can be slightly smaller than the speech bubble, so fit() below
       // measures both axes and shrinks the text instead of letting it spill outside.
       t.style.cssText='display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;'
-        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;text-wrap:balance;'
+        +'text-align:center;line-height:1.25;white-space:normal;word-break:normal;overflow-wrap:normal;'
         // Bengali vowel signs (ি ী ু ৃ ে ৈ) stick out above and below the line box; room for them
         // stops them being clipped by the box edge or by the gradient's background-clip.
         +'padding:0.16em 0.1em;'
@@ -158,19 +174,29 @@ internal object WebModeWriter {
         t.style.webkitTextFillColor='transparent'; t.style.color='transparent';
       }
       b.appendChild(t);
-      // Not cleaned in the picture: paint the paper colour over the WHOLE bubble interior (rectangles that stay inside
-      // the outline), behind the text. Lettering the recogniser missed is hidden too, and no box edge shows outside the bubble.
-      if(!it.cl&&it.cv&&it.cv.length>=4){
-        for(var ci=0;ci+3<it.cv.length;ci+=4){
-          var cd=document.createElement('div');
-          cd.className='__ns_cv';
-          cd.setAttribute('data-f',it.cv[ci]+','+it.cv[ci+1]+','+it.cv[ci+2]+','+it.cv[ci+3]);
-          cd.style.cssText='position:absolute;pointer-events:none;z-index:-1;margin:0;padding:0;left:0;top:0;width:0;height:0;'
-            +'background:'+it.bg+';';
-          b.appendChild(cd);
+      var cover=null;
+      // Soft/free text lies on illustration. If the pixel cleaner did not prove a safe inpaint, do NOT
+      // paint a sampled flat-colour rectangle over the art; the original glyph may remain, but the artwork
+      // stays intact until AI inpainting succeeds.
+      if(!it.cl&&!it.er && !it.sf){
+        cover=document.createElement('div');cover.className='__ns_cover';
+        cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+          +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
+        if(it.cv&&it.cv.length>=4){
+          for(var ci=0;ci+3<it.cv.length;ci+=4){
+            var cd=document.createElement('div');cd.className='__ns_cv';
+            cd.style.cssText='position:absolute;pointer-events:none;margin:0;padding:0;left:'+(it.cv[ci]*100)+'%;top:'+(it.cv[ci+1]*100)+'%;'
+              +'width:'+((it.cv[ci+2]-it.cv[ci])*100)+'%;height:'+((it.cv[ci+3]-it.cv[ci+1])*100)+'%;background:'+it.bg+';';
+            cover.appendChild(cd);
+          }
+        }else{
+          cover.style.borderRadius=it.sf?'12px':'4px';
+          cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
         }
+        coverLayer.appendChild(cover);
       }
-      w.appendChild(b);
+      b.__nsCover=cover;
+      textLayer.appendChild(b);
     }
     var allS=[],seenSources=Object.create(null);
     for(var si=0;si<(sources||[]).length;si++){
@@ -281,6 +307,24 @@ internal object WebModeWriter {
       for(var i=0;i<k.length;i++){if(k[i]===ns)return true;}
       return false;
     }
+    /**
+     * How many of this overlay's images are still unusable for placement: not decoded yet, or laid out at zero
+     * size because the reader has not finished sizing them. Only the first pass consults this.
+     */
+    function unsizedImages(nodes){
+      // Read only what the DOM already holds. Calling findImg() here built a full image index on every
+      // animation frame and poisoned the miss-cache, which then made the real placement pass pick the
+      // wrong <img> — text landed on the wrong panel and masking followed it there.
+      var n=0;
+      for(var i=0;i<nodes.length;i++){
+        var s=nodes[i].getAttribute('data-s'),im=cache[s];
+        if(!im||!document.contains(im))continue;
+        if(!im.complete||!im.naturalWidth)continue;
+        var r=im.getBoundingClientRect();
+        if(r.width<2||r.height<2)n++;
+      }
+      return n;
+    }
     function findImg(s, index){
       var spec=canvasSpec(s);
       if(spec){
@@ -346,126 +390,472 @@ internal object WebModeWriter {
     // Largest font (up to maxPx) at which the text still fits inside its box.
     function fit(b,maxPx){
       var t=b&&b.firstChild;
-      if(!t)return;
-      // The OCR rectangle is not always the full usable speech-balloon interior (curved
-      // edges and connected/two-lobed bubbles are especially easy to overestimate).
-      // Keep a safety inset so Bengali vowel signs and the last wrapped line remain inside.
+      if(!t)return 0;
       var boxW=b.clientWidth,boxH=b.clientHeight;
-      if(boxW<8||boxH<8)return;
-      var availW=Math.max(12,boxW*0.88);
-      var availH=Math.max(12,boxH*0.86);
-      var hasTb=false;
+      if(boxW<8||boxH<8)return boxH;
+      // Shape-fit may let the text extend beyond the old OCR box, but only inside measured balloon bands.
+      // Reset on every new measurement so a resize can never inherit a stale visible-overflow state.
+      b.__nsShapeFitApplied=false;b.style.overflow='hidden';
+      var availW=Math.max(8,boxW*0.88),availH=Math.max(8,boxH*0.86),hasTb=false,cW=boxW,cH=boxH;
+      var maskLock=b.getAttribute('data-mf')==='1';
+      function fitInsideMask(startPx){
+        t.style.overflowWrap='normal';t.style.wordBreak='normal';
+        var px=Math.max(0.5,Number(startPx)||0.5),inside=false;
+        for(var mi=0;mi<84;mi++){
+          t.style.fontSize=px+'px';
+          if(fits()){inside=true;break;}
+          if(px<=0.5)break;
+          px=Math.max(0.5,px*0.9);
+        }
+        t.style.fontSize=px+'px';
+        // Never silently chop a translation after exhausting every safe font size. Prefer visible overflow
+        // to clipping Bengali conjuncts or the final Japanese/Korean/Latin words; a measured shape-fit still
+        // takes priority, and the localized fallback card keeps this exceptional case legible.
+        if(inside){t.style.overflow='hidden';}
+        else{t.style.overflow='visible';b.style.overflow='visible';b.__nsShapeFitApplied=false;}
+      }
       var tbs=b.getAttribute('data-tb');
       if(tbs){
-        var q=tbs.split(',');
-        var pl=q[0]*boxW,pt=q[1]*boxH,pr=q[2]*boxW,pb=q[3]*boxH;
-        var cW=boxW-pl-pr,cH=boxH-pt-pb;
+        var q=tbs.split(','),pl=q[0]*boxW,pt=q[1]*boxH,pr=q[2]*boxW,pb=q[3]*boxH;
+        cW=boxW-pl-pr;cH=boxH-pt-pb;
         if(isFinite(cW)&&isFinite(cH)&&cW>=boxW*0.25&&cH>=boxH*0.25&&cW>=8&&cH>=8){
-          // The text lives in the bubble's inscribed rectangle: padding = the cover box minus that rectangle.
           b.style.padding=Math.max(0,pt)+'px '+Math.max(0,pr)+'px '+Math.max(0,pb)+'px '+Math.max(0,pl)+'px';
-          availW=Math.max(12,cW*0.96);
-          availH=Math.max(12,cH*0.94);
-          hasTb=true;
+          availW=Math.max(8,cW*0.96);availH=Math.max(8,cH*0.94);hasTb=true;
         }
       }
       if(!hasTb)b.style.padding='3px';
-      t.style.width=availW+'px';
-      t.style.maxWidth=availW+'px';
-      t.style.minWidth='0';
-      t.style.height='auto';
-      t.style.maxHeight='none';
-      t.style.boxSizing='border-box';
-      t.style.margin='0 auto';
-      // Start with the OCR-estimated cap, but never let an invalid estimate break fitting.
-      var cap=Number(maxPx);
-      if(!isFinite(cap)||cap<2)cap=4;
-      // With a known bubble interior the OCR font size is only a hint (it was measured on the old, often
-      // longer or shorter, lettering): let the translation grow to what the bubble really offers.
-      var lo=1.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo;
+      t.style.width=availW+'px';t.style.maxWidth=availW+'px';t.style.minWidth='0';
+      t.style.height='auto';t.style.maxHeight='none';t.style.boxSizing='border-box';t.style.margin='0 auto';
+      t.style.whiteSpace='normal';t.style.maxBlockSize='none';t.style.wordBreak='normal';t.style.overflowWrap='normal';
+      t.style.flex='none';   // a flex item would shrink to the narrow box and report a wrong, too tall size while we measure
+      // Keep the whole string. There is no ellipsis or line cap; shrink to sub-pixel sizes only
+      // as a last resort, then request a taller geometry instead of clipping the final lines.
+      var cap=Number(maxPx);if(!isFinite(cap)||cap<2)cap=4;
+      var lo=0.5,hi=Math.max(lo,hasTb?cap*1.35:cap),best=lo,fitCap=hi;
+      // A readable floor: below it the box grows (sideways first, then taller) instead of the font shrinking further.
+      var floorPx=maskLock?Math.max(3,Math.min(cap*0.5,hi)):Math.max(6,Math.min(cap*0.62,hi));
       function fits(){
-        // Read layout after changing font size; DOM metrics account for the loaded Bengali
-        // font and actual line wrapping, unlike character-count estimates.
         var r=t.getBoundingClientRect();
-        return r.height<=availH+0.5 &&
-          t.scrollHeight<=availH+1 &&
-          t.scrollWidth<=t.clientWidth+1 &&
-          r.width<=availW+1;
+        return r.height<=availH+0.5&&t.scrollHeight<=availH+1&&
+          t.scrollWidth<=t.clientWidth+1&&r.width<=availW+1;
       }
-      // Binary-search the largest size that fits both axes, with a conservative inner box.
-      for(var n=0;n<16;n++){
-        var mid=(lo+hi)/2;
-        t.style.fontSize=mid+'px';
+      // Text may use a wider part of an irregular balloon than the single largest safe rectangle,
+      // but only when the actual glyph line boxes are proven to sit inside the detector's interior bands.
+      // This is script-neutral: it measures the rendered text, not Japanese/Korean/English source labels.
+      function lineRects(){
+        try{
+          var rg=document.createRange();rg.selectNodeContents(t);
+          var rs=rg.getClientRects(),out=[];
+          for(var ri=0;ri<rs.length;ri++){
+            var q=rs[ri];
+            if(q&&q.width>0.35&&q.height>0.35)out.push({left:q.left,right:q.right,top:q.top,bottom:q.bottom,width:q.width,height:q.height});
+          }
+          return out;
+        }catch(e){return [];}
+      }
+      function renderedLineCount(){
+        var rs=lineRects(),ys=[];
+        for(var ri=0;ri<rs.length;ri++){
+          var cy=(rs[ri].top+rs[ri].bottom)/2,found=false;
+          for(var yi=0;yi<ys.length;yi++)if(Math.abs(ys[yi]-cy)<=Math.max(2,rs[ri].height*0.28)){found=true;break;}
+          if(!found)ys.push(cy);
+        }
+        return ys.length;
+      }
+      function staysInsideDetectedShape(){
+        var bands=b.__nsSafeBandsPx,rs=lineRects();
+        if(!bands||!bands.length||!rs.length)return false;
+        for(var ri=0;ri<rs.length;ri++){
+          var q=rs[ri],pad=Math.min(1.1,Math.max(0.25,q.height*0.06));
+          var y0=q.top+pad,y1=q.bottom-pad;
+          if(y1<y0){var mid=(q.top+q.bottom)/2;y0=mid;y1=mid;}
+          for(var si=0;si<5;si++){
+            var y=y0+(y1-y0)*(si+0.5)/5,inside=false;
+            for(var bi=0;bi<bands.length;bi++){
+              var band=bands[bi];
+              if(y>=band[1]+0.15&&y<=band[3]-0.15&&q.left>=band[0]+0.5&&q.right<=band[2]-0.5){inside=true;break;}
+            }
+            if(!inside)return false;
+          }
+        }
+        return true;
+      }
+      function fitWithinShape(preferWide){
+        var bands=b.__nsSafeBandsPx;
+        var shapeCap=Number(b.__nsShapeMaxW),pageW=Number(b.__nsShapePageW);
+        if(!bands||!bands.length||b.__nsShapeFitBlocked||!isFinite(shapeCap)||shapeCap<8)return false;
+        var oldPad=b.style.padding,oldW=availW,oldH=availH,oldTW=t.style.width,
+            oldMW=t.style.maxWidth,oldFS=t.style.fontSize,oldOverflow=t.style.overflow,
+            oldMargin=t.style.margin,oldPosition=t.style.position,oldLeft=t.style.left,oldTransform=t.style.transform;
+        // The parent is the source/cover box, not necessarily the full balloon. Allow a wider child up to
+        // the widest real interior band; every candidate's rendered glyphs are checked against those bands.
+        var upperW=Math.max(8,Math.min(shapeCap,isFinite(pageW)&&pageW>8?pageW-4:shapeCap));
+        var startW=Math.max(8,Math.min(availW,upperW));
+        if(preferWide)startW=Math.min(upperW,Math.max(startW+6,startW*1.16));
+        startW=Math.min(startW,upperW);
+        b.style.padding='3px';
+        // A wider child must remain centred on the original OCR/bubble anchor instead of starting at the
+        // parent's left edge when its width exceeds the old source-text box.
+        t.style.margin='0';t.style.position='relative';t.style.left='50%';t.style.transform='translateX(-50%)';
+        availH=Math.max(8,boxH*0.86);
+        var chosen=null;
+        // This runs on the WebView UI thread. Keep the search bounded: checking every glyph line against every
+        // mask band inside all 108 font/width trials made multi-bubble pages appear stuck after the answer arrived.
+        // Find a box-fitting font cheaply, then perform only a few shape validations while stepping down if needed.
+        for(var wi=0;wi<=4;wi++){
+          var trialW=startW+(upperW-startW)*(wi/4);
+          availW=trialW;
+          t.style.width=trialW+'px';t.style.maxWidth=trialW+'px';t.style.overflow='visible';
+          var loPx=Math.max(1.5,floorPx),hiPx=fitCap,bestPx=0;
+          for(var fi=0;fi<8;fi++){
+            var midPx=(loPx+hiPx)/2;
+            t.style.fontSize=midPx+'px';
+            if(fits()){bestPx=midPx;loPx=midPx;}else hiPx=midPx;
+          }
+          if(bestPx<floorPx)bestPx=floorPx;
+          var validPx=0,trialPx=bestPx;
+          for(var si=0;si<4&&trialPx>=floorPx;si++){
+            t.style.fontSize=trialPx+'px';
+            if(fits()&&staysInsideDetectedShape()){validPx=trialPx;break;}
+            if(trialPx<=floorPx+0.05)break;
+            trialPx=Math.max(floorPx,trialPx*0.88);
+          }
+          // Compare five representative widths, choosing the largest validated font without blocking the reader.
+          if(validPx>=floorPx&&(!chosen||validPx>chosen.px+0.05||
+             (Math.abs(validPx-chosen.px)<=0.05&&trialW<chosen.w)))chosen={w:trialW,px:validPx};
+        }
+        if(chosen){
+          availW=chosen.w;t.style.width=chosen.w+'px';t.style.maxWidth=chosen.w+'px';
+          t.style.fontSize=chosen.px+'px';t.style.overflow='visible';
+          b.style.overflow='visible';b.__nsShapeFitApplied=true;
+          return true;
+        }
+        b.style.padding=oldPad;availW=oldW;availH=oldH;
+        t.style.width=oldTW;t.style.maxWidth=oldMW;t.style.fontSize=oldFS;t.style.overflow=oldOverflow;
+        t.style.margin=oldMargin;t.style.position=oldPosition;t.style.left=oldLeft;t.style.transform=oldTransform;
+        b.style.overflow='hidden';b.__nsShapeFitApplied=false;
+        return false;
+      }
+      for(var n=0;n<18;n++){
+        var mid=(lo+hi)/2;t.style.fontSize=mid+'px';
         if(fits()){best=mid;lo=mid;}else{hi=mid;}
       }
+      var sourceText=String(t.textContent||'').trim();
+      var shapeWidth=Number(b.__nsShapeMaxW)||boxW;
+      var manyNarrowLines=hasTb&&sourceText.length>=8&&renderedLineCount()>=3&&
+        (cW<boxW*0.78||shapeWidth>cW*1.15);
+      // If the safe rectangle forces a long translation into narrow lines, try wider layouts in the real balloon
+      // interior. This works for all target scripts and never assumes that source and translated text have similar widths.
+      if((best<floorPx||manyNarrowLines)&&fitWithinShape(manyNarrowLines))return boxH;
+      if(best<floorPx){
+        if(maskLock){fitInsideMask(best);return boxH;}
+        // Even the smallest readable size does not fit: take the free space at the sides.
+        // Font size AND the full text length are kept; the box simply becomes wider (bounded by the picture).
+        // Prefer ~85% of the original size and widen only as far as that needs; fall back to the floor when even
+        // the full free width cannot hold it.
+        var wantPx=Math.max(floorPx,Math.min(hi,cap*0.85));
+        t.style.fontSize=wantPx+'px';
+        var nomW=Number(b.__nsNomW)||boxW,maxW=Math.max(boxW,Number(b.__nsMaxW)||boxW);
+        var maxExt=Math.max(0,(maxW-boxW)*0.88);
+        var baseAvail=availW,ext=0;
+        function fitsExt(e){t.style.width=(baseAvail+e)+'px';t.style.maxWidth=(baseAvail+e)+'px';return fits();}
+        if(maxExt>1&&!fitsExt(0)){
+          if(!fitsExt(maxExt)&&wantPx>floorPx){t.style.fontSize=floorPx+'px';}
+          if(fitsExt(maxExt)){
+            var eLo=0,eHi=maxExt;
+            for(var ei=0;ei<14;ei++){var em=(eLo+eHi)/2;if(fitsExt(em))eHi=em;else eLo=em;}
+            ext=eHi;
+          }else ext=maxExt;
+        }
+        availW=baseAvail+ext;fitsExt(ext);
+        if(ext>0.5){
+          var newBoxW=boxW+ext/0.88+2;
+          var wr=newBoxW/Math.max(1,nomW);if(wr>(Number(b.__nsReqWRatio)||0)+0.005){b.__nsReqWRatio=wr;b.__nsReqHRatio=0;}
+        }
+        t.style.overflow='visible';
+        if(fits())return boxH;
+        // Still too tall at the widest allowed box. The box may grow a little taller (bounded), then the font keeps
+        // shrinking: a slightly smaller text that sits in its bubble beats a giant card over the artwork.
+        // Words are never split: a word wider than the box makes the FONT smaller, it is not broken across lines.
+        var shr=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
+        var maxH=Math.max(boxH,Number(b.__nsMaxH)||boxH),capAvail=Math.max(availH,maxH*shr);
+        function heightNow(){var q=t.getBoundingClientRect();return Math.max(q.height,t.scrollHeight);}
+        var fpx=parseFloat(t.style.fontSize)||floorPx,gd=0;
+        while(heightNow()>capAvail+1&&fpx>3.5&&gd++<60){fpx*=0.94;t.style.fontSize=fpx+'px';}
+        var needH=heightNow();
+        if(needH<=availH+1)return boxH;    // nothing taller is needed; never grow "just in case"
+        return Math.min(maxH,Math.ceil(needH/shr)+4);
+      }
       t.style.fontSize=best+'px';
-      // Final post-layout guard for WebView/font shaping differences: if measured ink/line
-      // metrics still exceed the safe area, reduce a little more rather than clipping text.
       for(var pass=0;pass<4;pass++){
-        var r=t.getBoundingClientRect();
-        var actualH=Math.max(r.height,t.scrollHeight);
-        var actualW=Math.max(r.width,t.scrollWidth);
+        var r=t.getBoundingClientRect(),actualH=Math.max(r.height,t.scrollHeight),actualW=Math.max(r.width,t.scrollWidth);
         var scale=Math.min(1,availH/Math.max(1,actualH),availW/Math.max(1,actualW));
         if(scale>=0.995)break;
-        var current=parseFloat(t.style.fontSize)||best;
-        var next=Math.max(1.5,current*scale*0.96);
-        if(next>=current-0.02)break;
-        t.style.fontSize=next+'px';
+        var current=parseFloat(t.style.fontSize)||best,next=Math.max(0.5,current*scale*0.96);
+        if(next>=current-0.02)break;t.style.fontSize=next+'px';
       }
       t.style.overflow='visible';
+      if(fits())return boxH;
+      // A mask-derived safe rectangle is the hard boundary. Shrink/wrap inside it rather than requesting
+      // a larger box whose new dimensions would push translated text outside the detected balloon.
+      if(maskLock){fitInsideMask(parseFloat(t.style.fontSize)||best);return boxH;}
+      // A single long word or very long translation may need more room even at minimum size.
+      // Shrink further (words stay whole); if height still does not fit, expand the box and
+      // let collision resolution move it sideways on the next frame. The text itself is never cut.
+      t.style.overflowWrap='normal';t.style.wordBreak='normal';
+      var wrapLo=0.5,wrapHi=Math.max(wrapLo,parseFloat(t.style.fontSize)||best),wrapBest=wrapLo;
+      for(var wi=0;wi<14;wi++){
+        var wm=(wrapLo+wrapHi)/2;t.style.fontSize=wm+'px';
+        if(fits()){wrapBest=wm;wrapLo=wm;}else{wrapHi=wm;}
+      }
+      t.style.fontSize=wrapBest+'px';
+      if(fits())return boxH;
+      // No font size fits even with emergency wrapping; grow the box and let the side-by-side
+      // collision pass make room. This fallback is preferable to clipping a line or glyph.
+      t.style.fontSize=Math.max(1,floorPx)+'px';
+      var rr=t.getBoundingClientRect(),requiredContentH=Math.max(rr.height,t.scrollHeight);
+      if(requiredContentH<=availH+1)return boxH;
+      var safeHeightRatio=hasTb?Math.max(0.08,(cH/Math.max(1,boxH))*0.94):0.86;
+      return Math.ceil(requiredContentH/safeHeightRatio)+4;
     }
     var MARGIN=1400;
     // Two bubbles whose boxes overlap partly (joined / burst bubbles): the later one used to paint its
     // background over the first one's text. Cut the overlap away so both stay fully readable.
+    // Collision resolution is horizontal-only: Y centres never move to make room.
+    // Comparable boxes are packed side-by-side in their shared image bounds. If the
+    // row is too wide, widths shrink proportionally and fit() re-typesets the full text.
     function resolve(L){
-      for(var i=0;i<L.length;i++)for(var j=i+1;j<L.length;j++){
-        var A=L[i],B=L[j];
-        if(A.s!==B.s||A.rot||B.rot)continue;
-        // Bubbles that bring their own interior shape paint only inside their own outline: overlapping boxes are harmless.
-        if(A.cvd&&B.cvd)continue;
-        var ox=Math.min(A.x1,B.x1)-Math.max(A.x0,B.x0),oy=Math.min(A.y1,B.y1)-Math.max(A.y0,B.y0);
-        if(ox<=2||oy<=2)continue;
-        var aA=(A.x1-A.x0)*(A.y1-A.y0),aB=(B.x1-B.x0)*(B.y1-B.y0);
-        if(ox*oy>0.6*Math.min(aA,aB)){
-          if(Math.min(aA,aB)>=0.3*Math.max(aA,aB)){
-            // Two comparable boxes on the same spot are two readings of one bubble (e.g. its two lines). Drawn on
-            // top of each other they garble each other (the cleaned picture has no cover box), so stack them
-            // top to bottom inside their union, sharing the height by text length.
-            var tA=(A.b.textContent||''),tB=(B.b.textContent||'');
-            var T=(A.y0+A.y1<=B.y0+B.y1)?A:B,Bo=(T===A)?B:A;
-            if(tA===tB){Bo.x0=Bo.x1=Bo.y0=Bo.y1=-99999;continue;}   // exact duplicate: draw once
-            var U0=Math.min(A.y0,B.y0),U1=Math.max(A.y1,B.y1),X0=Math.min(A.x0,B.x0),X1=Math.max(A.x1,B.x1);
-            var lt=Math.max(1,(T.b.textContent||'').length),lb=Math.max(1,(Bo.b.textContent||'').length);
-            var cut=U0+(U1-U0)*lt/(lt+lb);
-            T.x0=Bo.x0=X0;T.x1=Bo.x1=X1;T.y0=U0;T.y1=cut-1;Bo.y0=cut+1;Bo.y1=U1;
-            continue;
-          }
-          // a small note inside a much bigger box: the smaller one is drawn on top
-          if(aA<=aB){A.z=2;B.z=1;}else{B.z=2;A.z=1;}
-          continue;
-        }
-        var vOk=(A.y0<B.y0&&A.y1<B.y1)||(B.y0<A.y0&&B.y1<A.y1);
-        var hOk=(A.x0<B.x0&&A.x1<B.x1)||(B.x0<A.x0&&B.x1<A.x1);
-        var useV=vOk&&(!hOk||oy<=ox);
-        if(!useV&&!hOk)continue;
-        var P,Q;
-        if(useV){P=(A.y0<B.y0)?A:B;}else{P=(A.x0<B.x0)?A:B;}
-        Q=(P===A)?B:A;
-        var k0=useV?'y0':'x0',k1=useV?'y1':'x1';
-        var pA=(P.x1-P.x0)*(P.y1-P.y0),qA=(Q.x1-Q.x0)*(Q.y1-Q.y0);
-        var cutP=pA>=qA;                                  // cut the bigger box: it has the room
-        var gap=1.5;
-        if(cutP){
-          var n1=Q[k0]-gap,m1=Math.max(14,(useV?P.oh:P.ow)*0.4);
-          if(n1-P[k0]>=m1){P[k1]=n1;continue;}
-        }else{
-          var n0=P[k1]+gap,m0=Math.max(14,(useV?Q.oh:Q.ow)*0.4);
-          if(Q[k1]-n0>=m0){Q[k0]=n0;continue;}
-        }
-        // the bigger box would become too small: share the overlap between both
-        var mid=(Q[k0]+P[k1])/2;
-        P[k1]=Math.max(P[k0]+4,mid-gap);
-        Q[k0]=Math.min(Q[k1]-4,mid+gap);
+      var n=L.length,GAP=3,parent=new Array(n);
+      function root(i){while(parent[i]!==i){parent[i]=parent[parent[i]];i=parent[i];}return i;}
+      function join(a,b){var ra=root(a),rb=root(b);if(ra===rb)return false;parent[rb]=ra;return true;}
+      function geom(R,original){
+        var x0=original?R.ox0:R.x0,x1=original?R.ox1:R.x1,
+            y0=original?R.oy0:R.y0,y1=original?R.oy1:R.y1;
+        var w=Math.max(0,x1-x0),h=Math.max(0,y1-y0),cx=(x0+x1)/2,cy=(y0+y1)/2,
+            a=(Number(R.angle)||0)*Math.PI/180,co=Math.abs(Math.cos(a)),si=Math.abs(Math.sin(a)),
+            rw=co*w+si*h,rh=si*w+co*h;
+        return {l:cx-rw/2,r:cx+rw/2,t:cy-rh/2,b:cy+rh/2,w:rw,h:rh,cx:cx,cy:cy};
       }
+      // Boxes only COLLIDE when they really overlap. Text blocks that merely touch (lines of one caption, a button label
+      // under a sentence) used to be treated as a collision and were then packed side by side, which threw every
+      // translation sideways, away from the words it replaces. A thin vertical overlap is trimmed instead.
+      function hits(a,b,g){
+        var ox=Math.min(a.r,b.r)-Math.max(a.l,b.l),oy=Math.min(a.b,b.b)-Math.max(a.t,b.t);
+        return ox>2&&oy>Math.max(2,0.22*Math.min(a.h,b.h));
+      }
+      function area(r){return Math.max(0,r.r-r.l)*Math.max(0,r.b-r.t);}
+      for(var i=0;i<n;i++){
+        parent[i]=i;L[i].hidden=false;
+        L[i].needH=Math.max(L[i].needH||0,(Number(L[i].b.__nsReqHRatio)||0)*L[i].oh);
+        L[i].needW=Math.max(L[i].needW||0,(Number(L[i].b.__nsReqWRatio)||0)*L[i].ow);
+      }
+      // Thin vertical overlaps (neighbouring lines/labels): move the two touching edges apart, keep everything in place.
+      for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s||A.rot||B.rot)continue;
+        var ox=Math.min(A.ox1,B.ox1)-Math.max(A.ox0,B.ox0),oy=Math.min(A.oy1,B.oy1)-Math.max(A.oy0,B.oy0);
+        if(ox<=2||oy<=0||oy>Math.max(2,0.22*Math.min(A.oh,B.oh)))continue;
+        var U=(A.oy0+A.oy1<=B.oy0+B.oy1)?A:B,V=(U===A)?B:A,cut=oy/2+1,
+            trimU=Math.min(cut,Math.max(0,(U.oh-4)/2)),
+            trimV=Math.min(cut,Math.max(0,(V.oh-4)/2));
+        // Trim symmetrically around each anchor. Cutting only the touching edge shifts the text centre
+        // (e.g. 105 -> 103.5), which moves translations away from their original button/bubble.
+        U.oy0+=trimU;U.oy1-=trimU;U.oh=Math.max(4,U.oy1-U.oy0);U.y0=U.oy0;U.y1=U.oy1;
+        V.oy0+=trimV;V.oy1-=trimV;V.oh=Math.max(4,V.oy1-V.oy0);V.y0=V.oy0;V.y1=V.oy1;
+      }
+      // Exact duplicate OCR/translation at the same place is one label, not two.
+      for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s!==B.s)continue;
+        var at=(A.b.textContent||'').trim(),bt=(B.b.textContent||'').trim();
+        if(!at||at!==bt)continue;
+        var ar=geom(A,true),br=geom(B,true),ix=Math.max(0,Math.min(ar.r,br.r)-Math.max(ar.l,br.l)),
+            iy=Math.max(0,Math.min(ar.b,br.b)-Math.max(ar.t,br.t)),ov=ix*iy,small=Math.min(area(ar),area(br));
+        if(small>0&&ov/small>=0.82){B.hidden=true;B.x0=B.x1=B.y0=B.y1=-99999;}
+      }
+      // Free horizontal room of every box: up to the nearest neighbour that shares its rows (or the picture edge).
+      for(var i=0;i<n;i++){
+        var A=L[i];if(A.hidden)continue;
+        var fl=Number.isFinite(A.il)?A.il+1:-Infinity,fr=Number.isFinite(A.ir)?A.ir-1:Infinity;
+        for(var j=0;j<n;j++){
+          if(j===i)continue;var B=L[j];if(B.hidden||B.s!==A.s)continue;
+          var vo=Math.min(A.oy1,B.oy1)-Math.max(A.oy0,B.oy0);
+          if(vo<=2)continue;
+          // Reserve a lane around each ORIGINAL text centre. The old edge-only test ignored overlapping
+          // OCR boxes, so the collision packer later shoved valid labels left/right (e.g. Continue and Skip).
+          var ac=(A.ox0+A.ox1)/2,bc=(B.ox0+B.ox1)/2;
+          if(bc<ac)fl=Math.max(fl,(bc+ac)/2+GAP/2);
+          else if(bc>ac)fr=Math.min(fr,(bc+ac)/2-GAP/2);
+        }
+        A.freeL=fl;A.freeR=fr;
+      }
+      // Same-image OCR boxes must keep their source anchors. If their boxes are broad/overlapping,
+      // the free-lane calculation above shrinks them in place. Only collisions between different source
+      // images may be packed, because those can represent two images occupying the same viewport area.
+      for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+        var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s===B.s)continue;
+        if(hits(geom(A,true),geom(B,true),GAP))join(i,j);
+      }
+      for(var pass=0;pass<n+1;pass++){
+        for(var ri=0;ri<n;ri++){
+          var RB=L[ri];if(RB.hidden)continue;
+          var ocx=(RB.ox0+RB.ox1)/2,ocy=(RB.oy0+RB.oy1)/2;
+          var wantW=Math.max(RB.ow,RB.needW||0);
+          var room=(Number.isFinite(RB.freeR)&&Number.isFinite(RB.freeL))?
+            2*Math.max(0,Math.min(ocx-RB.freeL,RB.freeR-ocx)):Infinity;
+          // Keep the OCR centre fixed. Width can grow for Bengali, but never beyond the lane around that centre.
+          // A very tall, narrow OCR box often represents one vertical Japanese text column, not the usable
+          // width of the speech balloon. If no safe balloon rectangle was found, let a word-wrapped
+          // translation widen inside the available image lane instead of stacking Bengali glyphs.
+          var textValue=String(RB.b.textContent||'');
+          var hasAttrs=RB.b&&typeof RB.b.getAttribute==='function';
+          var unshapedColumn=!RB.rot&&(!hasAttrs||RB.b.getAttribute('data-mf')!=='1')&&
+            // A pixel-derived data-tb is not proof of a usable full bubble shape by itself. If no real
+            // interior bands (data-cv) survived, don't keep Bengali trapped in a narrow vertical-source box.
+            (!hasAttrs||!RB.b.getAttribute('data-tb')||!RB.b.getAttribute('data-cv'))&&
+            RB.ow>0&&RB.oh>=Math.max(80,RB.ow*2.4)&&/\s/.test(textValue);
+          var maxBoxW=unshapedColumn?Math.min(RB.rw*0.72,Math.max(RB.ow*3,Math.min(RB.oh*0.55,RB.rw*0.72))):RB.ow*1.35;
+          RB.wideMaxW=maxBoxW;
+          RB.w=Math.max(8,Math.min(wantW,room,maxBoxW));RB.h=Math.max(RB.oh,Math.min(RB.needH||0,RB.oh*1.8));
+          RB.x0=ocx-RB.w/2;RB.x1=ocx+RB.w/2;
+          RB.y0=ocy-RB.h/2;RB.y1=ocy+RB.h/2;
+        }
+        var groups=Object.create(null);
+        for(var i=0;i<n;i++){if(L[i].hidden)continue;var k=root(i);(groups[k]=groups[k]||[]).push(L[i]);}
+        for(var k in groups){
+          var G=groups[k];
+          for(var gq=0;gq<G.length;gq++)G[gq].grp=G.length>1;
+          if(G.length<2)continue;
+          G.sort(function(a,b){var dx=(a.ox0+a.ox1)-(b.ox0+b.ox1);return dx||((a.oy0+a.oy1)-(b.oy0+b.oy1));});
+          var leftBound=-Infinity,rightBound=Infinity,centre=0,total=0;
+          for(var q=0;q<G.length;q++){
+            var R=G[q];
+            leftBound=Math.max(leftBound,Number.isFinite(R.il)?R.il:0);
+            rightBound=Math.min(rightBound,Number.isFinite(R.ir)?R.ir:(window.innerWidth||400));
+            centre+=(R.ox0+R.ox1)/2;
+            var rg=geom(R,true);total+=rg.w;
+          }
+          if(!(rightBound>leftBound+2)){leftBound=0;rightBound=window.innerWidth||400;}
+          var available=Math.max(1,rightBound-leftBound-4),gap=Math.min(GAP,available/Math.max(4,G.length*2)),
+              widths=0;
+          for(var q=0;q<G.length;q++)widths+=geom(G[q],true).w;
+          var scale=Math.min(1,Math.max(0.001,(available-gap*(G.length-1))/Math.max(1,widths)));
+          var cursor,totalNow=0;
+          for(var q=0;q<G.length;q++){
+            var R=G[q],origW=R.ow,origH=R.oh,ang=Number(R.angle)||0,need=Math.max(origH,R.needH||0);
+            R.w=origW*scale;R.h=ang?Math.max(origH*scale,R.needH||0):need;
+            var vis=geom({x0:0,x1:R.w,y0:0,y1:R.h,angle:ang},false);R._visW=vis.w;totalNow+=vis.w;
+          }
+          if(totalNow+gap*(G.length-1)>available){
+            // A tall rotated box has a horizontal footprint even when its width shrinks.
+            // For those rare cases, reduce the whole footprint further before placing it.
+            var extra=Math.max(0.001,(available-gap*(G.length-1))/Math.max(1,totalNow));
+            for(var q=0;q<G.length;q++){var R=G[q];R.w*=extra;if((Number(R.angle)||0)!==0&&!(R.needH>R.oh))R.h*=extra;
+              R._visW=geom({x0:0,x1:R.w,y0:0,y1:R.h,angle:R.angle},false).w;}
+            totalNow=0;for(var q=0;q<G.length;q++)totalNow+=G[q]._visW;
+          }
+          var target=centre/G.length,packed=totalNow+gap*(G.length-1),
+              startX=target-packed/2;
+          if(packed<=available)startX=Math.max(leftBound+2,Math.min(rightBound-2-packed,startX));
+          else startX=leftBound+2;
+          cursor=startX;
+          for(var q=0;q<G.length;q++){
+            var R=G[q],ang=Number(R.angle)||0,cx=cursor+R._visW/2,cy=(R.oy0+R.oy1)/2;
+            R.x0=cx-R.w/2;R.x1=cx+R.w/2;R.y0=cy-R.h/2;R.y1=cy+R.h/2;
+            cursor+=R._visW+gap;
+          }
+        }
+        // Re-pack only different-image collisions. Same-image labels are anchored to their own OCR boxes.
+        var merged=false;
+        for(var i=0;i<n;i++)for(var j=i+1;j<n;j++){
+          var A=L[i],B=L[j];if(A.hidden||B.hidden||A.s===B.s||root(i)===root(j))continue;
+          if(hits(geom(A,false),geom(B,false),GAP))if(join(i,j))merged=true;
+        }
+        if(!merged)break;
+      }
+    }
+    function bw0(R){return R.ow;}
+    var orgX=0,orgY=0;
+    function ensureLabelCover(bb){
+      var labelCover=bb.__nsLabelCover;
+      if(!labelCover){
+        labelCover=document.createElement('div');labelCover.className='__ns_label_cover';
+        var labelBg=bb.getAttribute('data-bg')||'#fff',labelSfx=bb.getAttribute('data-sf')==='1';
+        var unresolvedArt=labelSfx&&!bb.getAttribute('data-cl')&&bb.getAttribute('data-er')!=='1';
+        labelCover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+          +'pointer-events:none;will-change:transform;background:'+labelBg+';border-radius:'+(unresolvedArt?'4px':(labelSfx?'12px':'4px'))+';'
+          +'box-shadow:'+(unresolvedArt?'0 0 0 2px '+labelBg:(labelSfx?'0 0 7px 5px '+labelBg:'0 0 0 3px '+labelBg))+';';
+        coverLayer.appendChild(labelCover);bb.__nsLabelCover=labelCover;
+      }
+      return labelCover;
+    }"""
+    private const val BUBBLES_PART_2 = """
+    // Final check after every layout (font load, resize, scroll, a new OCR result all end up in layout()):
+    // (1) every visible text must lie inside its own measured box; if not, request a fitting box;
+    // (2) if rendered text overlaps, shrink the later label and re-measure instead of shifting it from
+    //     the OCR anchor. Same-image text must remain exactly over its original panel lettering.
+    // The result is published in window.__nsLayoutReport so the app (and tests) can read it.
+    function verify(L){
+      var vis=[],overflow=0,overlaps=0,pushed=0,need=false,reduced=[];
+      for(var i=0;i<L.length;i++){
+        var R=L[i];if(R.hidden||R.b.style.display==='none')continue;
+        var t=R.b.firstChild;if(!t)continue;
+        var tr=t.getBoundingClientRect(),br=R.b.getBoundingClientRect();
+        var th=Math.max(tr.height,t.scrollHeight),tw=Math.max(tr.width,t.scrollWidth);
+        var bh=R.y1-R.y0,bw=R.x1-R.x0;
+        if(!R.rot&&(th>bh+1.5||(tw>bw+1.5&&!R.b.__nsShapeFitApplied))){
+          overflow++;
+          if(R.b.getAttribute('data-mf')==='1'){
+            // Shape-fit text may be wider than the old OCR box, but it has been checked against the balloon's real bands.
+            // If the height alone overflows, shrink only for height; never undo a valid wider shape layout.
+            var lockedFs=parseFloat(t.style.fontSize)||6;
+            var lockedScale=R.b.__nsShapeFitApplied
+              ? Math.min(0.92,(bh-2)/Math.max(1,th))
+              : Math.min(0.92,(bw-2)/Math.max(1,tw),(bh-2)/Math.max(1,th));
+            if(lockedFs>2.5&&lockedScale<0.995)t.style.fontSize=Math.max(2.5,lockedFs*lockedScale*0.96)+'px';
+          }else{
+            var ratio=Math.min(1.8,(th/0.86+4)/Math.max(1,R.oh));
+            if(th>bh+1.5&&ratio>(Number(R.b.__nsReqHRatio)||0)+0.005){R.b.__nsReqHRatio=ratio;need=true;}
+          }
+        }
+        // the real ink area of the lines (the text block itself can be wider than its last line)
+        var ink=tr;try{var rg=document.createRange();rg.selectNodeContents(t);var ib=rg.getBoundingClientRect();if(ib&&ib.width>0&&ib.height>0)ink=ib;}catch(e){}
+        R.inkL=ink.left;R.inkT=ink.top;R.inkW=ink.width;R.inkH=ink.height;
+        vis.push({R:R,l:ink.left,r:ink.right,t:ink.top,b:ink.bottom});
+      }
+      vis.sort(function(a,b){return a.t-b.t;});
+      for(var i=0;i<vis.length;i++)for(var j=i+1;j<vis.length;j++){
+        var A=vis[i],B=vis[j];
+        if(A.R.s!==B.R.s)continue;
+        var ox=Math.min(A.r,B.r)-Math.max(A.l,B.l),oy=Math.min(A.b,B.b)-Math.max(A.t,B.t);
+        if(ox<=1||oy<=1)continue;
+        overlaps++;
+        // Preserve the OCR anchor even when two rendered labels touch. If there is room, reduce
+        // the later label's font and re-measure; never push it down from the place being translated.
+        if(B.R.rot)continue;
+        var bb=B.R.b,txt=bb&&bb.firstChild;
+        if(!txt||reduced.indexOf(bb)>=0)continue;
+        reduced.push(bb);
+        var fs=parseFloat(txt.style.fontSize)||0,minFs=Math.max(4,Math.min(7,fs*0.65));
+        if(fs>minFs+0.5){txt.style.fontSize=Math.max(minFs,fs*0.88)+'px';need=true;}
+      }
+      // Cards for text that sits away from its own bubble: exactly the size of the lettering plus a little margin.
+      for(var i=0;i<vis.length;i++){
+        var R=vis[i].R,bb=R.b;
+        // If original lettering on artwork was NOT cleaned, always give its translation a tight text-sized
+        // opaque card. This hides source glyphs directly underneath the translation without painting the whole
+        // balloon; cards are measured from rendered glyphs, so the background can never clip the text itself.
+        var unresolvedArt=bb.getAttribute('data-sf')==='1'&&!bb.getAttribute('data-cl')&&bb.getAttribute('data-er')!=='1';
+        if((bb.getAttribute('data-moved')!=='1'&&!bb.__nsPushed&&!unresolvedArt)||R.rot||bb.getAttribute('data-cl')||bb.getAttribute('data-er')){if(bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';continue;}
+        var pad=Math.max(3,Math.min(8,R.inkH*0.15));
+        var lc=ensureLabelCover(bb),cx=vis[i].l-orgX-pad,cy=vis[i].t-orgY-pad,cwid=vis[i].r-vis[i].l+2*pad,chei=vis[i].b-vis[i].t+2*pad;
+        var lk='t'+Math.round(cx)+','+Math.round(cy)+','+Math.round(cwid)+','+Math.round(chei);
+        if(lc.getAttribute('data-k')!==lk){lc.setAttribute('data-k',lk);lc.style.width=cwid+'px';lc.style.height=chei+'px';
+          lc.style.transform='translate3d('+cx+'px,'+cy+'px,0)';}
+        lc.style.display='block';
+      }
+      var rqNodes=w.querySelectorAll('.__ns_b[data-rq="1"]'),rqVisible=0;
+      for(var rqi=0;rqi<vis.length;rqi++)if(vis[rqi].R.b.getAttribute('data-rq')==='1')rqVisible++;
+      window.__nsLayoutReport={visible:vis.length,requiredVisible:rqVisible,requiredTotal:rqNodes.length,overflow:overflow,overlaps:overlaps,pushed:pushed,t:Date.now()};
+      return need;
     }
     function layout(){
       if(!document.contains(w)){
@@ -476,6 +866,21 @@ internal object WebModeWriter {
         if(!document.contains(w))return;
       }
       var bs=w.querySelectorAll('.__ns_b'),vh=window.innerHeight;
+      // Startup guard: the first pass right after page load runs before lazy images have their final size,
+      // so boxes landed in random spots and some were sized against a 0-height image, then visibly jumped
+      // once layout settled. Wait (briefly) for every referenced image to be decoded and sized before the
+      // first placement; after that the normal scroll/resize re-layout handles everything.
+      if(!window.__nsSettled){
+        // Only a picture that is laid out at zero size is a real "not ready yet" signal. readyState was
+        // also required, and canvas readers can stay interactive for the whole session, so every overlay
+        // waited the full grace period and then drew with stale geometry.
+        var un=unsizedImages(bs),waited=Date.now()-(window.__nsWaitFrom||(window.__nsWaitFrom=Date.now()));
+        if(un>0&&waited<800){
+          for(var qi=0;qi<bs.length;qi++)bs[qi].style.display='none';
+          sched();return;
+        }
+        window.__nsSettled=1;
+      }
       if(!ABS&&(de.scrollHeight||0)>(window.innerHeight||0)+80){
         // The overlay was built while the page was still short (images not loaded yet), so it chose the
         // script-driven FIXED mode, which trails behind the picture while scrolling. The page now scrolls
@@ -484,6 +889,7 @@ internal object WebModeWriter {
         for(var u=0;u<bs.length;u++)bs[u].removeAttribute('data-k');
       }
       var o=ABS?w.getBoundingClientRect():null;
+      orgX=ABS?o.left:0;orgY=ABS?o.top:0;
       var L=[],needsIndex=false,lookupNow=Date.now();
       // Most Webtoon images stay in the DOM, so cached source-to-image references are enough.
       // Only build the per-pass index when a cached image disappeared or an image has not yet
@@ -497,46 +903,108 @@ internal object WebModeWriter {
       var imgIndex=needsIndex?buildImgIndex():null;
       for(var i=0;i<bs.length;i++){
         var b=bs[i],im=findImg(b.getAttribute('data-s'),imgIndex);
-        if(!im){if(b.style.display!=='none')b.style.display='none';continue;}
+        if(!im){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var r=im.getBoundingClientRect();
-        if(r.width<8){if(b.style.display!=='none')b.style.display='none';continue;}
+        if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
+        // Map the same safe interior bands used to erase the source lettering into live viewport pixels.
+        // Geometry is refreshed with the image on every layout pass, including responsive resize/scroll.
+        var g=b.getAttribute('data-g').split(',');
+        var gx=Number(g[0]),gy=Number(g[1]),gw=Number(g[2]),gh=Number(g[3]);
+        // data-cv entries are fractions of THIS bubble's cover box (bubbleScript converts from page fractions).
+        // Do not map them from the page origin: doing so shifted the mask-check bands away from the actual balloon,
+        // rejecting valid wide layouts and forcing target text back into the narrow source-text rectangle.
+        var cvRaw=b.getAttribute('data-cv'),cvNums=cvRaw?cvRaw.split(','):[],safeBands=[],shapeMaxW=0;
+        for(var cvi=0;cvi+3<cvNums.length;cvi+=4){
+          var cl=Number(cvNums[cvi]),ct=Number(cvNums[cvi+1]),cr=Number(cvNums[cvi+2]),cb=Number(cvNums[cvi+3]);
+          if(!isFinite(cl)||!isFinite(ct)||!isFinite(cr)||!isFinite(cb)||cr<=cl||cb<=ct)continue;
+          var band=[r.left+(gx-gw/2+cl*gw)*r.width,
+                    r.top+(gy-gh/2+ct*gh)*r.height,
+                    r.left+(gx-gw/2+cr*gw)*r.width,
+                    r.top+(gy-gh/2+cb*gh)*r.height];
+          safeBands.push(band);shapeMaxW=Math.max(shapeMaxW,band[2]-band[0]);
+        }
+        b.__nsSafeBandsPx=safeBands;b.__nsShapeMaxW=shapeMaxW;b.__nsShapePageW=r.width;
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
         var cleanUrl=b.getAttribute('data-cl');
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
-        var g=b.getAttribute('data-g').split(',');
         var bw=g[2]*r.width,bh=g[3]*r.height;
         var vx=r.left+g[0]*r.width,vy=r.top+g[1]*r.height;       // centre in the viewport
         var near=!(vy+bh/2<-MARGIN||vy-bh/2>vh+MARGIN);
-        if(!near){if(b.style.display!=='none')b.style.display='none';continue;}
+        if(!near){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         var px=ABS?(vx-o.left):vx,py=ABS?(vy-o.top):vy;          // centre in the overlay's own space
-        L.push({b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,ox0:px-bw/2,oy0:py-bh/2,cvd:!!b.querySelector('.__ns_cv'),
-          x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,rot:((g[4]*1)!==0),z:0});
+        var imgX=ABS?(r.left-o.left):r.left,angle=Number(g[4])||0;
+        b.__nsNomW=bw;b.__nsMaxW=Math.max(bw,r.width-4);
+        L.push({needW:Math.max(0,(Number(b.__nsReqWRatio)||0)*bw),b:b,s:b.getAttribute('data-s'),g:g,rw:r.width,ow:bw,oh:bh,
+          ox0:px-bw/2,ox1:px+bw/2,oy0:py-bh/2,oy1:py+bh/2,il:imgX,ir:imgX+r.width,
+          needH:Math.max(0,(Number(b.__nsReqHRatio)||0)*bh),angle:angle,rot:angle!==0,
+          x0:px-bw/2,x1:px+bw/2,y0:py-bh/2,y1:py+bh/2,hidden:false});
       }
-      resolve(L);
-      for(var n=0;n<L.length;n++){
-        var R=L[n],bb=R.b,gg=R.g;
-        var cw=R.x1-R.x0,ch=R.y1-R.y0,cx=(R.x0+R.x1)/2,cy=(R.y0+R.y1)/2;
-        var key=Math.round(cx)+','+Math.round(cy)+','+Math.round(cw)+','+Math.round(ch);
-        var sz=Math.round(cw)+','+Math.round(ch);
-        var szChanged=bb.getAttribute('data-sz')!==sz;
-        if(bb.getAttribute('data-k')!==key){
-          bb.setAttribute('data-k',key);
-          bb.style.width=cw+'px'; bb.style.height=ch+'px';
-          // Interior cover rectangles are laid out against the NOMINAL box, so they stay put when the box was cut.
-          var cvs=bb.querySelectorAll('.__ns_cv');
-          for(var ci=0;ci<cvs.length;ci++){
-            var f=cvs[ci].getAttribute('data-f').split(','),cs=cvs[ci].style;
-            cs.left=(R.ox0+f[0]*R.ow-R.x0)+'px';cs.top=(R.oy0+f[1]*R.oh-R.y0)+'px';
-            cs.width=((f[2]-f[0])*R.ow)+'px';cs.height=((f[3]-f[1])*R.oh)+'px';
+      var requestedRelayout=false;
+      for(var layoutPass=0;layoutPass<3;layoutPass++){
+        resolve(L);
+        var expanded=false;
+        for(var n=0;n<L.length;n++){
+          var R=L[n],bb=R.b,gg=R.g;
+          if(R.hidden){if(bb.style.display!=='none')bb.style.display='none';if(bb.__nsCover)bb.__nsCover.style.display='none';continue;}
+          bb.__nsPushed=false;
+          bb.__nsShapeFitBlocked=!!R.grp||bb.getAttribute('data-moved')==='1';
+          var cw=R.x1-R.x0,ch=R.y1-R.y0;
+          var key=Math.round(R.x0)+','+Math.round(R.y0)+','+Math.round(cw)+','+Math.round(ch);
+          var keyChanged=bb.getAttribute('data-k')!==key;
+          var moved=Math.abs(R.x0-R.ox0)>1||Math.abs(R.y0-R.oy0)>1||Math.abs(cw-R.ow)>1||Math.abs(ch-R.oh)>1;
+          var movedState=moved?'1':'0',movedChanged=bb.getAttribute('data-moved')!==movedState;
+          if(moved)bb.removeAttribute('data-tb');
+          bb.setAttribute('data-moved',movedState);
+          var sz=Math.round(cw)+','+Math.round(ch),szChanged=bb.getAttribute('data-sz')!==sz||movedChanged;
+          if(keyChanged){
+            bb.setAttribute('data-k',key);bb.style.width=cw+'px';bb.style.height=ch+'px';
+            bb.style.transform='translate3d('+R.x0+'px,'+R.y0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
           }
-          bb.style.transform='translate3d('+(cx-cw/2)+'px,'+(cy-ch/2)+'px,0)'+((gg[4]*1)?' rotate('+gg[4]+'deg)':'');
+          // Background/fill stays at the original OCR box in a lower global layer;
+          // only the text moves. Therefore no later fill can cover an earlier label.
+          var cover=bb.__nsCover;
+          if(cover){
+            var ck=Math.round(R.ox0)+','+Math.round(R.oy0)+','+Math.round(R.ow)+','+Math.round(R.oh)+','+R.angle;
+            if(cover.getAttribute('data-k')!==ck){
+              cover.setAttribute('data-k',ck);cover.style.width=R.ow+'px';cover.style.height=R.oh+'px';
+              cover.style.transform='translate3d('+R.ox0+'px,'+R.oy0+'px,0)'+(R.angle?' rotate('+R.angle+'deg)':'');
+            }
+            if(cover.style.display!=='block')cover.style.display='block';
+          }
+          // If the text moved away from its source bubble, retain the source cover AND add a
+          // matching card under the relocated text so it stays readable over artwork.
+          // Every card lives in coverLayer, below textLayer, so it cannot occlude another label.
+          // A text that left its own bubble gets a small card under the TEXT ITSELF (never the whole box): see verify().
+          if(!moved&&bb.__nsLabelCover&&bb.__nsLabelCover.style.display!=='none')bb.__nsLabelCover.style.display='none';
+          // All background paints are below this layer; z-order no longer resolves collisions.
+          if(bb.style.zIndex!=='')bb.style.zIndex='';
+          if(bb.style.display!=='flex')bb.style.display='flex';
+          var fw=String(Math.round(R.rw));
+          if(szChanged||bb.getAttribute('data-fw')!==fw){
+            bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);
+            // A box that shares its row with neighbours may not take more width than the row gave it.
+            var roomW=(Number.isFinite(R.freeR)&&Number.isFinite(R.freeL))?R.freeR-R.freeL-2:R.rw-4;
+            var wideCap=Number(R.wideMaxW)||R.ow*1.35;
+            bb.__nsMaxW=R.grp?Math.max(8,cw):Math.max(R.ow,Math.min(wideCap,roomW));
+            bb.__nsMaxH=R.oh*1.8;
+            if(cw<R.ow)bb.__nsMaxW=Math.max(8,cw);   // a box that had to be narrowed must not be re-widened by the text
+            var prevW=Number(bb.__nsReqWRatio)||0;
+            var requiredH=fit(bb,(Number(gg[5])||0.01)*R.rw);
+            if((Number(bb.__nsReqWRatio)||0)>prevW+0.005)expanded=true;   // wider box wanted: lay out again with it
+            if(requiredH>ch+0.5){
+              var ratio=Math.min(1.8,requiredH/Math.max(1,R.oh)),oldRatio=Number(bb.__nsReqHRatio)||0;
+              if(ratio>oldRatio+0.005){bb.__nsReqHRatio=ratio;expanded=true;}
+            }
+          }
         }
-        var zz=R.z?String(R.z):'';
-        if(bb.style.zIndex!==zz)bb.style.zIndex=zz;
-        if(bb.style.display!=='flex')bb.style.display='flex';
-        var fw=String(Math.round(R.rw));
-        if(szChanged||bb.getAttribute('data-fw')!==fw){bb.setAttribute('data-sz',sz);bb.setAttribute('data-fw',fw);fit(bb,gg[5]*R.rw);}
-      }}
+        if(!expanded){
+          if(verify(L)){requestedRelayout=true;continue;}
+          break;
+        }
+        requestedRelayout=true;
+      }
+      if(requestedRelayout)schedNow();
+    }
     var raf=0,lastRun=0,forceNext=false,settleT=0,ro=null;
     function sched(){
       if(raf)return;
@@ -869,10 +1337,16 @@ internal object WebModeWriter {
         });
       }
     }catch(e){}
+    var lr=window.__nsLayoutReport;
+    if(lr&&lr.requiredTotal>0&&lr.requiredVisible<lr.requiredTotal)return 'pending';
     return 'ok';
   }catch(e){return 'err:'+e;}
 })(__ITEMS__,__SOURCES__,__FONT__,__PID__)
 """
+    private val BUBBLES: String = buildString(BUBBLES_PART_1.length + BUBBLES_PART_2.length) {
+        append(BUBBLES_PART_1)
+        append(BUBBLES_PART_2)
+    }
 
     /**
      * A tainted canvas reader can replace its bitmap without changing the URL or DOM geometry.
@@ -903,7 +1377,13 @@ internal object WebModeWriter {
      * Draws each translated paragraph on the spot of its original text. [translated] is index-aligned
      * with [WebModeLayout.bubbles]; a null/blank entry leaves that bubble's original text untouched.
      */
-    fun bubbleScript(layout: WebModeLayout, translated: List<String?>, font: String, pageId: String): String {
+    fun bubbleScript(
+        layout: WebModeLayout,
+        translated: List<String?>,
+        font: String,
+        pageId: String,
+        requiredBubbleKeys: Set<String> = emptySet()
+    ): String {
         val arr = JSONArray()
         // The cleaner records exactly which bubbles it erased (flat and artwork alike). The cleaned image is
         // shown only if every ERASED bubble of that image has a translation; otherwise the original <img>
@@ -991,11 +1471,19 @@ internal object WebModeWriter {
                                 .put(r5(Math.max(0f, mr))).put(r5(Math.max(0f, mb))))
                     }
                 }
+                .put("mf", b.modelMaskFit)
+                .put("rq", if (t.isNotBlank() && WebModeLayout.bubbleIdentity(b) in requiredBubbleKeys) 1 else 0)
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
                 .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
-                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else ""))
+                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else "")
+                // A canvas panel has no image URL, so `er` is its only way to drop the cover box. It must stay
+                // limited to canvas sources: an ordinary panel whose cleaned image is not cached (evicted, or a
+                // different job's erased marks) would otherwise lose its cover box with the original lettering
+                // still on the page — the translation then sits on top of the untranslated text.
+                .put("er", b.src.startsWith("ns-canvas:", true) &&
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()
@@ -1038,6 +1526,21 @@ internal object WmSfx {
         "BADUM" to "ধুকধুক", "TICK" to "টিক", "TOCK" to "টক", "BEEP" to "বিপ!", "BUZZ" to "ভনভন"
     )
 
+    /** Keep at most two consecutive copies without initializing java.util.regex on the UI thread. */
+    private fun collapseRepeatedRuns(s: String): String {
+        if (s.length < 3) return s
+        val out = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val ch = s[i]
+            var end = i + 1
+            while (end < s.length && s[end] == ch) end++
+            repeat(minOf(2, end - i)) { out.append(ch) }
+            i = end
+        }
+        return out.toString()
+    }
+
     private fun letters(s: String) = s.filter { it.isLetter() }
 
     fun fix(t: String): String {
@@ -1046,7 +1549,7 @@ internal object WmSfx {
         val l = letters(t)
         if (l.isEmpty() || l.any { it.code > 0x24F }) return t          // already (partly) non-Latin
         if (!bengali) return t
-        val key = l.uppercase().replace(Regex("(.)\\1{2,}"), "$1$1")
+        val key = collapseRepeatedRuns(l.uppercase())
         return MAP[key] ?: MAP[l.uppercase()] ?: t
     }
 }
