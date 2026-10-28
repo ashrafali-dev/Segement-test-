@@ -70,6 +70,22 @@ assert.ok(mainActivity.includes("nextChatbotRequestAtMs = minOf(nextChatbotReque
 assert.ok(mainActivity.includes("rtAheadSkippedBubbleHashes") &&
   mainActivity.includes("rememberSkippedAheadBubbles"),
   "unresolved read-ahead noise must not create an endless retry loop");
+assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = true)") &&
+  !extractor.includes("for (k in 0 until minOf(FETCH_AHEAD, total)) submitFetch(k)"),
+  "realtime scans must not eagerly download panels before checking ahead OCR cache");
+assert.ok(extractor.includes("hasAheadResult || alreadyReadingAhead || recentlyBlank"),
+  "prefetch slots must skip panels already cached, being read ahead, or recently known blank");
+assert.ok(extractor.includes("val realtimePriority = fastMode || req.ahead > 0") &&
+  extractor.includes("allowAi = !realtimePriority && req.ahead <= 0"),
+  "read-ahead OCR must never launch AI inpainting even if a caller changes the fastMode flag");
+assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
+  extractor.includes("else if (!realtimePriority && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
+  "realtime and read-ahead OCR must not start RT-DETR or mask segmentation");
+assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
+  mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0"),
+  "ahead OCR must be reduced to one panel on low-heap devices and paused under memory pressure");
+assert.ok(extractor.includes("Number(x.vl)") && extractor.includes("(x=${it.left})"),
+  "panel diagnostics must report viewport coordinates to investigate overlapping iframe/image candidates");
 const bubbleSeg = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleSegDetector.kt", "utf8");
 assert.ok(bubbleSeg.includes('Thread(r, "ns-mask-release")') &&
   bubbleSeg.includes("releaseExecutor.execute"),
