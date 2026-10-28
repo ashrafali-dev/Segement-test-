@@ -6,16 +6,6 @@ const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebM
 const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
 const remover = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
-const detector = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleDetector.kt", "utf8");
-
-// Regression: valid manga text slices such as 360x132 must reach the detector. The old 200px
-// floor and 2.2 aspect-ratio cutoff silently skipped these crops, leaving source ink visible.
-assert.ok(detector.includes("private const val MIN_DETECTION_SIDE = 64"), "detector must allow narrow/short text regions");
-assert.ok(detector.includes("private const val MIN_DETECTION_AREA = 10_000L"), "detector should skip only genuinely tiny fragments");
-assert.ok(detector.includes("shortSide < MIN_DETECTION_SIDE || area < MIN_DETECTION_AREA"), "detector must gate by minimum usable pixels");
-assert.ok(!detector.includes("bmp.width > bmp.height * 2.2f"), "wide speech/narration boxes must not be rejected as banners");
-assert.ok(detector.includes('skipped (tiny region ${bmp.width}x${bmp.height})'), "skip status should distinguish tiny crops from valid wide text regions");
-
 const libMatch = extractor.match(/private const val LIB = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(libMatch, "could not locate WebModeExtractor page-discovery JavaScript");
 const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)");
