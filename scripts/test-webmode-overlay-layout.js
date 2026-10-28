@@ -35,6 +35,14 @@ assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI
 assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
   "flat-background erasure must expand the mask to clear anti-aliased text edges");
 assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
+assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
+  "text removal must not flatten the full speech-bubble interior");
+assert.ok(remover.includes('sourceUrl.startsWith("blob:", ignoreCase = true)'),
+  "blob-backed panels must not advertise the original blob URL as a cleaned replacement");
+assert.ok(!writer.includes('put("cv", ja)'),
+  "the overlay fallback must not paint the full bubble interior as cv rectangles");
+assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl"),
+  "local OCR-box cover must stay visible until the cleaned replacement image loads");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
