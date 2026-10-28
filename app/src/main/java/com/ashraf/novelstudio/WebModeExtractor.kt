@@ -2457,20 +2457,47 @@ internal class WebModeExtractor(
                 if (b.vertical || Math.abs(OcrPost.usableTilt(b.angle)) >= 6f) continue
 
                 val ownFont = if (b.fontPx > 0f) b.fontPx else b.h
-                // The exhaustive leftover-ink scan is only useful during a thorough chapter pass.
-                // In realtime mode, passing a band collector forces bubbleInterior to scan every pixel
-                // again and compare it against every OCR box; a tall panel with many bubbles can stall.
-                // Without a collector the helper returns immediately after finding the bubble's fill.
-                val bands: MutableList<IntArray>? = if (fastMode) null else ArrayList()
-                // Realtime screens optimise for latency: flood-filling up to 1.2M pixels around
-                // every OCR block repeatedly was the dominant freeze on long/mobile Webtoon panels.
-                // Keep this expensive interior/leftover audit only for thorough chapter extraction.
+                // Realtime previously skipped the leftover-ink audit entirely. If Lens missed one row of a
+                // multiline/combined balloon, that row was never sent to the cleaner and stayed visible below
+                // the translated text. Audit only the one unique bubble (members are consumed below), keep the
+                // model mask as the preferred shape, and bound extra OCR retries per bubble.
+                val bands: MutableList<IntArray>? = if (freeAt(i)) null else ArrayList()
                 var fromDet = false
                 val inter: IntArray? = if (freeAt(i)) {
                     // Text outside predicted balloon masks is standalone; never grow it into a nearby speech bubble.
                     null
                 } else if (fastMode) {
-                    BubbleDetectorCore.interiorFor(dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]).also { fromDet = it != null }
+                    val detectedInterior = BubbleDetectorCore.interiorFor(
+                        dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]
+                    )
+                    if (detectedInterior != null) {
+                        fromDet = true
+                        // Model geometry is better for placement, but it has no per-row OCR-gap evidence. Use the
+                        // pixel audit only to discover unread text bands; discard bands if its outline disagrees.
+                        val pixelInterior = try {
+                            WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
+                                bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
+                        } catch (_: Throwable) { null }
+                        val overlap = if (pixelInterior != null) {
+                            val iw = (minOf(detectedInterior[2], pixelInterior[2]) -
+                                maxOf(detectedInterior[0], pixelInterior[0])).coerceAtLeast(0)
+                            val ih = (minOf(detectedInterior[3], pixelInterior[3]) -
+                                maxOf(detectedInterior[1], pixelInterior[1])).coerceAtLeast(0)
+                            val da = (detectedInterior[2] - detectedInterior[0]).toLong() *
+                                (detectedInterior[3] - detectedInterior[1])
+                            val pa = (pixelInterior[2] - pixelInterior[0]).toLong() *
+                                (pixelInterior[3] - pixelInterior[1])
+                            val smaller = minOf(da, pa)
+                            smaller > 0L && iw.toLong() * ih >= smaller * 0.55
+                        } else false
+                        if (!overlap) bands?.clear()
+                        detectedInterior
+                    } else {
+                        try {
+                            WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
+                                bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
+                        } catch (_: Throwable) { null }
+                    }
                 } else try {
                     WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
                         bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
@@ -2505,11 +2532,40 @@ internal class WebModeExtractor(
                 val fonts = ordered.map { blocks[it].fontPx }.filter { it > 0f }.sorted()
                 val medFont = if (fonts.isEmpty()) ownFont else fonts[fonts.size / 2]
                 val lines = ordered.mapTo(ArrayList<BubbleLine>()) {
-                    BubbleLine(blocks[it].cy, blocks[it].text.replace(NEWLINES, " ").trim())
+                    val line = blocks[it]
+                    BubbleLine(line.cy, line.text.replace(NEWLINES, " ").trim(),
+                        line.cx, line.w, line.h, line.fontPx)
                 }
-                // Recover missed bubble rows only during a thorough scan; doing up to three extra
-                // OCR inferences for every visible bubble made real-time reading feel frozen.
-                if (bands?.isNotEmpty() == true && !fastMode) recoverBubbleLines(bmp, st, inter, bands, lines, medFont)
+                val recovered = if (bands?.isNotEmpty() == true) {
+                    recoverBubbleLines(bmp, st, inter, bands, lines, medFont,
+                        maxRows = if (fastMode) 5 else 3)
+                } else emptyList()
+                // Add recovered OCR boxes to the same native-coordinate cleaner input; otherwise the text might
+                // improve in the chatbot paragraph but the eraser would still know only the originally found rows.
+                if (recovered.isNotEmpty()) {
+                    recognizedForClean?.let { target ->
+                        for (line in recovered) {
+                            val cxSrc = x0 + line.cx * k
+                            val cySrc = y0 + line.cy * k
+                            val wwSrc = line.w * k
+                            val hhSrc = line.h * k
+                            if (wwSrc < 2f || hhSrc < 2f) continue
+                            val lSrc = (cxSrc - wwSrc / 2f).coerceIn(0f, fullW.toFloat())
+                            val tSrc = (cySrc - hhSrc / 2f).coerceIn(0f, fullH.toFloat())
+                            val rSrc = (cxSrc + wwSrc / 2f).coerceIn(lSrc + 1f, fullW.toFloat())
+                            val bSrc = (cySrc + hhSrc / 2f).coerceIn(tSrc + 1f, fullH.toFloat())
+                            target.add(OcrBlock(
+                                text = line.text, top = tSrc.toInt(), left = lSrc.toInt(),
+                                cx = (lSrc + rSrc) / 2f, cy = (tSrc + bSrc) / 2f,
+                                w = rSrc - lSrc, h = bSrc - tSrc, angle = 0f,
+                                fontPx = (line.fontPx.takeIf { it > 0f } ?: line.h) * k,
+                                vertical = false, confidence = 0.85f, observations = emptyList(),
+                                polygon = listOf(lSrc to tSrc, rSrc to tSrc, rSrc to bSrc, lSrc to bSrc)
+                            ))
+                        }
+                    }
+                    OcrDiag.log("BUBBLE_RESCAN", "fast=$fastMode bands=${bands?.size ?: 0} recovered=${recovered.size}")
+                }
                 val joinedText = lines.sortedBy { it.cy }.joinToString(" ") { it.text }
                     .replace(Regex("\\s+"), " ").trim()
                 if (joinedText.isBlank()) continue
@@ -2517,9 +2573,19 @@ internal class WebModeExtractor(
                 refinedBox[i] = inter
                 run {
                     var sl = Int.MAX_VALUE; var st = Int.MAX_VALUE; var sr = Int.MIN_VALUE; var sb = Int.MIN_VALUE
-                    for (j in members) {
-                        val rc = rects[j]
-                        sl = Math.min(sl, rc[0]); st = Math.min(st, rc[1]); sr = Math.max(sr, rc[2]); sb = Math.max(sb, rc[3])
+                    // Include the real boxes of recovered rows, not just the first OCR pass's rows.
+                    for (line in lines) {
+                        if (line.w <= 0f || line.h <= 0f) continue
+                        sl = minOf(sl, (line.cx - line.w / 2f).toInt())
+                        st = minOf(st, (line.cy - line.h / 2f).toInt())
+                        sr = maxOf(sr, kotlin.math.ceil((line.cx + line.w / 2f).toDouble()).toInt())
+                        sb = maxOf(sb, kotlin.math.ceil((line.cy + line.h / 2f).toDouble()).toInt())
+                    }
+                    if (sl == Int.MAX_VALUE) {
+                        for (j in members) {
+                            val rc = rects[j]
+                            sl = Math.min(sl, rc[0]); st = Math.min(st, rc[1]); sr = Math.max(sr, rc[2]); sb = Math.max(sb, rc[3])
+                        }
                     }
                     val sp = Math.max(4, (medFont * 0.2f).toInt())
                     refinedSeed[i] = intArrayOf(
@@ -2729,10 +2795,11 @@ internal class WebModeExtractor(
          */
         private fun recoverBubbleLines(
             bmp: Bitmap, st: ScriptState, inter: IntArray, bands: List<IntArray>,
-            lines: MutableList<BubbleLine>, font: Float
-        ) {
+            lines: MutableList<BubbleLine>, font: Float, maxRows: Int = 3
+        ): List<BubbleLine> {
             fun letters(t: String) = t.count { it.isLetterOrDigit() }
-            var budget = 3
+            val added = ArrayList<BubbleLine>()
+            var budget = maxRows.coerceIn(1, 8)
             for (band in bands) {
                 if (budget <= 0 || !alive()) break
                 budget--
@@ -2753,15 +2820,32 @@ internal class WebModeExtractor(
                     for (g in got) {
                         val text = g.text.replace(NEWLINES, " ").trim()
                         if (letters(text) < 1) continue
+                        val gcx = x0 + g.cx / f
                         val gcy = y0 + g.cy / f
+                        val gw = g.w / f
+                        val gh = g.h / f
+                        val gf = g.fontPx / f
                         val same = lines.firstOrNull { Math.abs(it.cy - gcy) <= Math.max(font, 8f) * 0.7f }
                         if (same != null) {
-                            // same row: keep the fuller reading, never duplicate it
-                            if (letters(text) > letters(same.text) && OcrLineFusion.agreement(same.text, text) >= 0.8f)
+                            // Same row: keep the fuller reading and union the box so cleanup reaches its full width.
+                            if (letters(text) > letters(same.text) && OcrLineFusion.agreement(same.text, text) >= 0.8f) {
                                 same.text = text
+                                if (gw > 0f && gh > 0f) {
+                                    val l = minOf(same.cx - same.w / 2f, gcx - gw / 2f)
+                                    val t = minOf(same.cy - same.h / 2f, gcy - gh / 2f)
+                                    val r = maxOf(same.cx + same.w / 2f, gcx + gw / 2f)
+                                    val b = maxOf(same.cy + same.h / 2f, gcy + gh / 2f)
+                                    same.cx = (l + r) / 2f; same.cy = (t + b) / 2f
+                                    same.w = r - l; same.h = b - t
+                                    same.fontPx = maxOf(same.fontPx, gf)
+                                }
+                            }
                             continue
                         }
-                        lines.add(BubbleLine(gcy, text))
+                        if (gw < 2f || gh < 2f) continue
+                        val fresh = BubbleLine(gcy, text, gcx, gw, gh, gf)
+                        lines.add(fresh)
+                        added.add(fresh)
                     }
                 } catch (_: Exception) {
                 } catch (_: OutOfMemoryError) {
@@ -2770,6 +2854,7 @@ internal class WebModeExtractor(
                     if (strip != null && strip !== bmp && !strip.isRecycled) strip.recycle()
                 }
             }
+            return added
         }
 
         /** True when two OCR readings are (nearly) the same text; false when they are different lines. */
@@ -2965,7 +3050,14 @@ internal class WebModeExtractor(
         val fastFallbackScriptsTried = HashSet<OcrScript>()
         var fastFallbackBudget = 3
     }
-    private class BubbleLine(var cy: Float, var text: String)
+    private class BubbleLine(
+        var cy: Float,
+        var text: String,
+        var cx: Float = 0f,
+        var w: Float = 0f,
+        var h: Float = 0f,
+        var fontPx: Float = 0f
+    )
     private class DecodeException : Exception()
     private class ForceAcc { var top = 0; val texts = ArrayList<String>(); val bubbles = ArrayList<WmBubble>() }
     private class PanelOcr(val text: String, val bubbles: List<WmBubble>)
