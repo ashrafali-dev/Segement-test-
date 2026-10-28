@@ -45,6 +45,41 @@ internal object WebModeTextRemovalCache {
     @Synchronized
     fun isErased(sourceUrl: String, bubbleKey: String): Boolean =
         erasedSoft[key(sourceUrl)]?.contains(bubbleKey) == true
+
+    /** Snapshot of the verified bubbles for this source. Used when multiple OCR passes clean one panel. */
+    @Synchronized
+    fun erasedKeys(sourceUrl: String): Set<String> = erasedSoft[key(sourceUrl)]?.toSet() ?: emptySet()
+
+    /**
+     * Return the existing cleaned image bytes so a later pass can add newly recovered lines WITHOUT
+     * rebuilding from the original and accidentally bringing already-cleaned bubbles back.
+     * Only one caller decodes/cleans at a time; the byte-size cap matches the cleaner's input limit.
+     */
+    @Synchronized
+    fun readCleanedBytes(sourceUrl: String): ByteArray? {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl)
+        if (slot != null) {
+            val data = canvasUrls[slot] ?: return null
+            val comma = data.indexOf(',')
+            if (comma < 0) return null
+            return try {
+                android.util.Base64.decode(data.substring(comma + 1), android.util.Base64.DEFAULT)
+                    .takeIf { it.isNotEmpty() && it.size <= 18 * 1024 * 1024 }
+            } catch (_: Throwable) { null }
+        }
+        val k = key(sourceUrl)
+        val entry = entries[k] ?: return null
+        if (!entry.file.isFile || entry.file.length() != entry.bytes ||
+            entry.bytes !in 1..(18L * 1024 * 1024)) {
+            entries.remove(k)
+            usedBytes = entries.values.sumOf { it.bytes }
+            return null
+        }
+        return try {
+            entry.file.readBytes().takeIf { it.size.toLong() == entry.bytes && it.isNotEmpty() }
+        } catch (_: Throwable) { null }
+    }
+
     private var root: File? = null
 
     @Synchronized
