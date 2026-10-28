@@ -547,40 +547,6 @@ internal object WebModeTextRemover {
         return variance <= 20.0 * 20.0
     }
 
-    private fun wipeInterior(bitmap: Bitmap, cv: List<Float>, width: Int, height: Int, bg: Int): Int {
-        val rects = ArrayList<IntArray>()
-        var q = 0
-        while (q + 3 < cv.size) {
-            val l = (cv[q] * width).toInt().coerceIn(0, width)
-            val t = (cv[q + 1] * height).toInt().coerceIn(0, height)
-            val r = ceil(cv[q + 2] * width).toInt().coerceIn(l, width)
-            val b = ceil(cv[q + 3] * height).toInt().coerceIn(t, height)
-            if (r - l >= 2 && b - t >= 2 && (r - l).toLong() * (b - t) <= 2_500_000L) rects.add(intArrayOf(l, t, r, b))
-            q += 4
-        }
-        if (rects.isEmpty()) return 0
-        var total = 0L
-        var ink = 0L
-        for (rc in rects) {
-            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
-            for (p in px) { total++; if (distance(p, bg) >= 60f) ink++ }
-        }
-        if (total == 0L || ink * 100 > total * 45) return 0
-        val paper = opaque(bg)
-        var changed = 0
-        for (rc in rects) {
-            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
-            var any = false
-            for (i in px.indices) if (distance(px[i], bg) >= 4f) { px[i] = paper; changed++; any = true }
-            if (any) bitmap.setPixels(px, 0, w, rc[0], rc[1], w, h)
-        }
-        return changed
-    }
-
     /** Colour for one erased pixel on artwork: inverse-distance blend of the nearest kept pixel in each of 8 directions (1/d² weights: no streaks, no pulling in far colours). */
     private fun gradientFill(
         region: IntArray, mask: ByteArray, rw: Int, rh: Int,
