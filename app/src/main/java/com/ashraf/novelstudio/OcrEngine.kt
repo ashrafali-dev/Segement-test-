@@ -53,6 +53,18 @@ internal class OcrResult(val blocks: List<OcrBlock>) {
 internal class OcrUnavailableException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /** Geometry helpers shared by the engine and Web Mode (pure Kotlin, no Android types). */
+/**
+ * The rung a user-region read applies before an engine call. One switch instead of a hard call to
+ * [OcrPost.boostContrast] keeps the chain testable on the JVM (an `if` on a constant is compiled away, so no
+ * Android Bitmap is touched when an engine is faked).
+ */
+internal object UserRegionPreprocess {
+    var enabled = true
+
+    fun apply(bitmap: Bitmap, contrast: Boolean): Bitmap =
+        if (enabled && contrast) OcrPost.boostContrast(bitmap) else bitmap
+}
+
 internal object OcrPost {
     /**
      * ML Kit sometimes reports stylised or skewed text as turned by ~180 degrees, and the translation

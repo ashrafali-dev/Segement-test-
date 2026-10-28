@@ -517,6 +517,74 @@ class MainActivity : Activity() {
         )
     }
 
+    /**
+     * Defect C: read a user-marked rectangle of [src] with the must-succeed chain and place the result exactly
+     * over the mark. Returns true when this path took the request.
+     *
+     * It reads the panel's own bytes (the copies ImageTap kept from the page's download; a cached copy of the
+     * WebView-cleaned panel otherwise), so the crop is of exactly the pixels under the mark. A spinner is shown,
+     * never a blocked UI; leaving the screen cancels it.
+     */
+    private fun startUserRegionOcr(src: String, x: Float, y: Float, w: Float, h: Float): Boolean {
+        val url = novelWv.url.orEmpty()
+        if (!url.startsWith("http", ignoreCase = true) || src.isBlank()) return false
+        val panelBytes = ImageTap.get(src)
+            ?: WebModeTextRemovalCache.readCachedPanel(this, src)
+            ?: return false
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(panelBytes, 0, panelBytes.size, bounds)
+        val pw = bounds.outWidth; val ph = bounds.outHeight
+        if (pw <= 0 || ph <= 0) return false
+        val l = x.coerceIn(0f, 0.994f) * pw
+        val t = y.coerceIn(0f, 0.994f) * ph
+        val r = minOf(pw.toFloat(), l + w.coerceIn(0.006f, 1f) * pw)
+        val b = minOf(ph.toFloat(), t + h.coerceIn(0.006f, 1f) * ph)
+        val token = navToken
+        val script = manualExtractScript()
+        UserRegionHost.install(userRegionPlacement)
+        OcrDiag.setMode("region")
+        toast("🔎 Reading the marked area…")
+        UserRegionHost.start(
+            context = this, src = src, panelBytes = panelBytes,
+            region = CanvasBox(l, t, r, b), panelTop = 0, script = script,
+            onFailure = { msg ->
+                handler.post { if (token == navToken) toast("⚠️ $msg") }
+            }
+        )
+        return true
+    }
+
+    /**
+     * Placement hook for a user-marked region: merge the read into the page layout and send it through the
+     * normal translation/overlay path, exactly like a force-OCR area, so it works in every mode.
+     */
+    private val userRegionPlacement = object : UserRegionHost.Placement {
+        override fun place(bubbles: List<WmBubble>, placements: List<CanvasBox>, src: String, crop: android.graphics.Bitmap, script: OcrScript) {
+            try {
+                if (bubbles.isEmpty()) return
+                handler.post {
+                    val url = novelWv.url.orEmpty()
+                    if (!url.startsWith("http", ignoreCase = true)) return@post
+                    val layout = WebModeLayout(0, bubbles)
+                    WebModeLayoutStore.put(this@MainActivity, url, layout)
+                    val text = bubbles.joinToString("\n\n") { it.sourceText }.trim()
+                    if (text.isBlank()) return@post
+                    val chapter = Chapter(
+                        title = "", text = text, next = null, prev = null, url = url,
+                        novel = android.net.Uri.parse(url).host.orEmpty().removePrefix("www."),
+                        number = "", contentSel = ""
+                    )
+                    // The user corrected a box on THIS page: translate only this text and merge it into the
+                    // bubbles already placed, instead of re-reading the whole screen (scanning-mode region path).
+                    scanRegionChapter = if (DeepSeekRealtimeTranslation.isEnabled(this)) null else chapter
+                    handleChapter(chapter, useSavedTranslation = false)
+                }
+            } finally {
+                try { crop.recycle() } catch (_: Throwable) {}
+            }
+        }
+    }
+
     private fun requestForceOcrArea(
         src: String, x: Float, y: Float, w: Float, h: Float,
         fromReOcr: Boolean = false, expanded: Boolean = false, onFinished: (() -> Unit)? = null
@@ -530,6 +598,11 @@ class MainActivity : Activity() {
             toast("🔎 Area re-scan needs Scanning or Real-time mode")
             return
         }
+        // Defect C: a marked region is read by the must-succeed chain, not by the scanning pipeline (which
+        // would apply the prefilter, the dedupe cache and fast mode to exactly the box the user is looking at).
+        // Full-panel force (0,0,1,1) and the internal re-OCR/re-read paths keep the old pipeline.
+        val isUserMark = !fromReOcr && onFinished == null && !(x <= 0.001f && y <= 0.001f && w >= 0.999f && h >= 0.999f)
+        if (isUserMark && startUserRegionOcr(src, x, y, w, h)) return
         if (!fromReOcr && (webModeHandle != null || running != null || queue.isNotEmpty())) {
             toast("⏳ Current OCR/translation is busy. Try again when it finishes")
             return
@@ -11095,6 +11168,8 @@ ${rows.take(220).joinToString("\n")}
 
     override fun onDestroy() {
         try { com.ashraf.novelstudio.manualextract.ManualExtractController.release() } catch (_: Throwable) {}
+        // Leaving the screen cancels a user-region read in flight and frees its engines (Defect C, C4).
+        try { UserRegionHost.release() } catch (_: Throwable) {}
         ScanKeepAlive.stop(this)
         aheadOcrHandle?.cancel()
         webModeHandle?.cancel()

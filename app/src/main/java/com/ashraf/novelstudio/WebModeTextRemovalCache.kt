@@ -73,6 +73,18 @@ internal object WebModeTextRemovalCache {
         }
     }
 
+    /**
+     * The encoded cleaned panel kept for [sourceUrl], or null. Read-only accessor used when the user marks a
+     * region on a page whose original bytes were never teed by ImageTap (Defect C): the crop is then still made
+     * of the page's own pixels. Never evicts and never creates files.
+     */
+    @Synchronized
+    fun readCachedPanel(sourceUrl: String): ByteArray? {
+        val entry = entries[key(sourceUrl)] ?: return null
+        if (!entry.file.isFile || entry.file.length() != entry.bytes) return null
+        return try { entry.file.readBytes() } catch (_: Throwable) { null }
+    }
+
     @Synchronized
     fun has(sourceUrl: String): Boolean {
         val entry = entries[key(sourceUrl)] ?: return false
