@@ -593,7 +593,7 @@ internal object WebModeLayoutStore {
         } == true
 
     private val CANVAS_SLOT = Regex(
-        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)$"
+        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)(?:@[^\\s]+)?$"
     )
 
     /** Stable identity for a recycled canvas independent of the current bitmap dimensions. */
