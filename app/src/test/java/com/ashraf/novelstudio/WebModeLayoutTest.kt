@@ -1,6 +1,8 @@
 package com.ashraf.novelstudio
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -100,5 +102,51 @@ class WebModeSamePositionTest {
 
     @Test fun differentSizeIsNotTheSameBubble() {
         assertFalse(WebModeLayoutStore.samePosition(b(0.5f, 0.5f, 0.6f, 0.008f), b(0.5f, 0.5f, 0.6f, 0.02f)))
+    }
+}
+
+
+/** Marker parser regression tests: skipped OCR noise must not shift or cancel valid replies. */
+class WebModePartialAlignmentTest {
+    private val src = "ns-canvas:0,0,800x1200"
+
+    private fun bubble(text: String, index: Int) = WmBubble(
+        src = src, cx = 0.2f + index * 0.2f, cy = 0.2f, w = 0.12f, h = 0.08f,
+        angle = 0f, font = 0.02f, bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
+        sourceText = text
+    )
+
+    private fun layout(n: Int = 3) = WebModeLayout(0, (1..n).map { bubble("source $it", it) })
+
+    @Test fun blankMarkerDoesNotDiscardOtherTranslations() {
+        val aligned = WebModeLayout.align("[001] হ্যালো\\n\\n[002]   \\n\\n[003] কেমন আছো", layout())
+        assertEquals(listOf("হ্যালো", null, "কেমন আছো"), aligned)
+    }
+
+    @Test fun omittedMarkerLeavesItsOwnSlotEmptyWithoutShiftingLaterAnswers() {
+        val aligned = WebModeLayout.align("[001] প্রথম\\n\\n[003] তৃতীয়", layout())
+        assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
+    }
+
+    @Test fun outOfOrderMarkersStillMapByTheirExplicitIds() {
+        val aligned = WebModeLayout.align("[003] তৃতীয়\\n\\n[001] প্রথম", layout())
+        assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
+    }
+
+    @Test fun duplicateMarkerOnlyInvalidatesThatAmbiguousSlot() {
+        val aligned = WebModeLayout.align(
+            "[001] প্রথম উত্তর\\n\\n[001] অন্য উত্তর\\n\\n[002] দ্বিতীয়\\n\\n[003] তৃতীয়",
+            layout()
+        )
+        assertEquals(listOf(null, "দ্বিতীয়", "তৃতীয়"), aligned)
+    }
+
+    @Test fun tildePlaceholderDoesNotDiscardOtherTranslations() {
+        val aligned = WebModeLayout.align("[001] প্রথম\\n\\n[002] ~\\n\\n[003] তৃতীয়", layout())
+        assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
+    }
+
+    @Test fun allEmptyEntriesAreRejectedRatherThanReportedAsSuccess() {
+        assertNull(WebModeLayout.align("[001]\\n\\n[002]\\n\\n[003] ~", layout()))
     }
 }
