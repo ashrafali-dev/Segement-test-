@@ -48,7 +48,7 @@ async function readJsonLimited(req: Request, maxBytes: number): Promise<Record<s
 }
 
 async function enforceIpRateLimit(req: Request, serviceKey: string, db: any): Promise<"allowed" | "blocked" | "unavailable"> {
-  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",").map(value => value.trim()).filter(Boolean).slice(-1)[0];
   const ip = req.headers.get("cf-connecting-ip")?.trim()
     || req.headers.get("x-real-ip")?.trim()
     || forwarded;
