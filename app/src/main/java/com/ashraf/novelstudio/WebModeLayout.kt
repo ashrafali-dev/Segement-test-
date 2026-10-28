@@ -191,6 +191,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         fun alignWithFallback(text: String, layout: WebModeLayout): List<String?>? {
             align(text, layout)?.let { return it }
             if (layout.bubbles.size != 1) return null
+            // A single bubble may safely recover a markerless or singly-renumbered answer, but two
+            // marker groups mean the model returned multiple answers. Never concatenate them into one bubble.
+            if (ANY_MARK.findAll(text).count() > 1) return null
             val answer = stripMarkers(text)
             if (answer.isBlank()) return null
             return listOf(answer)
