@@ -124,6 +124,24 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             return bytes.joinToString("") { "%02x".format(it) }
         }
 
+        /**
+         * Cache identity for text read from a recycled canvas. Unlike the general text cache, it
+         * includes the stable canvas slot and coarse normalized geometry so two equal dialogues on
+         * different visible panels cannot borrow one another's translation. Coordinates are
+         * quantized to 1% of the image to tolerate small OCR-box jitter between scan passes.
+         */
+        fun canvasBubbleCacheIdentity(b: WmBubble): String? {
+            val slot = WebModeLayoutStore.canvasSourceSlot(b.src) ?: return null
+            val text = normalizeOcrText(b.sourceText)
+            val geometry = listOf(b.cx, b.cy, b.w, b.h).joinToString(",") {
+                Math.round(it * 100f).toInt().toString()
+            }
+            val material = "$slot|$geometry|$text"
+            val bytes = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(material.toByteArray(Charsets.UTF_8))
+            return "jcanvas:" + bytes.joinToString("") { "%02x".format(it) }
+        }
+
         /** Map the current reply to the current scan, then retain the result on the matching bubbles. */
         fun translated(layout: WebModeLayout, values: List<String?>): WebModeLayout =
             WebModeLayout(layout.titleOffset, layout.bubbles.mapIndexed { i, b ->
