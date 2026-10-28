@@ -440,9 +440,26 @@ internal object LensProtocol {
         return out
     }
 
+    /** Convert Lens line geometry to the shared OCR geometry used by whisper/aside grouping rules. */
+    private fun isAside(a: LineGeo, b: LineGeo): Boolean {
+        fun block(line: LineGeo): OcrBlock {
+            val g = line.g
+            return OcrBlock(
+                text = line.text,
+                top = (g.cy - g.h / 2f).toInt(),
+                left = (g.cx - g.w / 2f).toInt(),
+                cx = g.cx, cy = g.cy, w = g.w, h = g.h,
+                angle = g.angle, fontPx = if (g.h > 0f) g.h * 0.9f else 0f
+            )
+        }
+        return BubbleGrouping.isAsidePair(block(a), block(b))
+    }
+
     /** Sanity check on Lens' paragraph: do these two consecutive lines really belong to one block? */
     private fun continues(a: LineGeo, b: LineGeo): Boolean {
         val ga = a.g; val gb = b.g
+        // Lens often groups a small, offset whisper directly beneath main dialogue in one paragraph.
+        if (isAside(a, b)) return false
         if (Math.abs(ga.angle) >= 6f || Math.abs(gb.angle) >= 6f) return false
         val ratio = ga.h / gb.h
         if (ratio < 0.45f || ratio > 2.2f) return false
