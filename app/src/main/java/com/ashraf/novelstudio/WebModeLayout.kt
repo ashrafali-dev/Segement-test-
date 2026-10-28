@@ -140,11 +140,32 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
          * the wrong box after the model merges, reorders, or drops one paragraph. In that case the
          * caller must show the reader view, never guess placement.
          */
-        fun align(text: String, layout: WebModeLayout): List<String?>? {
+        fun align(text: String, layout: WebModeLayout): List<String?>? =
+            when (val r = alignResult(text, layout)) {
+                is AlignResult.Accepted -> r.values
+                is AlignResult.Failed -> null
+            }
+
+        /** What [alignResult] decided, and — for a partial accept — which bubbles are still missing. */
+        sealed class AlignResult {
+            data class Accepted(val values: List<String?>, val partial: Boolean, val missing: List<Int>) : AlignResult()
+            data class Failed(val reason: String) : AlignResult()
+        }
+
+        /**
+         * [align] with an explicit verdict.
+         *
+         * A reply that answers a STRONG majority of the bubbles in order is placed, even when a few markers
+         * were dropped: the placed lines are unambiguous (each carries its own number) and refusing them left
+         * the whole page untranslated for one lost marker (field log: placed=1 need=2 -> REJECT).
+         * Order is still required — out-of-order numbering means the model lost track of which paragraph is
+         * which — except for a single placed answer, where order cannot be wrong.
+         */
+        fun alignResult(text: String, layout: WebModeLayout): AlignResult {
             val n = layout.bubbles.size
-            if (n == 0) return null
+            if (n == 0) return AlignResult.Failed("no bubbles")
             val ms = MARK.findAll(text).toList()
-            if (ms.isEmpty()) return null
+            if (ms.isEmpty()) return AlignResult.Failed("no markers")
 
             val expectedLast = n + layout.titleOffset
             val byNo = HashMap<Int, String>()
@@ -167,14 +188,22 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             // page prints lines in the wrong bubbles and leaves the rest permanently untranslated, so it is rejected and
             // the caller retries instead (that is what the old 70 % rule protected).
             val need = if (n <= 2) n else Math.ceil(n * 0.75).toInt()
-            val ascending = order.zipWithNext().all { (x, y) -> y > x }
-            val ok = byNo.size >= need && ascending
-            OcrDiag.log("ALIGN", "bubbles=$n markers=${ms.size} placed=${byNo.size} need=$need outOfRange=$outOfRange dup=$dup empty=$empty ascending=$ascending -> ${if (ok) "ACCEPT" else "REJECT"}")
-            if (!ok) return null
+            // Partial accept (field log: placed=1 need=2 -> REJECT lost a whole page for one lost marker).
+            // At least one answer, ordered, and covering a meaningful share of the page is enough: every
+            // placed line carries its own marker number, so it cannot land on the wrong bubble.
+            val partialNeed = if (n <= 2) 1 else Math.ceil(n * 0.40).toInt()
+            val ordered = order.size >= 1 && order.zipWithNext().all { (x, y) -> y > x }
+            val ok = byNo.size >= need && ordered
+            val partial = !ok && byNo.size >= partialNeed && ordered
+            val verdict = when { ok -> "ACCEPT"; partial -> "PARTIAL"; else -> "REJECT" }
+            OcrDiag.log("ALIGN", "bubbles=$n markers=${ms.size} placed=${byNo.size} need=$need outOfRange=$outOfRange dup=$dup empty=$empty ascending=$ordered -> $verdict")
+            if (!ok && !partial) return AlignResult.Failed("placed=${byNo.size} need=$need")
 
             // Marker numbers are positional IDs, looked up by number. A missing ID leaves ONLY its own bubble blank.
             val out = List(n) { i -> byNo[i + 1 + layout.titleOffset]?.replace(NL, " ") }
-            return if (out.any { !it.isNullOrBlank() }) out else null
+            if (out.none { !it.isNullOrBlank() }) return AlignResult.Failed("no usable answers")
+            val missing = out.indices.filter { out[it].isNullOrBlank() }
+            return AlignResult.Accepted(out, partial, missing)
         }
 
         /**

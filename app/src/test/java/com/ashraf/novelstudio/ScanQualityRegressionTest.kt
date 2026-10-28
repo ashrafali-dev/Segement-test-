@@ -27,14 +27,33 @@ class ScanQualityRegressionTest {
         val a=line("first",200f,100f,30f);val b=line("second",200f,134f,30f)
         assertEquals(2,OcrPost.mergeNeighbours(listOf(a,b),verticalOnly=true).size)
     }
-    @Test fun incompleteReplyCannotBeSuccessful() {
-        assertNull(WebModeLayout.align("[001] one [002] two [003] three",layout(4)))
+    @Test fun incompleteReplyIsPlacedPartiallyNotDropped() {
+        // 3 of 4 answered in order: the placed lines carry their own numbers, so they are unambiguous.
+        // Refusing them (the old rule) left the whole page untranslated for one lost marker.
+        val r = WebModeLayout.alignResult("[001] one [002] two [003] three", layout(4))
+        assertTrue(r is WebModeLayout.AlignResult.Accepted)
+        r as WebModeLayout.AlignResult.Accepted
+        assertTrue(r.partial)
+        assertEquals(listOf("one","two","three"), r.values.filterNotNull())
+        assertEquals(listOf(3), r.missing)
+    }
+    @Test fun singleAnswerOnTwoBubblePageIsPlacedAtItsOwnMarker() {
+        // Field log: bubbles=2 markers=2 placed=1 need=2 outOfRange=0 dup=0 empty=1 ascending=true -> REJECT
+        val r = WebModeLayout.alignResult("[001] one [002] ~", layout(2))
+        assertTrue(r is WebModeLayout.AlignResult.Accepted)
+        assertEquals(listOf("one", null), (r as WebModeLayout.AlignResult.Accepted).values)
+    }
+    @Test fun farTooLittleCoverageIsStillRejected() {
+        assertNull(WebModeLayout.align("[001] one", layout(10)))
     }
     @Test fun duplicateMarkerIsAmbiguousEvenWithFullCoverage() {
         assertNull(WebModeLayout.align("[001] one [001] wrong [002] two",layout(2)))
     }
     @Test fun missingBubbleCannotBeHiddenByTitleMarker() {
-        assertNull(WebModeLayout.align("[001] title [002] one [003] two [004] three",layout(4,1)))
+        // Title offset: [001] is the title, so only 2 of the 4 bubbles are answered. The answers still land on the
+        // bubbles they name; the title is not a bubble and bubble 4 keeps its own (blank) slot.
+        assertEquals(listOf(null,"one","two",null),
+            WebModeLayout.align("[001] title [002] one [003] two [004] three",layout(4,1)))
     }
     @Test fun exactMarkersKeepTheirOwnBoxes() {
         assertEquals(listOf("one","two"),WebModeLayout.align("[001] one [002] two",layout(2)))

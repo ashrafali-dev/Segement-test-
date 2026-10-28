@@ -2141,13 +2141,27 @@ internal class WebModeExtractor(
             bmp: Bitmap, st: ScriptState, y0: Int, sample: Int, fullW: Int, fullH: Int,
             src: String, texts: MutableList<String>, out: MutableList<WmBubble>,
             firstSlice: Boolean, lastSlice: Boolean, x0: Int = 0, fastMode: Boolean = false,
-            preRecognized: OcrResult? = null, forceFresh: Boolean = false
+            preRecognized: OcrResult? = null, forceFresh: Boolean = false,
+            /** Scroll-top of the panel this slice belongs to (canvas placement). -1 = from the live WebView. */
+            panelTopY: Int = -1
         ) {
             val tSlice = android.os.SystemClock.elapsedRealtime()
             val outBefore = out.size
             var groupMs = 0L
             var ocrMs = 0L
             var fitMs = 0L
+            // Debug only (ocrDebug): one upload -> panel -> canvas line per placed block. Read lazily so a normal
+            // scan pays nothing, and never changes what is drawn.
+            val traceCoords = Prefs.bool(wv.context, "ocrDebug", false)
+            var coordTopCache = Integer.MIN_VALUE
+            fun coordTop(): Int {
+                if (panelTopY >= 0) return panelTopY
+                val c = coordTopCache
+                if (c != Integer.MIN_VALUE) return c
+                val v = try { (wv.scrollY).coerceAtLeast(0) } catch (_: Throwable) { 0 }
+                coordTopCache = v
+                return v
+            }
             var lineCount = 0
             // Google Lens is a network wait; the bubble detector only needs the bitmap. Run them side by side
             // instead of one after the other (the detector used to start only after Lens had answered).
@@ -2516,6 +2530,14 @@ internal class WebModeExtractor(
                 }
                 texts.add(text)
                 out.add(nb)
+                if (traceCoords) {
+                    // The box the engine itself returned, in PANEL pixels (its own space, no scroll). Printed in the
+                    // same "raw -> panel -> canvas" form as the shared helper: the engine already works in panel
+                    // space, so raw == panel here and only the final scroll step is applied.
+                    val pb = CanvasBox(rects[i][0].toFloat(), rects[i][1].toFloat(), rects[i][2].toFloat(), rects[i][3].toFloat())
+                    OcrDiag.log("COORD", "block#${out.size} \"${OcrDiag.snip(text, 12)}\" " +
+                        coordinateTrace(pb, bmp.width, bmp.height, bmp.width, bmp.height, coordTop()))
+                }
             }
             } finally {
                 // The detector reads [bmp]; the caller recycles it right after this function, so never leave it running.
