@@ -15,6 +15,7 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -32,10 +33,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal object WebModeInpainter {
     const val MODEL_URL =
-        "https://huggingface.co/litert-community/MI-GAN-512-Places2-LiteRT/resolve/main/migan_fp16.tflite"
+        "https://huggingface.co/litert-community/MI-GAN-512-Places2-LiteRT/resolve/179a35d8e8a518f6253f9c42fc9b412c6438cf7c/migan_fp16.tflite"
     private const val MODEL_NAME = "migan_fp16.tflite"
-    private const val MIN_BYTES = 15_000_000L
-    private const val MAX_BYTES = 20_000_000L
+    private const val EXPECTED_BYTES = 16_312_640L
+    private const val MODEL_SHA256 = "ef53f8dca69e5ce29629441128322c4d9a0a527b2a043703e0ab497f2463c25f"
     private const val SIZE = 512
     private const val PLANE = SIZE * SIZE
 
@@ -97,7 +98,7 @@ internal object WebModeInpainter {
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), MODEL_NAME)
 
     fun isReady(ctx: Context): Boolean =
-        modelFile(ctx).let { it.isFile && it.length() in MIN_BYTES..MAX_BYTES }
+        modelFile(ctx).let { it.isFile && it.length() == EXPECTED_BYTES }
 
     fun isDownloading(): Boolean = downloading.get()
     fun isLoaded(): Boolean = engine != null
@@ -165,8 +166,9 @@ internal object WebModeInpainter {
                 val code = conn.responseCode
                 if (code !in 200..299) throw IllegalStateException("HTTP " + code)
                 val total = conn.contentLengthLong
-                if (total > MAX_BYTES) throw IllegalStateException("অপ্রত্যাশিত ফাইল সাইজ")
+                if (total > 0 && total != EXPECTED_BYTES) throw IllegalStateException("অপ্রত্যাশিত ফাইল সাইজ")
                 var readTotal = 0L
+                val digest = MessageDigest.getInstance("SHA-256")
                 BufferedInputStream(conn.inputStream).use { input ->
                     FileOutputStream(part).use { output ->
                         val buffer = ByteArray(65536)
@@ -174,14 +176,17 @@ internal object WebModeInpainter {
                             val n = input.read(buffer)
                             if (n < 0) break
                             readTotal += n
-                            if (readTotal > MAX_BYTES) throw IllegalStateException("ফাইলের সাইজ বেশি")
+                            if (readTotal > EXPECTED_BYTES) throw IllegalStateException("ফাইলের সাইজ বেশি")
                             output.write(buffer, 0, n)
+                            digest.update(buffer, 0, n)
                             onProgress(readTotal, total)
                         }
                     }
                 }
                 if (total > 0 && readTotal != total) throw IllegalStateException("অসম্পূর্ণ ডাউনলোড")
-                if (part.length() !in MIN_BYTES..MAX_BYTES) throw IllegalStateException("ফাইল যাচাই ব্যর্থ: সাইজ মেলেনি")
+                if (readTotal != EXPECTED_BYTES || part.length() != EXPECTED_BYTES) throw IllegalStateException("ফাইল যাচাই ব্যর্থ: সাইজ মেলেনি")
+                val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                if (actualSha256 != MODEL_SHA256) throw IllegalStateException("MI-GAN ফাইলের SHA-256 মেলেনি")
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) throw IllegalStateException("ফাইল সংরক্ষণ ব্যর্থ")
 
