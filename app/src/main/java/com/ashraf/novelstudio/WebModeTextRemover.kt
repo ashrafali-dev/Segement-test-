@@ -604,6 +604,80 @@ internal object WebModeTextRemover {
         return false
     }
 
+
+    /**
+     * Conservative recovery for lettering that OCR did not include in its text box.
+     *
+     * Only the caller's segmentation-model-derived interior bands are accepted. We additionally
+     * verify that at least 72% of their pixels match the sampled paper colour and that strong ink
+     * occupies less than 45%; textured/gradient artwork therefore falls back to glyph-only cleanup.
+     * The band geometry has already been inset from the model silhouette, so this does not paint
+     * the balloon outline or its external background.
+     */
+    private fun wipeModelValidatedFlatInterior(
+        bitmap: Bitmap,
+        cv: List<Float>,
+        width: Int,
+        height: Int,
+        bg: Int
+    ): Int {
+        if (cv.size < 4 || width <= 0 || height <= 0) return 0
+        val rects = ArrayList<IntArray>()
+        var totalArea = 0L
+        var q = 0
+        while (q + 3 < cv.size && rects.size < 64) {
+            val l = (cv[q] * width).toInt().coerceIn(0, width - 1)
+            val t = (cv[q + 1] * height).toInt().coerceIn(0, height - 1)
+            val r = ceil(cv[q + 2] * width).toInt().coerceIn(l + 1, width)
+            val b = ceil(cv[q + 3] * height).toInt().coerceIn(t + 1, height)
+            val area = (r - l).toLong() * (b - t).toLong()
+            if (area >= 4L && area <= 1_250_000L && totalArea + area <= 2_000_000L) {
+                rects.add(intArrayOf(l, t, r, b))
+                totalArea += area
+            }
+            q += 4
+        }
+        if (rects.isEmpty()) return 0
+
+        val paper = opaque(bg)
+        var total = 0L
+        var nearPaper = 0L
+        var strongInk = 0L
+        for (rc in rects) {
+            val w = rc[2] - rc[0]
+            val h = rc[3] - rc[1]
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, rc[0], rc[1], w, h)
+            for (p in pixels) {
+                total++
+                val d = distance(p, paper)
+                if (d <= 30f) nearPaper++
+                if (d >= 60f) strongInk++
+            }
+        }
+        // A flat fill is safe only when most of the interior agrees with its paper colour.
+        if (total < 32L || nearPaper * 100L < total * 72L ||
+            strongInk * 100L > total * 45L) return 0
+
+        var changed = 0
+        for (rc in rects) {
+            val w = rc[2] - rc[0]
+            val h = rc[3] - rc[1]
+            val pixels = IntArray(w * h)
+            bitmap.getPixels(pixels, 0, w, rc[0], rc[1], w, h)
+            var any = false
+            for (i in pixels.indices) {
+                if (distance(pixels[i], paper) >= 4f) {
+                    pixels[i] = paper
+                    changed++
+                    any = true
+                }
+            }
+            if (any) bitmap.setPixels(pixels, 0, w, rc[0], rc[1], w, h)
+        }
+        return changed
+    }
+
     fun cleanAndCache(
         context: Context,
         sourceUrl: String,
@@ -1073,6 +1147,31 @@ internal object WebModeTextRemover {
                 totalRemoved += selectedCount
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
+            // Recovery pass from the faster cleaner: remove missed rows/SFX inside a VERIFIED flat bubble.
+            // This is intentionally narrower than the legacy whole-interior pass. Only model-mask-derived bands
+            // qualify, the paper must be demonstrably flat, and free/artwork text is never sent through this path.
+            // Keep it AFTER glyph verification so these filled pixels cannot make the original-text verifier pass
+            // or fail based on an already-repainted bitmap.
+            val attemptedFlatBands = HashSet<Pair<List<Float>, Int>>()
+            for (bubble in boundedBubbles) {
+                if (bubble.soft || bubble.free || !bubble.modelMaskFit || bubble.cv.size < 4) continue
+                val paper = opaque(bubble.bg)
+                if (!attemptedFlatBands.add(bubble.cv to paper)) continue
+                val n = try {
+                    wipeModelValidatedFlatInterior(bitmap, bubble.cv, width, height, paper)
+                } catch (_: Throwable) { 0 }
+                if (n <= 0) continue
+
+                totalRemoved += n
+                // The same model-derived interior belongs to every recognised text region in this balloon.
+                // Mark all of those keys only after the complete flat interior has actually been cleaned.
+                val related = boundedBubbles.filter {
+                    it.modelMaskFit && !it.soft && !it.free && it.cv == bubble.cv
+                }
+                related.forEach { erased.add(WebModeTextRemovalCache.bubbleKey(it)) }
+                OcrDiag.log("FLAT_INTERIOR", "pixels=$n bands=${bubble.cv.size / 4} related=${related.size} paperCheck=passed")
+            }
+
             // The detector's balloon mask can occasionally cover a whole illustrated panel (for example a
             // recipe page). Feeding ALL OCR boxes to reconstruction then repaints cups/line art as if they were
             // dialogue. Restrict this final pass to OCR lines inside a non-art speech bubble whose own glyph box
