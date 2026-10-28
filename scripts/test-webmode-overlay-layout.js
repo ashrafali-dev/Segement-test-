@@ -76,6 +76,9 @@ assert.ok(bubbleSeg.includes('Thread(r, "ns-mask-release")') &&
   "idle mask-session release must not block the Android main thread");
 assert.ok(bubbleSeg.includes("expectedGeneration == releaseGeneration"),
   "a queued idle cleanup must not release a mask session that was used again");
+assert.ok(bubbleSeg.includes("idleReleaseExpectedGeneration = releaseGeneration") &&
+  bubbleSeg.includes("val expectedGeneration = idleReleaseExpectedGeneration"),
+  "the idle-release generation must be captured when its timer is scheduled, not when it fires");
 assert.ok(remover.includes('"AI_PAINT"') && remover.includes('"AI_PANEL"') &&
   remover.includes("aiCallsAttempted") && remover.includes("aiTotalMs"),
   "MI-GAN diagnostics must distinguish actual region calls and per-panel elapsed time");
