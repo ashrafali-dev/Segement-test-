@@ -743,9 +743,9 @@ internal object WebModeTextRemover {
             // wipeLetteringByBackground), so only the text is removed and its own colours are restored.
 
             for (bubble in boundedBubbles) {
-                // A prior pass already verified and removed this exact bubble's source ink from cleanBase.
-                // Keep its pixels/key and spend this pass on newly recovered bubbles or lines only.
-                if (!maskOnly && WebModeTextRemovalCache.bubbleKey(bubble) in previouslyErased) continue
+                // Revisit previously erased bubbles against the current OCR boxes: a later rescan can recover a
+                // missing row in the SAME speech balloon. Starting from cleanBase is idempotent for removed ink,
+                // while skipping the whole bubble here would preserve any newly discovered source lettering.
                 // The cover geometry can span the whole speech balloon. Text cleaning must always use the
                 // original OCR glyph box, never that expanded cover rectangle.
                 val hasOcrBox = bubble.ocrW > 0f && bubble.ocrH > 0f
