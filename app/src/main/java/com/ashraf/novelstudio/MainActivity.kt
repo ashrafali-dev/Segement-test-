@@ -1347,7 +1347,15 @@ class MainActivity : Activity() {
         // hidden-WebView ahead request is still generating, stop that request and requeue it; otherwise
         // the current panel can sit waiting for the entire background answer despite being higher priority.
         if (rtAheadWorkerBusy) {
-            OcrDiag.log("REALTIME", "visible batch preempts read-ahead translation; queued bubbles=${pending.bubbles.size}")
+            val preemptAt = System.currentTimeMillis()
+            val previousWaitMs = (nextChatbotRequestAtMs - preemptAt).coerceAtLeast(0L)
+            // The hidden request's cooldown was reserved before it was actually finished. Let the urgent visible
+            // request take the next slot, but retain rtAheadNextSendAtMs so background work cannot immediately restart.
+            nextChatbotRequestAtMs = minOf(nextChatbotRequestAtMs, preemptAt + 100L)
+            OcrDiag.log(
+                "REALTIME",
+                "visible batch preempts read-ahead; bubbles=${pending.bubbles.size} cooldownReducedMs=${(previousWaitMs - 100L).coerceAtLeast(0L)}"
+            )
             cancelRealtimeAheadWorker(requeue = true)
         }
         // Scan geometry and lastChapter are shared across page writes. Wait for ordinary foreground
