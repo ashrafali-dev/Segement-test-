@@ -27,14 +27,13 @@ data class HomeSite(val name: String, val url: String)
  * a caption describing the selected mode, an optional updates strip, then a two-item dock
  * (Library / Menu).
  *
- * The public API is unchanged from the old Home (`render`, `hideKeyboard`, onOpen/onSearch/onMenu/
- * onHub) so every caller in MainActivity keeps working.
+ * The public API is unchanged from the old Home (`render`, `hideKeyboard`, onOpen/onSearch/onMenu)
+ * so every caller in MainActivity keeps working. There is deliberately NO Hub entry on Home.
  */
 class HomeView(private val ctx: Context) : FrameLayout(ctx) {
     var onOpen: (String) -> Unit = {}
     var onSearch: (String) -> Unit = {}
     var onMenu: () -> Unit = {}
-    var onHub: (Hub.Part) -> Unit = {}
     /** Tapping a mode chip; MainActivity opens the mode start page or switches mode. */
     var onMode: (String) -> Unit = {}
 

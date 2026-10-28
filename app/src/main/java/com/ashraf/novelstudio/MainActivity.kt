@@ -4435,7 +4435,7 @@ return t.length>=40?'TXT:'+t:'';
             onOpen = { u -> go(u) }
             onSearch = { q -> go(q) }
             onMenu = { menu() }
-            onHub = { part -> Hub.open(this@MainActivity, part) }
+            // No Hub on Home (owner's rule): Home has only the mode chips, recents, sites and its dock.
             onMode = { key -> handleHomeMode(key) }
         }
         val root = FrameLayout(this).apply {
@@ -4732,7 +4732,8 @@ return t.length>=40?'TXT:'+t:'';
             }
         }
         refreshHome()
-        ModeStart.show(this, key) { url -> go(url) }
+        val host = findViewById(android.R.id.content) as? ViewGroup ?: return
+        ModeStart.show(host, key) { url -> go(url) }
     }
 
     /** Webtoon / comic starting points. Edit this list to add your own sites. */
