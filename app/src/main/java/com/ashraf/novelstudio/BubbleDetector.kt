@@ -43,6 +43,12 @@ internal object BubbleDetector {
     const val MODEL_BYTES = 11_120_765L
     private const val AUTO_MIN_RAM_MB = 3500L
 
+    // Detector calls are made on OCR slices as well as full panels. A valid manga bubble can therefore
+    // arrive as a short/wide crop (e.g. 360x132); do not reject it by aspect ratio or a 200px height floor.
+    // The model input is resized to its fixed tensor size below, so only genuinely tiny image fragments skip.
+    private const val MIN_DETECTION_SIDE = 64
+    private const val MIN_DETECTION_AREA = 10_000L
+
     @Volatile var lastError: String = ""
         private set
 
@@ -310,9 +316,14 @@ internal object BubbleDetector {
     @Synchronized
     private fun detectLocked(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
-        // Speech bubbles do not live in banners, thumbnails or thin strips; one model run costs ~1.9 s on a mid-range phone.
-        if (bmp.width < 200 || bmp.height < 200 || bmp.width > bmp.height * 2.2f) {
-            lastInfo = "skipped (small/banner ${bmp.width}x${bmp.height})"
+        // This detector also receives OCR slices and manual crops, not only full pages. Many legitimate
+        // manga narration/dialogue boxes are short and wide, so aspect-ratio and 200px side filters caused
+        // their source lettering to remain under translations. Skip only tiny fragments; the model resizes
+        // each tile to its fixed input size before inference.
+        val shortSide = minOf(bmp.width, bmp.height)
+        val area = bmp.width.toLong() * bmp.height.toLong()
+        if (shortSide < MIN_DETECTION_SIDE || area < MIN_DETECTION_AREA) {
+            lastInfo = "skipped (tiny region ${bmp.width}x${bmp.height})"
             return null
         }
         return try {
