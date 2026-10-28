@@ -93,6 +93,25 @@ internal object BubbleGrouping {
     }
 
     /**
+     * A small whisper / aside placed slightly below and off-centre from a larger main dialogue line.
+     * These boxes can overlap horizontally in OCR geometry even though they are separate captions.
+     * Keep a centred emphasis line in the same bubble: it has little centre offset and tight leading.
+     */
+    fun isAsidePair(a: OcrBlock, b: OcrBlock): Boolean {
+        if (a.vertical || b.vertical) return false
+        val fa = font(a); val fb = font(b)
+        if (fa <= 0f || fb <= 0f) return false
+        val ratio = maxOf(fa, fb) / minOf(fa, fb)
+        if (ratio < 1.3f) return false
+        val larger = if (fa >= fb) a else b
+        val smaller = if (larger === a) b else a
+        val centreOffset = kotlin.math.abs(larger.cx - smaller.cx)
+        val minimumOffset = maxOf(larger.w, smaller.w) * 0.15f
+        val verticalGap = gap(a, b)
+        return centreOffset > minimumOffset && verticalGap >= minOf(fa, fb) * 0.30f
+    }
+
+    /**
      * Groups the lines [pool] (indices into [blocks]) into speech bubbles.
      *
      * Lines are visited top to bottom and each one is attached to AT MOST ONE existing group, and groups are never
