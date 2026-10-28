@@ -21,7 +21,8 @@ internal object OcrDiag {
     private const val MAX_CHARS = 150_000
     private val lock = Any()
     private val buf = StringBuilder()
-    private val bootMs = SystemClock.elapsedRealtime()
+    // Android's SystemClock is a stub in plain JVM unit tests. Keep diagnostics safe when the class is first touched there.
+    private val bootMs = try { SystemClock.elapsedRealtime() } catch (_: Throwable) { 0L }
     private val clock = object : ThreadLocal<SimpleDateFormat>() {
         override fun initialValue() = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
