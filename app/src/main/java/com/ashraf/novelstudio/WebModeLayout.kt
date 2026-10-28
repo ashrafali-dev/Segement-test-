@@ -130,21 +130,28 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
          * different visible panels cannot borrow one another's translation. Coordinates are
          * quantized to 1% of the image to tolerate small OCR-box jitter between scan passes.
          */
-        fun canvasBubbleCacheIdentity(b: WmBubble): String? {
-            val normalizedSrc = WebModeLogic.normalizeUrl(b.src)
-            // Synthetic canvas crops use a stable document slot even when dimensions change. Some readers instead
-            // expose each panel as a blob: URL; keep that exact source identity so adjacent blob panels never collide.
+        /**
+         * Stable cache prefix for one canvas slot or exact blob URL. Keeping the source identity readable in
+         * the key lets canvas-transition handling invalidate stale entries without scanning every layout.
+         */
+        fun canvasBubbleCachePrefix(sourceUrl: String): String? {
+            val normalizedSrc = WebModeLogic.normalizeUrl(sourceUrl)
             val sourceIdentity = WebModeLayoutStore.canvasSourceSlot(normalizedSrc)
                 ?: normalizedSrc.takeIf { it.startsWith("blob:", ignoreCase = true) }
                 ?: return null
+            return "jcanvas:$sourceIdentity|"
+        }
+
+        fun canvasBubbleCacheIdentity(b: WmBubble): String? {
+            val prefix = canvasBubbleCachePrefix(b.src) ?: return null
             val text = normalizeOcrText(b.sourceText)
             val geometry = listOf(b.cx, b.cy, b.w, b.h).joinToString(",") {
                 Math.round(it * 100f).toInt().toString()
             }
-            val material = "$sourceIdentity|$geometry|$text"
+            val material = "$geometry|$text"
             val bytes = java.security.MessageDigest.getInstance("SHA-256")
                 .digest(material.toByteArray(Charsets.UTF_8))
-            return "jcanvas:" + bytes.joinToString("") { "%02x".format(it) }
+            return prefix + bytes.joinToString("") { "%02x".format(it) }
         }
 
         /** Map the current reply to the current scan, then retain the result on the matching bubbles. */
