@@ -63,9 +63,12 @@ internal object BubbleSegDetector {
         Thread(r, "ns-mask-release").apply { isDaemon = true }
     }
     @Volatile private var releaseGeneration = 0L
+    // Capture the generation when the idle timer is scheduled, not when it fires. If a new inference starts
+    // while the old timer callback is entering the executor, that old callback must not close the fresh session.
+    @Volatile private var idleReleaseExpectedGeneration = 0L
     private val idleRelease = Runnable {
         val queuedAt = SystemClock.elapsedRealtime()
-        val expectedGeneration = releaseGeneration
+        val expectedGeneration = idleReleaseExpectedGeneration
         try {
             releaseExecutor.execute {
                 val startedAt = SystemClock.elapsedRealtime()
@@ -263,6 +266,7 @@ internal object BubbleSegDetector {
             lastInfo = "${out.size} balloon masks in ${SystemClock.elapsedRealtime() - t0}ms"
             OcrDiag.log("DETECT_SRC", "mask model ran: $lastInfo (free heap ${freeHeapMb}MB)")
             idleHandler.removeCallbacks(idleRelease)
+            idleReleaseExpectedGeneration = releaseGeneration
             idleHandler.postDelayed(idleRelease, IDLE_RELEASE_MS)
             out
         } catch (e: Throwable) {
