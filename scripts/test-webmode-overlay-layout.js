@@ -32,6 +32,8 @@ assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed 
 assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
   "text remover must estimate local background outside the OCR box");
 assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI flat-background path");
+assert.ok(remover.includes('"CLEAN_JP_AUDIT"') && remover.includes('unmatched='),
+  "Japanese OCR bubbles that were not cleaned must be visible in compact diagnostics");
 assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
   "flat-background erasure must expand the mask to clear anti-aliased text edges");
 assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
