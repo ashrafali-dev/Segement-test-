@@ -874,6 +874,13 @@ internal object WebModeTextRemover {
                     fg1, fg2, fg3, fontPx, x0, y0, innerArea,
                     bubble, balloonMask, width, height
                 )
+                // -1 means the OCR box contains strong non-text structure or its paper cannot be trusted.
+                // Do NOT fall through to the connected-component erase in that case: line-art pixels can have
+                // the same colour as the text and would otherwise be removed from the drawing too.
+                if (bgRemoved < 0) {
+                    OcrDiag.log("ERASE", "skip ambiguous OCR box; preserve source art")
+                    continue
+                }
                 // OCR boxes are now source-glyph bounds. A 1% hit was too easy for a partial stroke to satisfy.
                 // Keep an opaque shaped cover whenever only a small fragment could be reconstructed.
                 val minimumErasedPixels = max(32, (innerArea * 0.06f).toInt())
@@ -1176,10 +1183,11 @@ internal object WebModeTextRemover {
         x0: Int, y0: Int, innerArea: Long,
         bubble: WmBubble, balloonMask: BubbleDetectorCore.Det?, imageWidth: Int, imageHeight: Int
     ): Int {
-        val model = estimateBackgroundModel(region, rw, rh, ix0, iy0, ix1, iy1, fg1, fg2) ?: return 0
+        val model = estimateBackgroundModel(region, rw, rh, ix0, iy0, ix1, iy1, fg1, fg2)
+            ?: return -1
         val paperRef = model.at((ix0 + ix1) / 2, (iy0 + iy1) / 2, ix0, ix1, iy0, iy1)
-        // The sampled paper must not itself be the ink colour, or there is nothing to distinguish.
-        if (min(distance(paperRef, fg1), distance(paperRef, fg2)) < 52f) return 0
+        // If the paper and glyph colours cannot be separated reliably, no other broad fill should run either.
+        if (min(distance(paperRef, fg1), distance(paperRef, fg2)) < 52f) return -1
 
         // Reject boxes that contain illustration, even when the border ring itself looks like a flat paper colour.
         // A plate/cup/face can sit INSIDE an OCR paragraph box while the surrounding pixels are uniformly green/white;
@@ -1195,7 +1203,7 @@ internal object WebModeTextRemover {
         }
         if (offModelStructure > innerArea * 0.055f) {
             OcrDiag.log("ERASE", "skip background model: non-text artwork inside OCR box pixels=$offModelStructure area=$innerArea")
-            return 0
+            return -1
         }
 
         val inkMask = ByteArray(regionCount)
