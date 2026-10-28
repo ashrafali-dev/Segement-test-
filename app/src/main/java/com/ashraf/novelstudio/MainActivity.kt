@@ -1705,7 +1705,13 @@ class MainActivity : Activity() {
         }
         for (chunk in chunks) {
             val layout = WebModeLayout(0, chunk.map { batch[it] })
-            val canvasVersions = WebModeLayoutStore.canvasCacheVersions(page, layout)
+            val isJapaneseCanvasTask = layout.bubbles.any { bubble ->
+                rtJapaneseCanvasSourceKey(bubble.src)?.let { it in rtJapaneseCanvasSources } == true
+            }
+            // The additional source/generation routing is deliberately limited to Japanese canvas/blob panels.
+            // Other canvas sites continue using their existing cache/placement behavior.
+            val canvasVersions = if (isJapaneseCanvasTask)
+                WebModeLayoutStore.canvasCacheVersions(page, layout) else emptyMap()
             val id = rtAheadTaskId(page, layout, canvasVersions)
             if (id in rtAheadTranslationQueuedIds || id in rtAheadTranslationSuppressedIds ||
                 rtAheadTranslationTasksByJobKey.values.any { it.id == id }) continue
@@ -9240,17 +9246,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         // Invalidate cached Japanese-canvas translations for every recycled slot, and stop an in-flight
         // read-ahead request if it captured an older generation. Blob URLs are immutable identities and are
         // handled by their exact source key; ns-canvas slots need this explicit generation invalidation.
-        val changedCachePrefixes = changed.mapNotNull { WebModeLayout.canvasBubbleCachePrefix(it) }.toSet()
+        val changedJapaneseSources = changed.filter {
+            rtJapaneseCanvasSourceKey(it)?.let { key -> key in rtJapaneseCanvasSources } == true
+        }.toSet()
+        val changedCachePrefixes = changedJapaneseSources
+            .mapNotNull { WebModeLayout.canvasBubbleCachePrefix(it) }.toSet()
         if (changedCachePrefixes.isNotEmpty()) {
             val staleCacheKeys = rtAheadTranslationCache.keys
                 .filter { key -> changedCachePrefixes.any { prefix -> key.startsWith(prefix) } }
                 .toList()
             staleCacheKeys.forEach { rtAheadTranslationCache.remove(it) }
         }
-        val changedJapaneseSourceKeys = changed.mapNotNull { rtJapaneseCanvasSourceKey(it) }.toSet()
+        val changedJapaneseSourceKeys = changedJapaneseSources.mapNotNull { rtJapaneseCanvasSourceKey(it) }.toSet()
         rtJapaneseCanvasSources.removeAll(changedJapaneseSourceKeys)
         val skippedForChangedSources = rtAheadSkippedBubbleHashes
-            .filterValues { it in changed }
+            .filterValues { it in changedJapaneseSources }
             .keys
             .toList()
         skippedForChangedSources.forEach { rtAheadSkippedBubbleHashes.remove(it) }
