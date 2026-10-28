@@ -628,6 +628,7 @@ internal object WebModeTextRemover {
             // The same source may be read once by the visible worker and again by read-ahead/rescan. Start from
             // the prior cleaned pixels and retain its verified bubble keys, otherwise the second pass restores the
             // first bubble's original lettering and replaces its success state with only the second bubble's key.
+            val sourceChanged = WebModeTextRemovalCache.prepareSource(sourceUrl, encoded)
             val previousImage = WebModeTextRemovalCache.readCleanedBytes(sourceUrl)
             val previousKeys = if (previousImage != null && !maskOnly)
                 WebModeTextRemovalCache.erasedKeys(sourceUrl) else emptySet()
@@ -638,7 +639,7 @@ internal object WebModeTextRemover {
                 context, sourceUrl, cleanBase, bubbles, allowAi, dets, recognizedLines, maskOnly, previousKeys
             )
             OcrDiag.log("CLEAN_QUEUE", "waitMs=$queueWaitMs reusedCleanedImage=${previousImage != null} " +
-                "priorErased=${previousKeys.size} newBubbles=${bubbles.size} result=$cleaned")
+                "sourceChanged=$sourceChanged priorErased=${previousKeys.size} newBubbles=${bubbles.size} result=$cleaned")
             return cleaned
         } finally {
             cleanSlot.unlock()
@@ -865,7 +866,10 @@ internal object WebModeTextRemover {
                 // colours meet. The glyph mask is then simply "pixels that disagree with that model", and each one
                 // is restored with the model's own colour at that exact spot. This is what keeps a pale-green or
                 // coloured balloon its own colour instead of turning it into a white rectangle.
-                val bgRemoved = eraseByBackgroundModel(
+                // A side-colour model is valid for speech-bubble/paper fill, not illustrated artwork.
+                // On a flat-green recipe panel it mistook cup/line-art pixels for dark lettering and painted
+                // over them. Artwork uses the stricter connected-glyph path below and requires true inpainting.
+                val bgRemoved = if (soft) 0 else eraseByBackgroundModel(
                     bitmap, region, rw, rh, ix0, iy0, ix1, iy1, candidate, regionCount,
                     fg1, fg2, fg3, fontPx, x0, y0, innerArea,
                     bubble, balloonMask, width, height
@@ -1010,12 +1014,15 @@ internal object WebModeTextRemover {
                     aiLastMs = android.os.SystemClock.elapsedRealtime() - t0
                     if (aiFill != null) aiBudget--
                 }
-                // Free lettering (sound effects on artwork) is only erased when the AI inpainter really did it: the
-                // onion-peel fill smears artwork, and an untouched original under the overlay is the safer result.
-                if (bubble.free && aiFill == null && !smoothSurround(region, mask, rw, rh)) continue
-                // Artwork without AI: onion-peel (Telea-style) fill, outside in, layer by layer.
-                val tele = if (soft && aiFill == null)
-                    onionFill(region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg) else null
+                // Never erase or approve transparent rendering over illustration using a background guess or
+                // onion-peel fill. A recipe drawing/face behind the OCR box can have the same ink colour as text.
+                // Without a successful AI fill, leave these pixels intact; the writer also suppresses the opaque
+                // sampled-colour cover for soft/free text so artwork is not replaced by a blank rectangle.
+                if (soft && aiFill == null) {
+                    OcrDiag.log("ERASE", "skip artwork: no verified inpaint fill; keep source pixels")
+                    continue
+                }
+                val tele: IntArray? = null
                 // Fill only the masked glyph pixels from their surroundings (never repaint a whole box).
                 val out = region.copyOf()
                 for (ry in 0 until rh) {
@@ -1175,10 +1182,12 @@ internal object WebModeTextRemover {
         if (min(distance(paperRef, fg1), distance(paperRef, fg2)) < 52f) return 0
 
         val inkMask = ByteArray(regionCount)
+        var candidateCount = 0
         var inkCount = 0
         for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
             val at = ry * rw + rx
             if (candidate[at].toInt() == 0) continue
+            candidateCount++
             val bgHere = model.at(rx, ry, ix0, ix1, iy0, iy1)
             if (distance(region[at], bgHere) < 30f) continue
             val inkDist = minOf(
@@ -1190,8 +1199,12 @@ internal object WebModeTextRemover {
             inkMask[at] = 1
             inkCount++
         }
-        // Too few pixels: nothing found. Too many: this looks like artwork, not a line of lettering.
-        if (inkCount < max(24, (innerArea * 0.06f).toInt()) ||
+        // Never call a partial mask a successful removal. The background model must account for almost all
+        // text-coloured candidates inside the OCR box; otherwise skip to the stricter connected-component path.
+        // This prevents one remaining row/partial stroke from being marked clean and exposing Korean underneath.
+        if (candidateCount < 24 ||
+            inkCount < max(24, (innerArea * 0.06f).toInt()) ||
+            inkCount * 100L < candidateCount * 88L ||
             inkCount > innerArea * 0.85f) return 0
 
         val mask = inkMask.copyOf()
