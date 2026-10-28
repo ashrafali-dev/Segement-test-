@@ -2955,17 +2955,17 @@ function pickSrcset(ss){
 function imageUrlQuality(s){
   s=String(s||'').toLowerCase();
   var score=0;
-  if(/(?:^|[\\/_.?&=-])(?:original|orig|full|fullsize|full-size|fullres|full-res|large|raw|master|download|hires|hi-res|zoom)(?:[\\/_.?&=-]|$)/.test(s))score+=20;
-  if(/(?:^|[\\/_.?&=-])(?:thumb|thumbnail|thumbs|small|preview|tiny|lowres|low-res|resized|resize|medium)(?:[\\/_.?&=-]|$)/.test(s))score-=25;
+  if(/original|orig|full[-_]?size|full[-_]?res|large|raw|master|download|hires|hi-res|zoom/.test(s))score+=20;
+  if(/thumb|thumbnail|small|preview|tiny|lowres|low-res|resized|resize|medium/.test(s))score-=25;
   return score;
 }
 function looksLikeImageDownloadUrl(s){
   var u=absUrl(s);if(!u||!goodUrl(u))return false;
   try{
     var z=new URL(u),p=(z.pathname||'').toLowerCase(),q=(z.search||'').toLowerCase();
-    return /\\.(?:jpe?g|png|webp|avif|jfif|bmp|tiff?|jxl)$/.test(p)||
-      /\\/(?:image|images|img|original|raw|download|fullsize|full-size|fullres|full-res)(?:\\/|$)/.test(p)||
-      /[?&](?:format|fm|type|mime)=(?:image\\/)?(?:jpe?g|png|webp|avif|jxl)(?:&|$)/.test(q);
+    return /\.(?:jpe?g|png|webp|avif|jfif|bmp|tiff?|jxl)$/.test(p)||
+      /\/(?:image|images|img|original|raw|download|fullsize|full-size|fullres|full-res)(?:\/|$)/.test(p)||
+      /[?&](?:format|fm|type|mime)=(?:image\/)?(?:jpe?g|png|webp|avif|jxl)(?:&|$)/.test(q);
   }catch(e){return false;}
 }
 function imageSrc(im){
