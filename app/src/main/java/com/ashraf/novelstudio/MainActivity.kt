@@ -1438,13 +1438,18 @@ class MainActivity : Activity() {
     }
 
     private fun rememberJapaneseCanvasSources(panels: List<WebModeAheadPanel>) {
-        for (panel in panels) {
-            val canvasBubbles = panel.bubbles.filter { rtJapaneseCanvasSourceKey(it.src) != null }
-            if (canvasBubbles.any { containsJapaneseKana(it.sourceText) }) {
-                canvasBubbles.forEach { bubble ->
-                    rtJapaneseCanvasSourceKey(bubble.src)?.let { rtJapaneseCanvasSources.add(it) }
-                }
+        // Detect Japanese once for the visible/read-ahead window, then mark every canvas/blob panel in that
+        // window. Some dialogue bubbles contain only kanji and would otherwise accidentally fall back to a
+        // text-only global cache even though they belong to the same Japanese manga page.
+        val pageHasJapaneseKana = panels.any { panel ->
+            panel.bubbles.any {
+                rtJapaneseCanvasSourceKey(it.src) != null && containsJapaneseKana(it.sourceText)
             }
+        }
+        if (pageHasJapaneseKana) {
+            panels.asSequence().flatMap { it.bubbles.asSequence() }
+                .mapNotNull { rtJapaneseCanvasSourceKey(it.src) }
+                .forEach { rtJapaneseCanvasSources.add(it) }
         }
         while (rtJapaneseCanvasSources.size > 64) {
             rtJapaneseCanvasSources.remove(rtJapaneseCanvasSources.first())
@@ -1618,7 +1623,8 @@ class MainActivity : Activity() {
                 val rb = ArrayList<WmBubble>(); val rt = ArrayList<Int>()
                 for ((b, t) in reclaimed) {
                     val k = rtAheadBubbleCacheKey(b)
-                    if (k in rtAheadTranslationCache || !have.add(k)) continue
+                    val fp = WebModeLayout.fingerprint(b)
+                    if (k in rtAheadTranslationCache || fp in rtAheadSkippedBubbleHashes || !have.add(k)) continue
                     rb.add(b); rt.add(t)
                 }
                 batch.addAll(0, rb)
@@ -1634,7 +1640,8 @@ class MainActivity : Activity() {
             val heldTops = ArrayList<Int>()
             for ((hb, ht) in rtAheadHold) {
                 val k = rtAheadBubbleCacheKey(hb)
-                if (k in rtAheadTranslationCache || k in have) continue
+                val fp = WebModeLayout.fingerprint(hb)
+                if (k in rtAheadTranslationCache || fp in rtAheadSkippedBubbleHashes || k in have) continue
                 val queued = rtAheadTranslationQueue.any { t -> t.layout.bubbles.any { rtAheadBubbleCacheKey(it) == k } } ||
                     rtAheadTranslationTasksByJobKey.values.any { t -> t.layout.bubbles.any { rtAheadBubbleCacheKey(it) == k } }
                 if (queued) continue
