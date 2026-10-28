@@ -111,12 +111,6 @@ This project is still being improved, and broad real-world validation is not com
 
 The original project source code is licensed under the [MIT License](LICENSE). Third-party libraries, SDKs, models, fonts, and online services retain their own licenses and terms. The MIT License does not grant rights to third-party content or material the project does not own.
 
-## Credits
-
-Built by Ashraf Ali 🇧🇩
-
-Special thanks to the open-source community and everyone whose work helped make this project possible.
-
 ---
 
 Novel Studio is intended as a reading aid. Please respect the terms of the websites you use and the authors who create the original work.
