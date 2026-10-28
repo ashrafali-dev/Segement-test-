@@ -17,6 +17,8 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -56,7 +58,32 @@ internal object BubbleSegDetector {
     @Volatile private var installedAt = 0L
     @Volatile private var installedVal = false
     private val idleHandler = Handler(Looper.getMainLooper())
-    private val idleRelease = Runnable { release(); OcrDiag.log("DETECT_SRC", "mask model released (idle)") }
+    // Native ONNX session close can wait on inference/native locks for seconds. Never close it on the UI thread.
+    private val releaseExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ns-mask-release").apply { isDaemon = true }
+    }
+    private val idleRelease = Runnable {
+        val queuedAt = SystemClock.elapsedRealtime()
+        try {
+            releaseExecutor.execute {
+                val startedAt = SystemClock.elapsedRealtime()
+                // All heavy ONNX inference and MI-GAN work share this gate. Wait off-main and only then close
+                // the mask session, so a scheduled idle cleanup cannot stall the reader or race another model.
+                OnnxHeavyGate.lock.lock()
+                try {
+                    release()
+                } finally {
+                    OnnxHeavyGate.lock.unlock()
+                }
+                OcrDiag.log(
+                    "DETECT_SRC",
+                    "mask model released (idle) queueMs=${startedAt - queuedAt} releaseMs=${SystemClock.elapsedRealtime() - startedAt}"
+                )
+            }
+        } catch (_: RejectedExecutionException) {
+            OcrDiag.log("DETECT_SRC", "mask model idle release skipped: release executor is shut down")
+        }
+    }
 
     fun modelFile(c: Context): File = File(File(c.applicationContext.filesDir, "models/detection"), "bubble_seg_1024.onnx")
 
