@@ -59,10 +59,26 @@ internal class OcrUnavailableException(message: String, cause: Throwable? = null
  * Android Bitmap is touched when an engine is faked).
  */
 internal object UserRegionPreprocess {
+    /** False in JVM tests, so no real Bitmap is ever touched. */
     var enabled = true
 
-    fun apply(bitmap: Bitmap, contrast: Boolean): Bitmap =
-        if (enabled && contrast) OcrPost.boostContrast(bitmap) else bitmap
+    /** Upscale by [want], clamped so the longest side stays within [maxSide] (192 MB devices must not OOM). */
+    fun scale(src: Bitmap, want: Float, maxSide: Float): Bitmap {
+        val longest = maxOf(src.width, src.height).coerceAtLeast(1)
+        val k = minOf(want, maxSide / longest).coerceAtLeast(1f)
+        if (k <= 1.01f) return src
+        return Bitmap.createScaledBitmap(src, (src.width * k).toInt().coerceAtLeast(8),
+            (src.height * k).toInt().coerceAtLeast(8), true)
+    }
+
+    /** The factor [scale] actually applied, so coordinates map back exactly. */
+    fun appliedScale(src: Bitmap, want: Float, maxSide: Float = 3200f): Float {
+        val longest = maxOf(src.width, src.height).coerceAtLeast(1)
+        return minOf(want, maxSide / longest).coerceAtLeast(1f)
+    }
+
+    /** Contrast-stretched copy (rung 4); returns the input unchanged when disabled. */
+    fun contrast(src: Bitmap): Bitmap = if (enabled) OcrPost.boostContrast(src) else src
 }
 
 internal object OcrPost {
