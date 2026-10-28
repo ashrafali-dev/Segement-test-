@@ -2559,7 +2559,7 @@ internal class WebModeExtractor(
                                 cx = (lSrc + rSrc) / 2f, cy = (tSrc + bSrc) / 2f,
                                 w = rSrc - lSrc, h = bSrc - tSrc, angle = 0f,
                                 fontPx = (line.fontPx.takeIf { it > 0f } ?: line.h) * k,
-                                vertical = false, confidence = 0.85f, observations = emptyList(),
+                                vertical = false, confidence = 0.85f, observations = 1,
                                 polygon = listOf(lSrc to tSrc, rSrc to tSrc, rSrc to bSrc, lSrc to bSrc)
                             ))
                         }
