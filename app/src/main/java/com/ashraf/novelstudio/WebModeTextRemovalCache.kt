@@ -95,15 +95,16 @@ internal object WebModeTextRemovalCache {
 
     @Synchronized
     fun storeCanvasCleaned(sourceUrl: String, dataUrl: String) {
-        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return
-        canvasUrls[slot] = dataUrl
+        // A stable canvas slot identifies the element; its generation identifies the actual page.
+        // Cleaned pixels must use the full source identity so an old manga page never leaks into the next one.
+        val identity = WebModeLogic.normalizeUrl(sourceUrl)
+        if (!identity.startsWith("ns-canvas:") || dataUrl.isBlank()) return
+        canvasUrls[identity] = dataUrl
     }
 
     @Synchronized
-    private fun canvasUrlFor(sourceUrl: String): String? {
-        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return null
-        return canvasUrls[slot]
-    }
+    private fun canvasUrlFor(sourceUrl: String): String? =
+        canvasUrls[WebModeLogic.normalizeUrl(sourceUrl)]
 
     @Synchronized
     fun urlFor(sourceUrl: String): String? {
