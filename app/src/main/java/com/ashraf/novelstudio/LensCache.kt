@@ -54,7 +54,9 @@ internal object LensCache {
 
     @Synchronized
     fun get(key: String, script: OcrScript): List<OcrBlock>? {
-        val e = get(key) ?: return null
+        // Resolve directly: calling the @Synchronized get(key) here also re-locked the monitor (reentrant, but it
+        // made the alias path read like two lookups).
+        val e = map[aliases[key] ?: key] ?: return null
         return if (e.script == script) e.blocks else null
     }
 
