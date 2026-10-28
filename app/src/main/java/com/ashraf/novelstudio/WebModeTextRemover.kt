@@ -1073,10 +1073,36 @@ internal object WebModeTextRemover {
                 totalRemoved += selectedCount
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
-            // Final reconstruction may improve the saved pixels but cannot add an erased key. Each transparent
-            // overlay key was earned by the pixel verifier above using the original image's ink candidates.
+            // The detector's balloon mask can occasionally cover a whole illustrated panel (for example a
+            // recipe page). Feeding ALL OCR boxes to reconstruction then repaints cups/line art as if they were
+            // dialogue. Restrict this final pass to OCR lines inside a non-art speech bubble whose own glyph box
+            // already passed the independent pixel-erasure verifier above.
+            val verifiedDialogueLines = if (maskOnly) emptyList() else recognizedLines.filter { line ->
+                if (line.w <= 0f || line.h <= 0f) false else boundedBubbles.any { bubble ->
+                    if (bubble.soft || bubble.free ||
+                        WebModeTextRemovalCache.bubbleKey(bubble) !in erased) false
+                    else {
+                        val bx = (if (bubble.ocrW > 0f) bubble.ocrCx else bubble.cx) * width
+                        val by = (if (bubble.ocrH > 0f) bubble.ocrCy else bubble.cy) * height
+                        val bw = (if (bubble.ocrW > 0f) bubble.ocrW else bubble.w) * width
+                        val bh = (if (bubble.ocrH > 0f) bubble.ocrH else bubble.h) * height
+                        val il = max(bx - bw / 2f, line.cx - line.w / 2f)
+                        val it = max(by - bh / 2f, line.cy - line.h / 2f)
+                        val ir = min(bx + bw / 2f, line.cx + line.w / 2f)
+                        val ib = min(by + bh / 2f, line.cy + line.h / 2f)
+                        val intersection = (ir - il).coerceAtLeast(0f) * (ib - it).coerceAtLeast(0f)
+                        val lineArea = line.w * line.h
+                        val lineText = WebModeLayout.normalizeOcrText(line.text)
+                        val bubbleText = WebModeLayout.normalizeOcrText(bubble.sourceText)
+                        lineArea > 0f && intersection / lineArea >= 0.65f &&
+                            lineText.isNotBlank() && bubbleText.isNotBlank() &&
+                            (bubbleText.contains(lineText) || lineText.contains(bubbleText))
+                    }
+                }
+            }
             val erasedByDetector = try {
-                eraseDetected(bitmap, dets, recognizedLines)
+                if (verifiedDialogueLines.isEmpty()) 0
+                else eraseDetected(bitmap, dets, verifiedDialogueLines)
             } catch (_: Throwable) { 0 }
             if (erasedByDetector > 0) {
                 totalRemoved += erasedByDetector
