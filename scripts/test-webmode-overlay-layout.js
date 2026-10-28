@@ -93,6 +93,18 @@ assert.ok(!remover.includes("cleanSlot.tryLock()") &&
   "cleaning must wait its turn rather than permanently skipping busy panels");
 assert.ok(removerCache.includes("k(b.ocrCx)") && removerCache.includes("k(b.ocrW)"),
   "bubble erasure approval must change when a later scan recovers missing source rows");
+assert.ok(removerCache.includes("prepareSource(sourceUrl: String, originalImage: ByteArray)") &&
+          removerCache.includes("sha256Bytes(originalImage)") &&
+          remover.includes("sourceChanged=$sourceChanged"),
+  "cleaned pixels must be invalidated when a virtualized source URL/slot points at different original pixels");
+assert.ok(remover.includes("val bgRemoved = if (soft) 0 else eraseByBackgroundModel(") &&
+          remover.includes("if (soft && aiFill == null)") &&
+          writer.includes("if(!it.cl&&!it.er && !it.sf)"),
+  "non-AI cleanup must never paint broad background guesses or opaque covers over illustration");
+assert.ok(extractor.includes("if (cleanableSrc && (fullTextRemoverOn || hasBalloonMasks))") &&
+          extractor.includes("recognizedForClean = recognizedLines, detectedForClean = detectionsForClean") &&
+          extractor.includes("A force-OCR crop is not a replacement bitmap"),
+  "manual crop OCR must pass full-source-coordinate boxes into cleanup of the original image");
 assert.ok((extractor.includes("recoverBubbleLines(bmp, st, inter, bands, lines, medFont") &&
             extractor.includes("maxRows = if (fastMode) 5 else 3")) &&
           extractor.includes("recognizedForClean") &&
