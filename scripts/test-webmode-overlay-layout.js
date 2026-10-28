@@ -5,6 +5,7 @@ const writer = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebMode
 const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeExtractor.kt", "utf8");
 const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
 const remover = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt", "utf8");
+const removerCache = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemovalCache.kt", "utf8");
 const bubbleCore = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleDetectorCore.kt", "utf8");
 const layoutModel = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
@@ -90,6 +91,8 @@ assert.ok(remover.includes("cleanSlot.lock()") &&
 assert.ok(!remover.includes("cleanSlot.tryLock()") &&
           !remover.includes("skip: another cleaner is running"),
   "cleaning must wait its turn rather than permanently skipping busy panels");
+assert.ok(removerCache.includes("k(b.ocrCx)") && removerCache.includes("k(b.ocrW)"),
+  "bubble erasure approval must change when a later scan recovers missing source rows");
 assert.ok((extractor.includes("recoverBubbleLines(bmp, st, inter, bands, lines, medFont") &&
             extractor.includes("maxRows = if (fastMode) 5 else 3")) &&
           extractor.includes("recognizedForClean") &&
