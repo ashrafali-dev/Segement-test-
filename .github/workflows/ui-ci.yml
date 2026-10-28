@@ -1,0 +1,74 @@
+name: UI CI (debug)
+
+# UI redesign verification for the ui/toon-sensei branch only.
+# No release signing, no secrets, no releases/tags/packages are created here.
+on:
+  push:
+    branches:
+      - ui/toon-sensei
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The repository has no committed Gradle wrapper, so Gradle is provisioned here
+      # (same Gradle version the existing workflows use). This does not modify the repo.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Unit tests
+        # Recorded separately so a pre-existing test failure does not hide the build result.
+        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Lint (debug)
+        run: gradle :app:lintDebug --no-daemon --stacktrace
+
+      - name: Upload debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: toon-sensei-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: toon-sensei-test-report
+          path: app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: toon-sensei-lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: warn
+          retention-days: 14
