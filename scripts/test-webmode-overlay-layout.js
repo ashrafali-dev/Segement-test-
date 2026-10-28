@@ -52,6 +52,22 @@ assert.ok(!writer.includes('put("cv", ja)'),
   "the overlay fallback must not paint the full bubble interior as cv rectangles");
 assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl"),
   "local OCR-box cover must stay visible until the cleaned replacement image loads");
+const layoutSource = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
+assert.ok(layoutSource.includes("fun canvasBubbleCachePrefix(sourceUrl: String)"),
+  "canvas cache keys need a source prefix that can be invalidated after a page transition");
+assert.ok(layoutSource.includes("fun canvasCacheVersions(url: String, layout: WebModeLayout?)"),
+  "read-ahead must capture canvas generation without requiring the panel to be visible already");
+assert.ok(mainActivity.includes("canvasVersionsStillCurrent(queued.canvasVersions)") &&
+  mainActivity.includes("canvasVersionsStillCurrent(task.canvasVersions)"),
+  "queued and completed read-ahead replies must be rejected after the canvas generation changes");
+assert.ok(mainActivity.includes("changedCachePrefixes") &&
+  mainActivity.includes("rtJapaneseCanvasSources.removeAll(changedJapaneseSourceKeys)"),
+  "canvas changes must invalidate source-scoped Japanese translation cache entries");
+assert.ok(mainActivity.includes("nextChatbotRequestAtMs = minOf(nextChatbotRequestAtMs, preemptAt + 100L)"),
+  "a visible realtime batch must not wait for the hidden read-ahead request's reserved cooldown");
+assert.ok(mainActivity.includes("rtAheadSkippedBubbleHashes") &&
+  mainActivity.includes("rememberSkippedAheadBubbles"),
+  "unresolved read-ahead noise must not create an endless retry loop");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");
