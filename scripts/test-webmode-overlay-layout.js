@@ -199,3 +199,5 @@ assert.ok(!bodyMatch[1].includes("R.y0+=dy;R.y1+=dy;B.t+=dy;B.b+=dy"),
   "overlap verification must not push translations down");
 
 console.log("WebMode overlay JavaScript syntax, collision, horizontal-only and no-truncation checks passed.");
+
+module.exports = { extractFunction };
