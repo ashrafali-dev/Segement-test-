@@ -17,6 +17,22 @@ internal object WebModeWriter {
     /** Height (CSS px) of the dock that floats over the page; the in-page OCR tools button sits above it. */
     @Volatile var bottomInsetPx: Int = 0
 
+    /**
+     * Feature D: value of the adaptive-background toggle for the NEXT overlay build (read on the main thread
+     * before [bubbleScript] is called). Baked into the script as JS so a long-lived overlay can be toggled
+     * without a rebuild; see [setAdaptiveBackgroundScript].
+     */
+    @Volatile var adaptiveBackgroundOn: Boolean = false
+
+    /**
+     * Toggle the gradient on the overlay that is already on the page: no rebuild, no re-placement (the gradient
+     * uses the same box as the text, +8 dp, so Feature A geometry cannot regress). Returns "" when not built.
+     */
+    fun setAdaptiveBackgroundScript(on: Boolean): String {
+        adaptiveBackgroundOn = on
+        return "(function(){try{if(window.__nsSetApbg)return window.__nsSetApbg(${if (on) "true" else "false"});}catch(e){}return 'no-overlay';})()"
+    }
+
     private const val BODY = """
 (function(paras,title,font,size,pid){
   try{
@@ -132,6 +148,22 @@ internal object WebModeWriter {
       entry.el.style.transform='translate3d('+x+'px,'+y+'px,0)';
     }
     var fam=font?"'NSBn',sans-serif":'sans-serif';
+    // Feature D: the toggle state is baked in at build time and can be changed later without a rebuild.
+    var APB=__APBG__===true;
+    function apCss(v){return 'rgba('+(parseInt(v.substring(1,3),16))+','+(parseInt(v.substring(3,5),16))+','+(parseInt(v.substring(5,7),16))+',0.94)';}
+    function applyAp(el,on){
+      if(on&&el.getAttribute('data-ap0')){
+        el.style.background='linear-gradient(to bottom,'+apCss(el.getAttribute('data-ap0'))+','+apCss(el.getAttribute('data-ap1'))+')';
+        el.style.borderRadius='6px';
+        el.style.padding='8px';
+      }else{el.style.background='transparent';el.style.borderRadius='0';el.style.padding='3px';}
+    }
+    window.__nsSetApbg=function(on){
+      APB=!!on;
+      var list=document.querySelectorAll('#__ns_wm_overlay .__ns_b');
+      for(var ai=0;ai<list.length;ai++){if(list[ai].__nsApal)applyAp(list[ai],APB);}
+      return 'ok';
+    };
     for(var i=0;i<items.length;i++){
       var it=items[i];
       if(it.hole){var hk=norm(it.s);(holes[hk]=holes[hk]||[]);for(var hq=0;hq<it.r.length;hq++)holes[hk].push(it.r[hq]);continue;}
@@ -177,6 +209,19 @@ internal object WebModeWriter {
         t.style.webkitTextFillColor='transparent'; t.style.color='transparent';
       }
       b.appendChild(t);
+      // Adaptive gradient (Feature D): derived once from the bubble neighbourhood (AdaptiveBackground), drawn
+      // behind EVERY translation at exactly the text box (+8 dp), and toggled live via __nsSetApbg.
+      if(it.a0){
+        b.setAttribute('data-ap0',it.a0);b.setAttribute('data-ap1',it.a1);
+        b.setAttribute('data-atc',it.atc);b.setAttribute('data-ao',it.ao||'');
+        t.style.color=it.atc;
+        if(it.ao){
+          var osh=[];
+          for(var ok=0;ok<16;ok++){var oan=ok*Math.PI/8,orr=(ok%2?0.030:0.045);osh.push((Math.cos(oan)*orr).toFixed(3)+'em '+(Math.sin(oan)*orr).toFixed(3)+'em 0 '+it.ao);}
+          t.style.textShadow=osh.join(',');
+        }
+        b.__nsApal=true;applyAp(b,APB);
+      }
       var cover=null;
       var hasCv=!!(it.cv&&it.cv.length>=4);
       // Bubbles with a real balloon MASK always paint it (paper colour inside the outline): erasing does not depend on
@@ -1208,7 +1253,13 @@ internal object WebModeWriter {
      * Draws each translated paragraph on the spot of its original text. [translated] is index-aligned
      * with [WebModeLayout.bubbles]; a null/blank entry leaves that bubble's original text untouched.
      */
-    fun bubbleScript(layout: WebModeLayout, translated: List<String?>, font: String, pageId: String): String {
+    fun bubbleScript(
+        layout: WebModeLayout, translated: List<String?>, font: String, pageId: String,
+        /** Exercise/live: whether the adaptive gradient is baked for this build. Defaults to its own build state. */
+        adaptive: Boolean = adaptiveBackgroundOn
+    ): String {
+        // The overlay is rebuilt off the main thread for crumb-sized inputs; bake the toggle state in first.
+        adaptiveBackgroundOn = adaptive
         val arr = JSONArray()
         // The cleaner records exactly which bubbles it erased (flat and artwork alike). The cleaned image is
         // shown only if every ERASED bubble of that image has a translation; otherwise the original <img>
@@ -1297,6 +1348,16 @@ internal object WebModeWriter {
                     }
                 }
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
+                // Adaptive gradient (Feature D): computed ONCE here from the bubble's own pixels. The two stops are
+                // plain hex; text colour and optional outline come from the WCAG decision table. Absent when the
+                // feature flag is off or the artwork was not sampled (the JS then draws text exactly as before).
+                .apply {
+                    if (adaptiveBackgroundOn) {
+                        val a = AdaptiveBackground.forBubble(artFor(b), placementPx(b), b.fg)
+                        put("a0", hex(a.top)).put("a1", hex(a.bottom)).put("atc", hex(a.textColor))
+                        if (a.outline != 0) put("ao", hex(a.outline))
+                    }
+                }
                 // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
                 // cleaner skipped keeps its cover box, so the old text never shows through the translation.
                 .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
@@ -1322,7 +1383,46 @@ internal object WebModeWriter {
             .replace("__PID__", JSONObject.quote(pageId))
             .replace("__ITEMS__", arr.toString())
             .replace("__SOURCES__", sources.toString())
+            .replace("__APBG__", if (adaptive) "true" else "false")
     }
+
+    /** Hex of an opaque sampled colour; the JS adds its own fixed 0.94 alpha. */
+    private fun hex(c: Int) = String.format("#%06X", c and 0xFFFFFF)
+
+    /**
+     * Where a bubble's translation sits, in the sampler's own nominal pixels: its write rectangle
+     * (tcx/tcy/tbw/tbh) when the fitter found one, else its cover box — both are fractions of the panel. The
+     * gradient uses this SAME box (+8 dp), so it cannot drift away from the text (Feature A must not regress, D8).
+     */
+    private fun placementPx(b: WmBubble): IntArray {
+        // Fractions -> a nominal 4096-px panel keeps the shape; the sampler only needs proportions.
+        val k = 4096f
+        return if (b.tbw > 0f && b.tbh > 0f) intArrayOf(
+            ((b.tcx - b.tbw / 2f) * k).toInt(), ((b.tcy - b.tbh / 2f) * k).toInt(),
+            ((b.tcx + b.tbw / 2f) * k).toInt(), ((b.tcy + b.tbh / 2f) * k).toInt()
+        ) else intArrayOf(
+            ((b.cx - b.w / 2f) * k).toInt(), ((b.cy - b.h / 2f) * k).toInt(),
+            ((b.cx + b.w / 2f) * k).toInt(), ((b.cy + b.h / 2f) * k).toInt()
+        )
+    }
+
+    /**
+     * Flat artwork in the bubble's own background colour (1x1, scaled by the sampler). Its median HSV IS the
+     * bubble colour, so the gradient follows the bubble as the spec asks without keeping a panel bitmap alive
+     * just for the overlay. The bubble's background is the colour the scanner already sampled from the
+     * neighbourhood.
+     */
+    private fun artFor(b: WmBubble): android.graphics.Bitmap {
+        val cached = artCache[b.bg]
+        if (cached != null && !cached.isRecycled) return cached
+        val t = android.graphics.Bitmap.createBitmap(8, 8, android.graphics.Bitmap.Config.ARGB_8888)
+        t.eraseColor(b.bg or 0xFF000000.toInt())
+        if (artCache.size > 32) artCache.clear()
+        artCache[b.bg] = t
+        return t
+    }
+
+    private val artCache = HashMap<Int, android.graphics.Bitmap>()
 }
 
 /**

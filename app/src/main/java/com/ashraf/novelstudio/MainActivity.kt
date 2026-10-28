@@ -968,6 +968,59 @@ class MainActivity : Activity() {
 
     // ------------------------------------------------------------------ glossary of the chapter on screen
 
+    /** Feature D: visibility + active/inactive look of the third button (same slot as the other two). */
+    private fun refreshAdaptiveBgButton() {
+        val b = adaptiveBgFab ?: return
+        val want = if (webModeOn() && mode == Mode.NOVEL) View.VISIBLE else View.GONE
+        if (b.visibility != want) b.visibility = want
+        if (adaptiveBgOn()) {
+            b.setImageDrawable(IconDrawable(Ic.GRADIENT, UiTheme.accent))
+            (b.background as? GradientDrawable)?.let {
+                it.setColor(0xFF2C3350.toInt()); it.setStroke(dp(1), UiTheme.accent)
+            }
+        } else {
+            b.setImageDrawable(IconDrawable(Ic.GRADIENT, UiTheme.iconIdle))
+            (b.background as? GradientDrawable)?.let {
+                it.setColor(0xEE232739.toInt()); it.setStroke(dp(1), UiTheme.stroke)
+            }
+        }
+    }
+
+    /**
+     * Feature D: is the adaptive gradient ON right now?
+     * Two switches must both allow it: the remote/config feature flag (ships OFF, flipped on after QA) and the
+     * user's own toggle, persisted per script.
+     */
+    private fun adaptiveBgOn(): Boolean {
+        val flag = Prefs.bool(this, "adaptiveBgEnabled", false)
+        if (!flag) return false
+        val script = manualExtractScript().name
+        return Prefs.bool(this, "adaptiveBgOn.script.$script", false)
+    }
+
+    /**
+     * Feature D toggle: persists per script and applies to the overlay already on the page without rebuilding
+     * it (the gradient uses the same box as the text, +8 dp). Gated by the remote/config feature flag.
+     */
+    private fun toggleAdaptiveBackground() {
+        if (!Prefs.bool(this, "adaptiveBgEnabled", false)) {
+            toast("🎨 Adaptive background is not enabled yet (feature flag off)")
+            return
+        }
+        val script = manualExtractScript().name
+        val key = "adaptiveBgOn.script.$script"
+        val on = !Prefs.bool(this, key, false)
+        Prefs.putBool(this, key, on)
+        val js = WebModeWriter.setAdaptiveBackgroundScript(on)
+        novelWv.evaluateJavascript(js) { r ->
+            if (on) toast("🎨 Adaptive background ON ($script)")
+            else toast("🎨 Adaptive background OFF ($script)")
+        }
+        // Re-evaluate visibility so the button's filled/tinted state follows immediately.
+        updateActivityChip(emptyList())
+        OcrDiag.log("APBG", "toggle script=$script on=$on")
+    }
+
     private fun chapterGlossaryDialog() {
         val key = pageKey(novelWv.url.orEmpty())
         val items = ChapterGlossary.list(this, key)
@@ -1180,7 +1233,7 @@ class MainActivity : Activity() {
             val script = WebModeWriter.bubbleScript(
                 layout,
                 layout.bubbles.map { it.translatedText.takeIf { v -> v.isNotBlank() } },
-                Prefs.fontFile(this), pageKey(url)
+                Prefs.fontFile(this), pageKey(url), adaptiveBgOn()
             )
             novelWv.evaluateJavascript(script, null)
         }
@@ -1505,7 +1558,7 @@ class MainActivity : Activity() {
         val script = WebModeWriter.bubbleScript(
             cumulative,
             cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-            Prefs.fontFile(this), pageKey(pageUrl)
+            Prefs.fontFile(this), pageKey(pageUrl), adaptiveBgOn()
         )
         novelWv.evaluateJavascript(script, null)
         hasTr = true
@@ -2713,7 +2766,8 @@ return t.length>=40?'TXT:'+t:'';
      * stage ends so quick stages do not flicker.
      */
     private fun updateActivityChip(statuses: List<ActivityDotStatus>) {
-        val chip = activityChip ?: return
+        val chip = activityChip
+        if (chip == null) { refreshAdaptiveBgButton(); return }
         CrashLog.context = novelWv.url.orEmpty().take(160) + " | mode=" + mode + " | webMode=" + webModeOn() +
             " | realtime=" + DeepSeekRealtimeTranslation.isEnabled(this) + " | forceLoad=" + forceLoadOn()
         reOcrBtn?.let { b ->
@@ -2725,6 +2779,7 @@ return t.length>=40?'TXT:'+t:'';
             val want = if (webModeOn() && mode == Mode.NOVEL) View.VISIBLE else View.GONE
             if (b.visibility != want) b.visibility = want
         }
+        refreshAdaptiveBgButton()
         val sending = chatSendingAtMs > 0L && System.currentTimeMillis() - chatSendingAtMs < 15_000L
         val keys = statuses.map { it.key }
         trackLongReading(keys.any { it == "visible-ocr" || it == "read-ahead-ocr" || it == "next-chapter-ocr" })
@@ -3083,6 +3138,8 @@ return t.length>=40?'TXT:'+t:'';
     private var reOcrRun = 0
     private var reOcrBtn: android.widget.ImageView? = null
     private var glossaryFab: android.widget.ImageView? = null
+    /** Feature D: adaptive gradient toggle, third small button of the same slot/family as [reOcrBtn]/[glossaryFab]. */
+    private var adaptiveBgFab: android.widget.ImageView? = null
     private var rescanOverlay: RescanSelector? = null
 
     // ---- early-user tips: a few short pop-ups during the first hours of real use, then never again
@@ -4032,6 +4089,25 @@ return t.length>=40?'TXT:'+t:'';
             }
             addView(glossaryFab, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.BOTTOM or Gravity.END).also {
                 it.setMargins(0, 0, dp(14), dp(184))
+            })
+            // Adaptive gradient behind every translation (Feature D). Same slot/size/weight as its two
+            // neighbours, one row above them; filled + accent-tinted while active, outline while off.
+            adaptiveBgFab = android.widget.ImageView(this@MainActivity).apply {
+                setImageDrawable(IconDrawable(Ic.GRADIENT, UiTheme.iconIdle))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0xEE232739.toInt())
+                    setStroke(dp(1), UiTheme.stroke)
+                }
+                val pad = dp(9)
+                setPadding(pad, pad, pad, pad)
+                elevation = dp(10).toFloat()
+                contentDescription = "Toggle adaptive background behind translations"
+                visibility = View.GONE
+                setOnClickListener { toggleAdaptiveBackground() }
+            }
+            addView(adaptiveBgFab, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.BOTTOM or Gravity.END).also {
+                it.setMargins(0, 0, dp(14), dp(234))
             })
             activityChip = ActivityChip(this@MainActivity)
             addView(activityChip, FrameLayout.LayoutParams(WC, WC, Gravity.BOTTOM or Gravity.START).also {
@@ -5973,6 +6049,7 @@ return t.length>=40?'TXT:'+t:'';
             novelWv.evaluateJavascript("try{document.documentElement.style.setProperty('--ns-bi','" + insetCss + "px');}catch(e){}", null)
             reOcrBtn?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(134) + botH; b.layoutParams = it } }
             glossaryFab?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(184) + botH; b.layoutParams = it } }
+            adaptiveBgFab?.let { b -> (b.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(234) + botH; b.layoutParams = it } }
             activityChip?.let { c -> (c.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = dp(14) + botH; c.layoutParams = it } }
             (progressBox.layoutParams as? FrameLayout.LayoutParams)?.let { it.topMargin = dp(10) + topH; progressBox.layoutParams = it }
             (scanDot.layoutParams as? FrameLayout.LayoutParams)?.let { it.topMargin = dp(10) + topH; scanDot.layoutParams = it }
@@ -9312,12 +9389,12 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 wmScript = WebModeWriter.bubbleScript(
                     cumulative,
                     cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-                    Prefs.fontFile(this), pageKey(ch.url)
+                    Prefs.fontFile(this), pageKey(ch.url), adaptiveBgOn()
                 )
             } else if (wmLayout != null && wmPlaced != null) {
                 val translatedLayout = WebModeLayout.translated(wmLayout, wmPlaced)
                 WebModeLayoutStore.replace(this, ch.url, translatedLayout)
-                wmScript = WebModeWriter.bubbleScript(wmLayout, wmPlaced, Prefs.fontFile(this), pageKey(ch.url))
+                wmScript = WebModeWriter.bubbleScript(wmLayout, wmPlaced, Prefs.fontFile(this), pageKey(ch.url), adaptiveBgOn())
             } else {
                 // Scanning mode has no reader-view fallback: tell the user briefly (English) and point to Realtime mode.
                 toast("Something went wrong. Please use Realtime mode.")

@@ -94,7 +94,8 @@ internal object OcrDiag {
         sb.append("page: ").append(pageUrl.take(220)).append("\n\n")
 
         sb.append("--- SETTINGS ---\n")
-        for (k in listOf("ocrEngine", "ocrRescan", "ocrDebug", "scanFastFirst", "scanStepMs", "forceLoadImages", "rtBatchLevel", "ocrLang")) {
+        for (k in listOf("ocrEngine", "ocrRescan", "ocrDebug", "scanFastFirst", "scanStepMs", "forceLoadImages", "rtBatchLevel", "ocrLang",
+            "scanLocalPrefilter", "adaptiveBgEnabled")) {
             sb.append(k).append('=').append(try { Prefs.get(ctx, k, "(default)") } catch (_: Throwable) { "?" }).append('\n')
         }
         val ep = try { Prefs.get(ctx, "lensEndpoint", "").trim() } catch (_: Throwable) { "" }

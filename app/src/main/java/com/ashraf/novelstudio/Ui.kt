@@ -61,7 +61,9 @@ internal fun Context.dpf(v: Number): Float = v.toFloat() * resources.displayMetr
 
 enum class Ic {
     BACK, FORWARD, RELOAD, HOME, GRID, DOTS, PLUS, CLOSE, SHARE, SEARCH, BOLT, BOOKMARK, BOOK,
-    CHAT, SPLIT, SPARK, SAVE, STOP, GLOBE, CHECK, LOCK, CLOCK, SLIDERS, MOON, SHIELD, TEXT, CHEVRON
+    CHAT, SPLIT, SPARK, SAVE, STOP, GLOBE, CHECK, LOCK, CLOCK, SLIDERS, MOON, SHIELD, TEXT, CHEVRON,
+    /** Feature D: "gradient paint" glyph for the adaptive-background toggle. */
+    GRADIENT
 }
 
 /** 24x24 stroke icons, drawn at any size. */
@@ -112,6 +114,21 @@ class IconDrawable(private val ic: Ic, private var color: Int, private val strok
             Ic.BACK -> poly(canvas, 15f, 5f, 8f, 12f, 15f, 19f)
             Ic.FORWARD -> poly(canvas, 9f, 5f, 16f, 12f, 9f, 19f)
             Ic.CHEVRON -> poly(canvas, 9f, 6f, 15f, 12f, 9f, 18f)
+            Ic.GRADIENT -> {
+                // Gradient-paint glyph: a rounded swatch whose fill fades top -> bottom, inside an outline.
+                // The fade IS the icon's identity, so it is drawn in the same colour at decreasing alpha.
+                rect.set(4f, 4f, 20f, 20f)
+                val steps = 6
+                val stepH = (rect.bottom - rect.top) / steps
+                for (i in 0 until steps) {
+                    fill.color = (color and 0x00FFFFFF) or ((255 - i * 36) shl 24)
+                    val top = rect.top + i * stepH + 1.2f
+                    val bottom = rect.top + (i + 1) * stepH - (if (i == steps - 1) 1.2f else 0f)
+                    canvas.drawRect(rect.left + 1.2f, top, rect.right - 1.2f, bottom, fill)
+                }
+                fill.color = color
+                canvas.drawRoundRect(rect, 3.5f, 3.5f, stroke)
+            }
             Ic.RELOAD -> {
                 rect.set(5f, 5f, 19f, 19f)
                 canvas.drawArc(rect, -40f, 290f, false, stroke)
