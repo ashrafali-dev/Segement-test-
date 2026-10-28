@@ -219,14 +219,9 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         }
 
         /**
-         * Marker alignment, then a safe fallback when it fails.
-         *
-         * A single-bubble layout (every manual tap, and most realtime bubbles) has exactly one text box, so the
-         * reply belongs there no matter what the model did with the marker: renumbered it, dropped it, wrapped
-         * it, or answered in prose. Refusing to place it was the "marker not found, so nothing appears" bug.
-         *
-         * Multi-bubble layouts keep the strict rule: with several boxes, guessing the order can print the wrong
-         * line in the wrong place, and the reader view is the honest result.
+         * Partial marker alignment handles known IDs first. Fallback is allowed only for a single-bubble layout
+         * when the reply has at most one marker. Multi-bubble prose without reliable IDs stays unplaced.
+         * This avoids rejecting a good batch because of one empty entry, while also avoiding guessed shifted placement.
          */
         fun alignWithFallback(text: String, layout: WebModeLayout): List<String?>? {
             align(text, layout)?.let { return it }
