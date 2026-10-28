@@ -110,22 +110,60 @@ internal class UserRegionOcrEngine(
      * Every bitmap [scale]/[contrast] created is recycled; [crop] belongs to the caller and is never recycled.
      */
     fun ocrUserRegion(crop: Bitmap, script: OcrScript): UserRegionResult {
+        // ONE control flow for production and tests: the generic core below owns the loop.
+        val core = RegionChainCore(
+            lensFull = lensFull, lensFast = lensFast, mlkit = mlkit,
+            scale = { b, k -> scale(b, k) to upscaleApplied(b, k) },
+            contrast = contrast,
+            recycle = { b -> runCatching { b.recycle() } },
+            same = { a, b -> a === b },
+            cancelled = cancelled
+        )
+        val result = core.run(crop, script) { trace -> OcrDiag.log("USER_REGION", trace) }
+        if (result.ok) OcrDiag.log("USER_REGION", "success engine=${result.engine?.label}")
+        return result
+    }
+
+    private companion object {
+        /** Longest side of an upscaled rung. 3200 keeps a 4x read of an 800px crop inside ~10 MP. */
+        const val MAX_SIDE = 3200f
+    }
+}
+
+/**
+ * The chain LOOP itself, over an arbitrary bitmap type [T].
+ *
+ * Kept separate from [UserRegionOcrEngine] (whose bitmap is the Android one) so the loop can be executed on the
+ * JVM: production and tests then run the SAME control flow — order, early stop, error tolerance, cancellation,
+ * recycling and map-back — instead of a copy of it in the test.
+ */
+internal class RegionChainCore<T>(
+    private val lensFull: (T, OcrScript) -> OcrResult,
+    private val lensFast: (T, OcrScript) -> OcrResult,
+    private val mlkit: (T, OcrScript) -> OcrResult,
+    /** Upscale (clamped by the caller's helper); [Float] is the factor actually applied. */
+    private val scale: (T, Float) -> Pair<T, Float>,
+    private val contrast: (T) -> T,
+    private val recycle: (T) -> Unit,
+    private val same: (T, T) -> Boolean,
+    private val cancelled: () -> Boolean = { false }
+) {
+    /** Returns the first non-empty read or a failure; never an empty success. Trace is written via [onTrace]. */
+    fun run(crop: T, script: OcrScript, onTrace: (String) -> Unit = {}): UserRegionResult {
         val t0 = android.os.SystemClock.elapsedRealtime()
         val log = StringBuilder()
         for (plan in UserRegionOcr.chain(script)) {
             if (cancelled()) { log.append(plan.engine.label).append(":cancelled; "); break }
             if (!plan.applicable) { log.append(plan.engine.label).append(":n/a; "); continue }
-            var work: Bitmap? = null
-            var stretched: Bitmap? = null
+            var work: T? = null
+            var stretched: T? = null
             try {
                 var used = plan.upscale
                 work = if (plan.upscale > 1.01f) {
-                    val scaled = scale(crop, plan.upscale)
-                    used = upscaleApplied(crop, plan.upscale)
-                    scaled
+                    val (b, k) = scale(crop, plan.upscale); used = k; b
                 } else crop
                 val w0 = work
-                val sent = if (plan.contrast) contrast(w0).also { if (it !== w0) stretched = it } else w0
+                val sent = if (plan.contrast) contrast(w0).also { if (!same(it, w0)) stretched = it } else w0
                 val r = when (plan.engine) {
                     UserRegionEngine.LENS_FULL_2X, UserRegionEngine.LENS_FULL_4X_CONTRAST -> lensFull(sent, script)
                     UserRegionEngine.LENS_FAST -> lensFast(sent, script)
@@ -135,28 +173,24 @@ internal class UserRegionOcrEngine(
                 val letters = UserRegionOcr.letters(blocks)
                 log.append(plan.engine.label).append(":blocks=").append(blocks.size).append(",letters=").append(letters).append("; ")
                 if (letters >= UserRegionOcr.MIN_LETTERS) {
-                    val mapped = UserRegionOcr.mapBack(blocks, used)
+                    val mapping = plan.copy(upscale = used)
+                    val mapped = UserRegionOcr.mapBack(blocks, mapping)
                     val trace = "chain=${plan.engine.label} $log totalMs=${android.os.SystemClock.elapsedRealtime() - t0}"
-                    OcrDiag.log("USER_REGION", "success $trace")
+                    onTrace(trace)
                     return UserRegionResult(mapped, plan.engine, trace)
                 }
             } catch (e: Throwable) {
                 log.append(plan.engine.label).append(":err=").append(e.javaClass.simpleName).append("; ")
             } finally {
-                // Local copies: both may alias the crop (no upscale / no contrast).
+                // Never free the caller's crop; free the upscale and the contrast copy once.
                 val up = work
                 val st = stretched
-                if (st != null && st !== up && !st.isRecycled) st.recycle()
-                if (up != null && up !== crop && !up.isRecycled) up.recycle()
+                if (st != null && !same(st, up ?: crop) && !same(st, crop)) recycle(st)
+                if (up != null && !same(up, crop)) recycle(up)
             }
         }
         val trace = "chain=FAILED $log totalMs=${android.os.SystemClock.elapsedRealtime() - t0}"
-        OcrDiag.log("USER_REGION", trace)
+        onTrace(trace)
         return UserRegionResult(emptyList(), null, trace)
-    }
-
-    private companion object {
-        /** Longest side of an upscaled rung. 3200 keeps a 4x read of an 800px crop inside ~10 MP. */
-        const val MAX_SIDE = 3200f
     }
 }

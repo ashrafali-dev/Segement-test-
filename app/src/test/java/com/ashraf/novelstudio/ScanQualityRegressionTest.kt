@@ -18,8 +18,8 @@ class ScanQualityRegressionTest {
         // 3 of 4 answered in order: the placed lines carry their own numbers, so they are unambiguous.
         // Refusing them (the old rule) left the whole page untranslated for one lost marker.
         val r = WebModeLayout.alignResult("[001] one [002] two [003] three", layout(4))
-        assertTrue(r is WebModeLayout.AlignResult.Accepted)
-        r as WebModeLayout.AlignResult.Accepted
+        assertTrue(r is WebModeLayout.Companion.AlignResult.Accepted)
+        r as WebModeLayout.Companion.AlignResult.Accepted
         assertTrue(r.partial)
         assertEquals(listOf("one","two","three"), r.values.filterNotNull())
         assertEquals(listOf(3), r.missing)
@@ -27,8 +27,8 @@ class ScanQualityRegressionTest {
     @Test fun singleAnswerOnTwoBubblePageIsPlacedAtItsOwnMarker() {
         // Field log: bubbles=2 markers=2 placed=1 need=2 outOfRange=0 dup=0 empty=1 ascending=true -> REJECT
         val r = WebModeLayout.alignResult("[001] one [002] ~", layout(2))
-        assertTrue(r is WebModeLayout.AlignResult.Accepted)
-        assertEquals(listOf("one", null), (r as WebModeLayout.AlignResult.Accepted).values)
+        assertTrue(r is WebModeLayout.Companion.AlignResult.Accepted)
+        assertEquals(listOf("one", null), (r as WebModeLayout.Companion.AlignResult.Accepted).values)
     }
     @Test fun farTooLittleCoverageIsStillRejected() {
         assertNull(WebModeLayout.align("[001] one", layout(10)))
