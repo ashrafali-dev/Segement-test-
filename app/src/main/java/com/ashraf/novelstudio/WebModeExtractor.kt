@@ -2024,7 +2024,7 @@ internal class WebModeExtractor(
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles, allowAi = !realtimePriority && req.ahead <= 0
+                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0
                         )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
