@@ -71,6 +71,19 @@ internal object BubbleSegDetector {
             Thread(r, "ns-maskmodel-release").apply { isDaemon = true }
         }
 
+    /**
+     * Free the model now that the system is short of memory (WebView trim, Defect F). Same background
+     * handoff as [idleRelease]; a later detection transparently reloads the session.
+     */
+    fun releaseForMemoryPressure() {
+        try {
+            releaseExecutor.execute {
+                try { release() } catch (_: Throwable) {}
+                OcrDiag.log("DETECT_SRC", "mask model released (memory pressure)")
+            }
+        } catch (_: Throwable) {}
+    }
+
     private val idleRelease = Runnable {
         try {
             releaseExecutor.execute {

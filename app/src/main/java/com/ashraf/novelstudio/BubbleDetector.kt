@@ -172,6 +172,18 @@ internal object BubbleDetector {
         } catch (_: Throwable) {}
     }
 
+    /** Release the RT-DETR session on system memory pressure (Defect F); it reloads lazily on next use. */
+    fun releaseForMemoryPressure() {
+        try {
+            releaseExecutor.execute {
+                if (OnnxHeavyGate.lock.tryLock()) {
+                    try { release(); OcrDiag.log("DETECT_SRC", "main detector released (memory pressure)") }
+                    finally { OnnxHeavyGate.lock.unlock() }
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
     /** Free the RT-DETR session within 2 s of the last use (Defect E / F: memory pressure arrives in seconds). */
     private const val IDLE_RELEASE_MS = 2_000L
 

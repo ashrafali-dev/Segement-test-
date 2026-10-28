@@ -4519,6 +4519,11 @@ return t.length>=40?'TXT:'+t:'';
         super.onTrimMemory(level)
         if (level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) {
             CrashLog.note("memory pressure level=$level")
+            // Defect F: the process itself is under pressure (WebViewClient.onTrimMemory covers the renderer
+            // side). Drop the OCR-side caches and hand the ONNX models back to the system, off the UI thread.
+            try { LensCache.clear() } catch (_: Throwable) {}
+            try { BubbleDetector.releaseForMemoryPressure() } catch (_: Throwable) {}
+            try { BubbleSegDetector.releaseForMemoryPressure() } catch (_: Throwable) {}
         }
     }
 
@@ -6146,6 +6151,22 @@ return t.length>=40?'TXT:'+t:'';
     private inner class NovelClient : WebViewClient() {
         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
             handleRendererGone(detail)
+
+        /**
+         * Memory pressure (Defect F). On a 192 MB device the WebView renderer is killed while the app keeps
+         * its own OCR models and caches alive. Answer the trim by dropping what can be rebuilt: page caches,
+         * WebView heap, the Lens LRU and the optional ONNX models (their release is background-threaded and
+         * bounded, see Defect E).
+         */
+        override fun onTrimMemory(level: Int) {
+            if (level < android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) return
+            OcrDiag.log("MEMORY", "TRIM level=$level -> clearing WebView caches")
+            try { novelWv.clearCache(false) } catch (_: Throwable) {}
+            try { novelWv.freeMemory() } catch (_: Throwable) {}
+            LensCache.clear()
+            BubbleDetector.releaseForMemoryPressure()
+            BubbleSegDetector.releaseForMemoryPressure()
+        }
 
         override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
             super.doUpdateVisitedHistory(view, url, isReload)
