@@ -48,3 +48,26 @@ class DropChromeImagesTest {
         assertEquals(2, WebModeLogic.dropChromeImages(refs).size)
     }
 }
+
+
+class DedupeAndOrderTest {
+    @Test fun sameImageUrlAtDifferentDocumentOffsetsRemainsDistinct() {
+        val url = "https://cdn.example.test/panel.jpg"
+        val kept = WebModeLogic.dedupeAndOrder(listOf(
+            PanelRef(url, 0, 0, 420, 597),
+            PanelRef(url, 600, 0, 420, 597),
+            // The CDN also exposed a clone of the first panel with a slightly different URL.
+            PanelRef(url + "?clone=1", 1, 1, 420, 597)
+        ))
+        assertEquals(2, kept.size)
+        assertEquals(listOf(0, 600), kept.map { it.top })
+    }
+
+    @Test fun sourceUrlIsNotUsedToKeepDuplicateDomClones() {
+        val kept = WebModeLogic.dedupeAndOrder(listOf(
+            PanelRef("https://cdn.example.test/panel.jpg", 100, 20, 420, 597),
+            PanelRef("https://cdn.example.test/panel.jpg?cache=2", 101, 21, 420, 598)
+        ))
+        assertEquals(1, kept.size)
+    }
+}
