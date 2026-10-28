@@ -26,6 +26,8 @@ internal object WebModeTextRemovalCache {
     private var usedBytes = 0L
     /** Per source image: keys of the artwork (soft) bubbles whose lettering the remover really erased. */
     private val erasedSoft = LinkedHashMap<String, Set<String>>()
+    /** Hash of the unmodified source pixels. URL alone is not enough for virtualized/recycled images or canvas slots. */
+    private val originalDigests = LinkedHashMap<String, String>(16, 0.75f, true)
 
     /**
      * Stable id of a bubble by its rounded cover geometry AND original OCR-ink geometry.
@@ -40,19 +42,55 @@ internal object WebModeTextRemovalCache {
     // the other side of a .0005 boundary, lost their "erased" mark and fell back to a background box).
     private fun k(v: Float): Long = Math.round((Math.round(v * 100000.0) / 100000.0) * 1000.0)
 
+    /**
+     * Validate the source pixels before reusing a cleaned image. A virtualized WebView can recycle one URL/slot
+     * for new pixels; carrying the old cleaned bitmap across that boundary erased artwork from the next panel.
+     * Returns true when a stale/unverifiable cache was invalidated.
+     */
+    @Synchronized
+    fun prepareSource(sourceUrl: String, originalImage: ByteArray): Boolean {
+        if (sourceUrl.isBlank() || originalImage.isEmpty()) return false
+        val state = stateKey(sourceUrl)
+        val digest = sha256Bytes(originalImage)
+        val previous = originalDigests[state]
+        if (previous == digest) return false
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl)
+        val hasCachedPixels = if (slot != null) canvasUrls.containsKey(slot)
+            else entries.containsKey(key(sourceUrl))
+        val hadState = erasedSoft.containsKey(state)
+        val stale = previous != null || hasCachedPixels || hadState
+        if (stale) invalidateLocked(sourceUrl)
+        originalDigests[state] = digest
+        while (originalDigests.size > 200) originalDigests.remove(originalDigests.keys.first())
+        return stale
+    }
+
+    private fun invalidateLocked(sourceUrl: String) {
+        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl)
+        if (slot != null) canvasUrls.remove(slot)
+        val cacheKey = key(sourceUrl)
+        entries.remove(cacheKey)?.let { entry ->
+            usedBytes -= entry.bytes
+            runCatching { entry.file.delete() }
+        }
+        val state = stateKey(sourceUrl)
+        erasedSoft.remove(state)
+        originalDigests.remove(state)
+    }
+
     @Synchronized
     fun setErased(sourceUrl: String, keys: Set<String>) {
-        erasedSoft[key(sourceUrl)] = keys
+        erasedSoft[stateKey(sourceUrl)] = keys
         while (erasedSoft.size > 200) erasedSoft.remove(erasedSoft.keys.first())
     }
 
     @Synchronized
     fun isErased(sourceUrl: String, bubbleKey: String): Boolean =
-        erasedSoft[key(sourceUrl)]?.contains(bubbleKey) == true
+        erasedSoft[stateKey(sourceUrl)]?.contains(bubbleKey) == true
 
     /** Snapshot of the verified bubbles for this source. Used when multiple OCR passes clean one panel. */
     @Synchronized
-    fun erasedKeys(sourceUrl: String): Set<String> = erasedSoft[key(sourceUrl)]?.toSet() ?: emptySet()
+    fun erasedKeys(sourceUrl: String): Set<String> = erasedSoft[stateKey(sourceUrl)]?.toSet() ?: emptySet()
 
     /**
      * Return the existing cleaned image bytes so a later pass can add newly recovered lines WITHOUT
@@ -196,6 +234,8 @@ internal object WebModeTextRemovalCache {
         entries.values.forEach { runCatching { it.file.delete() } }
         entries.clear()
         erasedSoft.clear()
+        originalDigests.clear()
+        canvasUrls.clear()
         usedBytes = 0L
         val dir = root ?: File(context.cacheDir, "wm_text_removed")
         runCatching { if (dir.exists()) dir.deleteRecursively() }
@@ -221,6 +261,9 @@ internal object WebModeTextRemovalCache {
         }
     }
 
+    private fun stateKey(url: String): String =
+        WebModeLayoutStore.canvasSourceSlot(url) ?: key(url)
+
     private fun key(url: String): String = stripMarker(url).substringBefore('#').trim()
 
     private fun stripMarker(raw: String): String {
@@ -235,6 +278,11 @@ internal object WebModeTextRemovalCache {
 
     private fun sha256(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256Bytes(value: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value)
         return digest.joinToString("") { "%02x".format(it) }
     }
 }
