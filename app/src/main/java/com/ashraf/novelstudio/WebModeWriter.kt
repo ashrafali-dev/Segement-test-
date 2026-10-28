@@ -1288,20 +1288,22 @@ internal object WebModeWriter {
         // Pass every OCR source, including bubbles with no translation. Otherwise an off-screen
         // query-ID variant could be mistaken for the one translated item still in the DOM.
         // Cleaned URLs (especially data: URLs) appear only once per source; bubble items carry a small boolean flag.
-        layout.bubbles.asSequence()
+        val sourceList = layout.bubbles.asSequence()
             .map { WebModeLogic.normalizeUrl(it.src) }
             .filter { it.isNotBlank() }
             .distinct()
-            .forEach { src ->
-                sources.put(src)
-                val hasErasedText = layout.bubbles.any { bubble ->
-                    WebModeLogic.normalizeUrl(bubble.src) == src &&
-                        WebModeTextRemovalCache.isErased(bubble.src, WebModeTextRemovalCache.bubbleKey(bubble))
-                }
-                if (hasErasedText) {
-                    WebModeTextRemovalCache.urlFor(src)?.takeIf { it.isNotBlank() }?.let { cleanSources.put(src, it) }
-                }
+            .toList()
+        val erasedSources = layout.bubbles.asSequence()
+            .filter { WebModeTextRemovalCache.isErased(it.src, WebModeTextRemovalCache.bubbleKey(it)) }
+            .map { WebModeLogic.normalizeUrl(it.src) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        for (src in sourceList) {
+            sources.put(src)
+            if (src in erasedSources) {
+                WebModeTextRemovalCache.urlFor(src)?.takeIf { it.isNotBlank() }?.let { cleanSources.put(src, it) }
             }
+        }
         return "try{document.documentElement.style.setProperty('--ns-bi','" + bottomInsetPx + "px');}catch(e){};" + BUBBLES
             .replace("__FONT__", JSONObject.quote(font))
             .replace("__PID__", JSONObject.quote(pageId))
