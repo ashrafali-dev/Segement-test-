@@ -728,34 +728,31 @@ internal class WebModeExtractor(
                 }
             }
             val script = newScript(meta.lang, meta.url)
-            // Lens is remote/network-bound: visible panels must not wait for the previous panel's
-            // Lens response. Warm the engine safely first, then fetch and OCR a small viewport
-            // concurrently. All local-model scans remain serial exactly as before.
-            // Lens is a network round trip, so a scan of N panels used to cost N x (fetch + Lens) one after the
-            // other — over five minutes for a 150-panel chapter. Full scans now overlap their Lens requests too,
-            // bounded by LENS_SLICE_SLOTS so the phone and the endpoint are not flooded.
-            val lensParallel = req.ahead <= 0 && total >= 1 &&
-                Prefs.get(wv.context, "ocrEngine", "mlkit") == "lens"
-            if (lensParallel) {
+            // Network-backed OCR uses the existing bounded panel pipeline. Testing OCR still uses
+            // local geometry, then uploads only the individually cropped text regions.
+            val isTestingOcr = Prefs.get(wv.context, "ocrEngine", "mlkit") == "testing"
+            val remoteOcrLabel = if (isTestingOcr) "Testing OCR" else "Google Lens"
+            val remoteParallel = req.ahead <= 0 && total >= 1 &&
+                Prefs.get(wv.context, "ocrEngine", "mlkit").let { it == "lens" || it == "testing" }
+            if (remoteParallel) {
                 (engine as? RoutingOcrEngine)?.let {
                     it.configure(wv.context)
                     it.prepareForConcurrentLens(script.current)
                 }
-                // A new scan starts with a clean slate: a pause carried over from a previous chapter would
-                // otherwise leave Lens closed for no reason.
-                if (!req.visibleOnly) LensFailure.resetSession()
+                // Only Google Lens uses this connectivity breaker; Testing OCR reports its own request failures.
+                if (!req.visibleOnly && !isTestingOcr) LensFailure.resetSession()
             }
-            val pool: ExecutorService? = if (lensParallel || (total > 1 && !req.visibleOnly)) {
-                val threads = if (lensParallel) minOf(SCAN_FETCH_THREADS, total) else FETCH_THREADS
+            val pool: ExecutorService? = if (remoteParallel || (total > 1 && !req.visibleOnly)) {
+                val threads = if (remoteParallel) minOf(SCAN_FETCH_THREADS, total) else FETCH_THREADS
                 Executors.newFixedThreadPool(threads) { r -> Thread(r, "ns-webmode-fetch") }
             } else null
             fetchPool = pool
-            val ocrPool: ExecutorService? = if (lensParallel) {
+            val ocrPool: ExecutorService? = if (remoteParallel) {
                 Executors.newFixedThreadPool(minOf(SCAN_LENS_THREADS, total)) { r -> Thread(r, "ns-webmode-lens-ocr") }
             } else null
             lensOcrPool = ocrPool
             // Separate pool for the local ML Kit pre-filter (see prefilterPool use below).
-            val prefilterPool: ExecutorService = if (lensParallel) {
+            val prefilterPool: ExecutorService = if (remoteParallel) {
                 Executors.newFixedThreadPool(2) { r -> Thread(r, "ns-webmode-prefilter").apply { isDaemon = true } }
                     .also { prefilterPoolRef = it }
             } else {
@@ -839,7 +836,7 @@ internal class WebModeExtractor(
                 submitFetch(i + FETCH_AHEAD)
                 val bytes = if (pool != null) {
                     val fetchWaitMs = when {
-                        lensParallel -> LENS_IMAGE_FETCH_WAIT_MS
+                        remoteParallel -> LENS_IMAGE_FETCH_WAIT_MS
                         req.visibleOnly -> VISIBLE_FETCH_WAIT_MS
                         else -> (JOB_MAX_MS - elapsed()).coerceAtLeast(1L)
                     }
@@ -883,20 +880,21 @@ internal class WebModeExtractor(
                 recentPanelHash[p.top] = PanelHash(imgHash, SystemClock.elapsedRealtime())
                 diag.downloaded++
                 panelFetchStartedAt[i] = tFetch
-                if (lensParallel) {
+                if (remoteParallel) {
                     // Lens is a remote OCR request; submit each panel now and collect in source order below.
                     // Requests overlap (bounded by LENS_SLICE_SLOTS inside the engine), so a full chapter's
                     // network time is shared instead of added up. The downstream chat batch is unchanged.
                     // Submitting is NOT progress: every panel is queued within seconds while Lens is still working,
                     // which filled the bar to ~99% long before any text had been read. Queueing only moves the bar
                     // through the first 10 points; the rest is reported as each Lens reply really arrives (below).
-                    progress("Google Lens OCR: queued ${i + 1}/$total", 10 + i * 9 / total)
+                    progress("${remoteOcrLabel} OCR: queued ${i + 1}/$total", 10 + i * 9 / total)
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
                             // Local pre-filter on ITS OWN thread, so ML Kit inference never holds one of the
                             // Lens worker threads (and therefore never delays a network request).
-                            val silent = if (req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false
+                            // Let Testing OCR try even when ML Kit's cheap pre-filter sees no text.
+                            val silent = if (isTestingOcr || req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false
                                 else prefilterPool.submit(java.util.concurrent.Callable {
                                     scanPrefilterSaysEmpty(bytes, panelScript)
                                 }).get()
@@ -959,7 +957,7 @@ internal class WebModeExtractor(
                 }
             }
 
-            if (lensParallel) {
+            if (remoteParallel) {
                 val batchStartedAt = SystemClock.elapsedRealtime()
                 var submitted = 0
                 val lensTotal = lensOcrFutures.count { it != null }.coerceAtLeast(1)
@@ -984,7 +982,7 @@ internal class WebModeExtractor(
                     }
                     val error = attempt.error
                     lensDone++
-                    progress("Google Lens OCR: read $lensDone/$lensTotal", 20 + lensDone * 79 / lensTotal)
+                    progress("${remoteOcrLabel} OCR: read $lensDone/$lensTotal", 20 + lensDone * 79 / lensTotal)
                     when (error) {
                         is OcrUnavailableException -> {
                             fail(WebModeError.OCR_MODEL_UNAVAILABLE, error.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label)
@@ -2107,9 +2105,9 @@ internal class WebModeExtractor(
                     // Google Lens is a network round trip (~0.7 s) per slice. A tall panel used to pay that once per slice,
                     // one after the other: send up to three slices at once and process their answers in page order.
                     val router = engine as? RoutingOcrEngine
-                    val lensParallelSlices = sl.size > 1 && !OcrGate.isBackgroundThread() &&
+                    val remoteParallelSlices = sl.size > 1 && !OcrGate.isBackgroundThread() &&
                         router?.usesRemoteTextDetection() == true
-                    if (lensParallelSlices) {
+                    if (remoteParallelSlices) {
                         try { router?.prepareForConcurrentLens(st.current) } catch (_: Throwable) {}
                         val pool = Executors.newFixedThreadPool(3) { r -> Thread(r, "ns-webmode-lens-slice") }
                         try {

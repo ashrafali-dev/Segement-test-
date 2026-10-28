@@ -139,6 +139,8 @@ internal object OcrEngineStatus {
     }
 
     fun describe(selected: String, used: String, fellBack: Boolean): String = when {
+        used == "testing" || used.startsWith("testing(") -> "Testing OCR"
+        used == "mlkit(testing-error-fallback)" -> "ML Kit (Testing OCR unavailable)"
         used == "lens" -> "Google Lens"
         used == "lens(empty)" -> "Google Lens (no text found)"
         used == "lens(error)" -> "Google Lens (request failed)"
@@ -171,14 +173,14 @@ internal class RoutingOcrEngine : OcrEngine {
     fun lastRouteUsedLens(): Boolean = lensThread.get() == true
 
     /** Lens itself returns text boxes, so use its normal recognition call instead of a repeated fast request. */
-    fun usesRemoteTextDetection(): Boolean = selectedMode == "lens"
+    fun usesRemoteTextDetection(): Boolean = selectedMode == "lens" || selectedMode == "testing"
 
     /**
      * Initialize the selected Lens client before launching parallel visible-panel requests. The first
      * call still goes through OcrGate so switching away from a local model never closes it mid-inference.
      */
     fun prepareForConcurrentLens(script: OcrScript) {
-        if (selectedMode != "lens" || canRunLensConcurrently()) return
+        if ((selectedMode != "lens" && selectedMode != "testing") || canRunRemoteConcurrently()) return
         OcrGate.run { active(script) }
     }
 
@@ -191,22 +193,21 @@ internal class RoutingOcrEngine : OcrEngine {
      * 116-panel chapter still took 191 s after the pools were widened.
      */
     @Synchronized
-    fun lensReadyForParallelScan(): Boolean =
-        selectedMode == "lens" && activeMode == "lens" && activeCustom is LensOcrEngine
+    fun lensReadyForParallelScan(): Boolean = canRunRemoteConcurrently()
 
-    /** Only bypass the shared local-inference gate after the Lens client is fully active. */
+    /** Only bypass the shared local-inference gate after a network-backed engine is fully active. */
     @Synchronized
-    private fun canRunLensConcurrently(): Boolean =
-        selectedMode == "lens" && activeMode == "lens" && activeCustom is LensOcrEngine
+    private fun canRunRemoteConcurrently(): Boolean =
+        (selectedMode == "lens" && activeMode == "lens" && activeCustom is LensOcrEngine) ||
+        (selectedMode == "testing" && activeMode == "testing" && activeCustom is TestingOcrEngine)
 
     /** Called by WebMode before the first OCR pass so the chosen engine follows the Settings value. */
     @Synchronized
     fun configure(context: Context) {
         appContext = context.applicationContext
-        // Only ML Kit and Google Lens exist. A value saved by an older build (paddle_*, rapid_onnx, manga)
-        // is migrated to ML Kit once, so nothing keeps pointing at a deleted engine.
+        // Older removed engine values migrate to ML Kit; Testing OCR is an optional network engine.
         var requested = Prefs.get(context, "ocrEngine", "mlkit")
-        if (requested != "mlkit" && requested != "lens") {
+        if (requested != "mlkit" && requested != "lens" && requested != "testing") {
             Prefs.put(context, "ocrEngine", "mlkit")
             requested = "mlkit"
         }
@@ -227,13 +228,17 @@ internal class RoutingOcrEngine : OcrEngine {
                 activeMode = ""
             }
         }
-        if (mode != "lens") return mlKit
+        if (mode == "mlkit") return mlKit
         synchronized(this) {
             if (activeCustom == null || activeMode != mode) {
                 try { activeCustom?.close() } catch (_: Exception) {}
                 val context = appContext
                     ?: throw OcrUnavailableException("OCR engine has not been initialized")
-                activeCustom = LensOcrEngine(context).also { LensOcrEngine.warmUp(context) }
+                activeCustom = if (mode == "lens") {
+                    LensOcrEngine(context).also { LensOcrEngine.warmUp(context) }
+                } else {
+                    TestingOcrEngine(context)
+                }
                 activeMode = mode
             }
             return activeCustom ?: mlKit
@@ -260,21 +265,20 @@ internal class RoutingOcrEngine : OcrEngine {
             // The Lens client is network-bound and safe for overlapping requests, so once it is active there is
             // nothing for the shared local-inference gate to protect. Gating it anyway is what serialised a full
             // scan: every worker waited out the gate one after another.
-            val concurrentLens = canRunLensConcurrently()
+            val concurrentRemote = canRunRemoteConcurrently()
             val result = when {
                 OcrGate.isBackgroundThread() -> OcrGate.run(waited, routeBlock)
-                concurrentLens -> OcrGate.runLensForeground(waited, routeBlock)
-                // Foreground with Lens selected but not yet active (first call / activation in progress): the
-                // route body still initializes Lens. Bound the gate wait so this never stalls unboundedly
-                // behind a local inference (the "concurrentLens=false, gateWaitMs=300–600 ms" case). ML Kit
-                // keeps the fully serialized, no-timeout gate because it shares the model the lock protects.
-                selectedMode == "lens" -> OcrGate.run(waited, timeoutMs = FOREGROUND_LENS_GATE_TIMEOUT_MS, block = routeBlock)
+                concurrentRemote -> OcrGate.runLensForeground(waited, routeBlock)
+                // The first network-engine request still uses the initialization gate. Testing OCR protects
+                // its local ML Kit geometry pass separately after the remote engine has been activated.
+                selectedMode == "lens" || selectedMode == "testing" ->
+                    OcrGate.run(waited, timeoutMs = FOREGROUND_LENS_GATE_TIMEOUT_MS, block = routeBlock)
                 else -> OcrGate.run(waited, routeBlock)
             }
             // Stamp the label onto the result itself. The global OcrEngineStatus.label is overwritten by any
             // concurrent route (read-ahead / a later empty frame), which made the "OCR: … engine=" line claim
             // "no text found" while blocks were actually returned. The per-result label can never be stale.
-            result.engineLabel = OcrEngineStatus.describe(selectedMode, used, fellBack)
+            result.engineLabel = result.engineLabel.ifBlank { OcrEngineStatus.describe(selectedMode, used, fellBack) }
             return result
         } finally {
             val actualLabel = OcrEngineStatus.describe(selectedMode, used, fellBack)
@@ -318,6 +322,23 @@ internal class RoutingOcrEngine : OcrEngine {
             mlKit
         }
         if (chosen === mlKit) { report("mlkit", selectedMode != "mlkit"); return run(mlKit) }
+
+        if (chosen is TestingOcrEngine) {
+            val testing = try {
+                run(chosen).also { it.engineLabel = "Testing OCR" }
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                report("testing(cancelled)", false)
+                return OcrResult(emptyList())
+            } catch (e: Exception) {
+                OcrEngineStatus.lastError = "Testing OCR ${script.name}: ${e.message ?: e.javaClass.simpleName}"
+                Log.w("NovelStudioOCR", "Testing OCR failed; using ML Kit for this panel", e)
+                report("mlkit(testing-error-fallback)", true)
+                return try { run(mlKit) } catch (_: Throwable) { OcrResult(emptyList()) }
+            }
+            report("testing", false)
+            return testing
+        }
 
         if (chosen is LensOcrEngine) {
             // Lens is an online engine using an unofficial endpoint. Its failures are expected and must

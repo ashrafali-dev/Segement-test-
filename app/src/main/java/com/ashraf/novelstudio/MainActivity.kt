@@ -1148,7 +1148,10 @@ class MainActivity : Activity() {
     // it waits until the viewport OCR has gone quiet (and the chatbot is free).
     // Menu "Realtime batching": 0 Small (fastest first text) .. 3 Max (fewest requests). Default 2 = Big.
     private fun rtBatchLevel(): Int = (Prefs.get(this, "rtBatchLevel", "2").toIntOrNull() ?: 2).coerceIn(0, 3)
-    private fun lensRealtimeFastPath(): Boolean = Prefs.get(this, "ocrEngine", "mlkit") == "lens"
+    private fun lensRealtimeFastPath(): Boolean {
+        val mode = Prefs.get(this, "ocrEngine", "mlkit")
+        return mode == "lens" || mode == "testing"
+    }"
     // Lens already returns all detected text in one remote OCR response; do not hold that result
     // behind ML-Kit-oriented multi-bubble/idle batching. Keep just a tiny window to join nearby SFX.
     private val rtVisibleOcrBatchMin: Int get() = if (lensRealtimeFastPath()) 2 else intArrayOf(2, 4, 8, 12)[rtBatchLevel()]
@@ -5938,19 +5941,22 @@ return t.length>=40?'TXT:'+t:'';
 
     private fun shortOcrEngineName(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
         "lens" -> "Lens"
+        "testing" -> "Testing OCR"
         else -> "ML Kit"
     }
 
     private fun currentOcrEngineLabel(): String = when (Prefs.get(this, "ocrEngine", "mlkit")) {
         "lens" -> "Google Lens (online)"
+        "testing" -> "Testing OCR"
         else -> "ML Kit · Default"
     }
 
     private fun chooseOcrEngine() {
-        val keys = arrayOf("mlkit", "lens")
+        val keys = arrayOf("mlkit", "lens", "testing")
         val labels = arrayOf(
             "ML Kit — Default (on-device, works offline)",
-            "Google Lens — online; reads text and layout from the image (falls back to ML Kit if it fails)"
+            "Google Lens — online; reads text and layout from the image (falls back to ML Kit if it fails)",
+            "Testing OCR"
         )
         val selected = keys.indexOf(Prefs.get(this, "ocrEngine", "mlkit")).coerceAtLeast(0)
         AlertDialog.Builder(this)
@@ -5958,8 +5964,11 @@ return t.length>=40?'TXT:'+t:'';
             .setSingleChoiceItems(labels, selected) { dialog, which ->
                 Prefs.put(this, "ocrEngine", keys[which])
                 dialog.dismiss()
-                toast("OCR engine: " + labels[which].substringBefore(" — ") +
-                    (if (keys[which] == "lens") ". Needs internet; the pictures being read are uploaded to Google." else "."))
+                toast("OCR engine: " + labels[which].substringBefore(" — ") + when (keys[which]) {
+                    "lens" -> ". Needs internet; the pictures being read are uploaded to Google."
+                    "testing" -> ". Needs internet; cropped text regions are sent to Instant Tools for recognition."
+                    else -> "."
+                })
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -5969,7 +5978,7 @@ return t.length>=40?'TXT:'+t:'';
         val labels = ArrayList<String>()
         labels.add("⚙️ Selected engine: " + currentOcrEngineLabel() +
             "\n✅ Last foreground OCR: " + lastActuallyUsedOcrEngine() +
-            "\nGoogle Lens and ML Kit run independently; read-ahead results do not replace the visible scan status.")
+            "\nOCR engine results are kept separate; read-ahead results do not replace the visible scan status.")
         val detectorIndex = labels.size
         labels.add(detectorRowLabel())
         val inpaintIndex = labels.size
