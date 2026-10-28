@@ -12,6 +12,48 @@ const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)
 const decorativeUrl = new Function(decorativeSource + "; return decorativeUrl;")();
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/link_slot_abc.jpg"), true, "link-slot promotional art must not be treated as a manga panel");
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false, "actual manga assets must remain eligible");
+new Function(libMatch[1]); // Compile all current page-discovery JavaScript, including URL/source selection.
+
+const discovery = new Function("document", "window", "URL",
+  libMatch[1] + "; return { imageSrc: imageSrc, looksLikeImageDownloadUrl: looksLikeImageDownloadUrl };"
+)({ baseURI: "https://reader.example/chapter", scrollingElement: {}, documentElement: {} }, {}, URL);
+
+function fakeImage(attrs, currentSrc, naturalWidth, href) {
+  const attributes = Object.assign({ src: currentSrc }, attrs || {});
+  const anchor = href ? { href: href, getAttribute: name => name === "href" ? href : null } : null;
+  return {
+    currentSrc,
+    src: currentSrc,
+    naturalWidth: naturalWidth || 0,
+    parentElement: null,
+    getAttribute: name => attributes[name] || null,
+    closest: selector => selector === "a[href]" ? anchor : null
+  };
+}
+const thumb = "https://cdn.example.test/thumb/panel_thumb.jpg";
+const original = "https://cdn.example.test/original/panel_full.jpg";
+assert.equal(
+  discovery.imageSrc(fakeImage({ "data-original": original }, thumb, 420)),
+  original,
+  "data-original must win over a lower-quality thumbnail URL"
+);
+const linkedFullImage = "https://cdn.example.test/download/chapter/panel.jpg?sig=abc";
+assert.equal(
+  discovery.imageSrc(fakeImage({ "data-original": original }, thumb, 420, linkedFullImage)),
+  linkedFullImage,
+  "a direct image-download href must be used when an image is wrapped by a full-resolution link"
+);
+assert.equal(
+  discovery.imageSrc(fakeImage({}, thumb, 420, "https://reader.example/chapter/next")),
+  thumb,
+  "a normal chapter/navigation link must never replace the image URL"
+);
+assert.equal(
+  discovery.looksLikeImageDownloadUrl("https://cdn.example.test/chapter/next"),
+  false,
+  "ordinary HTML chapter URLs must not be treated as direct image links"
+);
+
 const visibleHitSource = extractFunction(libMatch[1], "function candidateVisibleAt(panel,x,y)");
 assert.ok(visibleHitSource.includes("var outerHit=document.elementFromPoint(x,y);") &&
   visibleHitSource.includes("if(outerHit!==frame)return false;"),
@@ -74,6 +116,12 @@ assert.ok(mainActivity.includes("nextChatbotRequestAtMs = minOf(nextChatbotReque
 assert.ok(mainActivity.includes("rtAheadSkippedBubbleHashes") &&
   mainActivity.includes("rememberSkippedAheadBubbles"),
   "unresolved read-ahead noise must not create an endless retry loop");
+assert.ok(libMatch[1].includes("var imgKey=src+'@'") &&
+  libMatch[1].includes("var iframeKey=fsrc+'@'"),
+  "panel discovery must deduplicate duplicate DOM clones by geometry, not by source URL alone");
+assert.ok(mainActivity.includes('else "$source@${panel.top}"'),
+  "read-ahead collection must preserve two panels that reuse the same image URL at different offsets");
+
 assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = true)") &&
   !extractor.includes("for (k in 0 until minOf(FETCH_AHEAD, total)) submitFetch(k)"),
   "realtime scans must not eagerly download panels before checking ahead OCR cache");
