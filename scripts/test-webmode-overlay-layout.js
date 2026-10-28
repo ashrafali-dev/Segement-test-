@@ -37,8 +37,17 @@ assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"
 assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
 assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
   "text removal must not flatten the full speech-bubble interior");
-assert.ok(remover.includes('sourceUrl.startsWith("blob:", ignoreCase = true)'),
-  "blob-backed panels must not advertise the original blob URL as a cleaned replacement");
+assert.ok(remover.includes('sourceUrl.startsWith("blob:", true)') && remover.includes("storeInlineCleanedBytes"),
+  "blob-backed panels must use a bounded real cleaned replacement rather than advertise the original blob URL");
+const removalCache = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemovalCache.kt", "utf8");
+assert.ok(removalCache.includes("MAX_INLINE_CLEAN_URL_CHARS = 450_000") &&
+  removalCache.includes("MAX_INLINE_CLEAN_TOTAL_CHARS = 750_000"),
+  "inline cleaned images must have strict per-image and total memory caps");
+assert.ok(writer.includes('var cleanSources=__CLEAN_SOURCES__') &&
+  writer.includes('.replace("__CLEAN_SOURCES__", cleanSources.toString())'),
+  "a cleaned image URL must be sent once per source, not repeated for every bubble");
+assert.ok(writer.includes("b.setAttribute('data-cl',it.cl?'1':'')"),
+  "bubble JSON should carry only a small cleaned-image flag");
 assert.ok(!writer.includes('put("cv", ja)'),
   "the overlay fallback must not paint the full bubble interior as cv rectangles");
 assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl"),
