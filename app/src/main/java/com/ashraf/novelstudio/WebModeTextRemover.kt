@@ -34,11 +34,11 @@ internal object WebModeTextRemover {
      */
     private const val MAX_REGION_PIXELS = 500_000L
 
-    /** Bounded to one cleaning job at a time: concurrent jobs doubled peak memory on low-RAM phones. */
-    private val cleanSlot = java.util.concurrent.locks.ReentrantLock()
-    /** Serializes lock ownership and erase-cache updates across foreground/read-ahead workers. */
-    private val cleanStateLock = Any()
-    @Volatile private var activeCleanSource: String = ""
+    /**
+     * Fair, serialized cleanup queue. Skipping a busy slot left OCR text under translations; waiting here is safe
+     * because callers run on the OCR worker, not the Android UI thread, and keeps only one decoded panel alive.
+     */
+    private val cleanSlot = java.util.concurrent.locks.ReentrantLock(true)
 
     /**
      * Erase lettering using the DETECTOR's boxes instead of the pixel guess.
@@ -614,44 +614,34 @@ internal object WebModeTextRemover {
         recognizedLines: List<OcrBlock> = emptyList()
     ): Boolean {
         // When the menu toggle is OFF, keep the legacy pixel/AI remover disabled, but still allow
-        // a dedicated segmentation-mask pass for OCR regions that the balloon model can actually
-        // validate. The model mask is a BALLOON mask, not a glyph mask.
+        // a dedicated segmentation-mask pass for OCR regions that the balloon model can actually validate.
         val maskOnly = !Prefs.bool(context, "wmTextRemoval2", true)
-        // Even an unsupported or invalid repeat must not inherit an earlier pass's transparent-overlay decision.
-        if (sourceUrl.isNotBlank()) synchronized(cleanStateLock) {
-            if (activeCleanSource != sourceUrl) WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
-        }
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
         if (isAnimatedOrUnsupported(encoded)) return false
 
-        // One cleaning job at a time. The visible worker and the read-ahead worker both call this, and each one
-        // decodes a full-size ARGB panel plus its own scratch masks. Running them together is what pushed the
-        // process into the memory sawtooth that made realtime stutter: the second job's allocation lands while
-        // the first still holds its decoded bitmap and masks. Skipping (rather than queueing) is safe — the
-        // panel stays uncleaned this pass, keeps its overlay cover box, and the next scan picks it up.
-        // Keep the bitmap working set bounded, and never reuse an old "erased" decision if this attempt
-        // is skipped or fails. A skipped panel uses its opaque shaped cover instead of stale transparency.
-        var acquired = false
-        synchronized(cleanStateLock) {
-            if (cleanSlot.tryLock()) {
-                activeCleanSource = sourceUrl
-                WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
-                acquired = true
-            } else if (activeCleanSource != sourceUrl) {
-                WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
-            }
-        }
-        if (!acquired) {
-            OcrDiag.log("CLEAN", "skip: another cleaner is running (bounded to one at a time); keep opaque cover")
-            return false
-        }
+        // Do not drop a bubble just because another worker is cleaning a different panel. These calls run on OCR
+        // workers; a fair lock queues them and holds at most one full ARGB bitmap/scratch-mask working set at a time.
+        val waitStarted = android.os.SystemClock.elapsedRealtime()
+        cleanSlot.lock()
+        val queueWaitMs = android.os.SystemClock.elapsedRealtime() - waitStarted
         try {
-            return cleanAndCacheLocked(context, sourceUrl, encoded, bubbles, allowAi, dets, recognizedLines, maskOnly)
+            // The same source may be read once by the visible worker and again by read-ahead/rescan. Start from
+            // the prior cleaned pixels and retain its verified bubble keys, otherwise the second pass restores the
+            // first bubble's original lettering and replaces its success state with only the second bubble's key.
+            val previousImage = WebModeTextRemovalCache.readCleanedBytes(sourceUrl)
+            val previousKeys = if (previousImage != null && !maskOnly)
+                WebModeTextRemovalCache.erasedKeys(sourceUrl) else emptySet()
+            if (previousImage == null) WebModeTextRemovalCache.setErased(sourceUrl, emptySet())
+
+            val cleanBase = previousImage ?: encoded
+            val cleaned = cleanAndCacheLocked(
+                context, sourceUrl, cleanBase, bubbles, allowAi, dets, recognizedLines, maskOnly, previousKeys
+            )
+            OcrDiag.log("CLEAN_QUEUE", "waitMs=$queueWaitMs reusedCleanedImage=${previousImage != null} " +
+                "priorErased=${previousKeys.size} newBubbles=${bubbles.size} result=$cleaned")
+            return cleaned
         } finally {
-            synchronized(cleanStateLock) {
-                activeCleanSource = ""
-                cleanSlot.unlock()
-            }
+            cleanSlot.unlock()
         }
     }
 
@@ -663,7 +653,8 @@ internal object WebModeTextRemover {
         allowAi: Boolean,
         dets: List<BubbleDetectorCore.Det>?,
         recognizedLines: List<OcrBlock>,
-        maskOnly: Boolean
+        maskOnly: Boolean,
+        previouslyErased: Set<String>
     ): Boolean {
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -732,7 +723,7 @@ internal object WebModeTextRemover {
             var aiLastMs = 0L
             // Every bubble whose lettering was really erased (flat AND artwork). The writer only drops its
             // opaque cover box for bubbles in this set; any other bubble keeps the safe box fallback.
-            val erased = HashSet<String>()
+            val erased = HashSet<String>().apply { if (!maskOnly) addAll(previouslyErased) }
             // Pixel-level verification must inspect the ORIGINAL source ink before the detector reconstruction
             // changes it. Detector masks are applied at the end, but may never authorize transparent rendering.
             val boundedBubbles = bubbles.asSequence()
@@ -752,6 +743,9 @@ internal object WebModeTextRemover {
             // wipeLetteringByBackground), so only the text is removed and its own colours are restored.
 
             for (bubble in boundedBubbles) {
+                // A prior pass already verified and removed this exact bubble's source ink from cleanBase.
+                // Keep its pixels/key and spend this pass on newly recovered bubbles or lines only.
+                if (!maskOnly && WebModeTextRemovalCache.bubbleKey(bubble) in previouslyErased) continue
                 // The cover geometry can span the whole speech balloon. Text cleaning must always use the
                 // original OCR glyph box, never that expanded cover rectangle.
                 val hasOcrBox = bubble.ocrW > 0f && bubble.ocrH > 0f
