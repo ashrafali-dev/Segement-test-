@@ -19,11 +19,11 @@ internal object OcrGarbageFilter {
         if (letters.isEmpty()) return false
         return when (script) {
             OcrScript.KOREAN -> letters.all { scriptOf(it) == Character.UnicodeScript.HANGUL } &&
-                (compact in koreanShortDialogue || letters.size <= 2)
+                (compact in koreanShortDialogue || letters.length <= 2)
             OcrScript.JAPANESE -> letters.all {
                 scriptOf(it) == Character.UnicodeScript.HIRAGANA ||
                     scriptOf(it) == Character.UnicodeScript.KATAKANA
-            } && (compact in japaneseOnomatopoeia || letters.size <= 2)
+            } && (compact in japaneseOnomatopoeia || letters.length <= 2)
             else -> false
         }
     }
