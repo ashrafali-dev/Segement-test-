@@ -6,6 +6,7 @@ const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebM
 const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
 const remover = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
+const layout = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 const libMatch = extractor.match(/private const val LIB = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(libMatch, "could not locate WebModeExtractor page-discovery JavaScript");
 const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)");
@@ -69,6 +70,27 @@ assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canv
 const forceInfoBlock = extractor.slice(forceInfoAt, forceInfoEnd);
 assert.ok(forceInfoBlock.includes("cands(sc,true,true,true)"), "manual screen OCR must retain actual canvas bounds");
 assert.ok(!forceInfoBlock.includes("c=[]"), "manual screen OCR must not scan unrelated whole-WebView UI text");
+assert.ok(mainActivity.includes("function sliceTag(r,iw,ih)") &&
+          mainActivity.includes("Math.floor(Math.max(0,-r.top)/Math.max(1,vh*.55))") &&
+          mainActivity.includes("readerFrameArea") && mainActivity.includes("@slice="),
+  "a tall Webtoon image or large cross-origin reader frame must produce a new signature when its visible slice changes");
+assert.ok(mainActivity.includes("isSameTallImageSlice") &&
+          mainActivity.includes('if (!sameTallImageSlice) clearRealtimeOverlay("scroll")') &&
+          mainActivity.includes("OVERLAY_KEEP"),
+  "changing slices of the same long image must not clear its overlay before the replacement is ready");
+assert.ok(extractor.includes("val maxDriftRecaptures = if (req.visibleOnly) 3 else 1") &&
+          extractor.includes("driftRetries < maxDriftRecaptures") &&
+          extractor.includes("recapture $driftRetries/$maxDriftRecaptures"),
+  "visible-only screenshot OCR must retry scroll drift instead of abandoning a new panel after one retry");
+assert.ok(extractor.includes("keepWebtoonOverlay") &&
+          extractor.includes("WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())") &&
+          extractor.includes("webtoon_anti_flicker"),
+  "only the Webtoon screenshot fallback keeps its current overlay visible during capture");
+assert.ok(layout.includes("val overlayCv: List<Float> = emptyList()") &&
+          layout.includes('put("ocv"') &&
+          writer.includes("coverCv=it.cv") && writer.includes("coverCv.concat(it.ocv)") &&
+          writer.includes('put("ocv", ja)'),
+  "cover-only glyph-edge geometry must persist separately from the cleaner mask and remain isolated from Japanese cleanup");
 // Lens completeness audit must retry compact, fully missed labels (e.g. a short "Skip" button),
 // rather than filtering them out with the previous 200x80-pixel floor or inspecting one region only.
 assert.ok(rescan.includes("MIN_REMOTE_AUDIT_WIDTH = 32"), "Lens audit must allow short button labels");
