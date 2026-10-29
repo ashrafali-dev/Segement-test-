@@ -224,7 +224,7 @@ internal data class WebModeChapterContext(
             val latinCaps = latinOnly && letters.any { it.isLetter() } &&
                 letters.filter { it.isLetter() }.all { it.isUpperCase() }
             val compact = cleaned.count { it.isLetterOrDigit() }
-            val repeated = Regex("(?i)(.{1,2})\\\\1{2,}").containsMatchIn(cleaned) ||
+            val repeated = Regex("(?i)(.{1,2})\\1{2,}").containsMatchIn(cleaned) ||
                 Regex("[!?！？…]{2,}").containsMatchIn(cleaned)
             val onArtwork = bubble?.free == true || bubble?.soft == true
             val outlined = (bubble?.stroke ?: 0) != 0
