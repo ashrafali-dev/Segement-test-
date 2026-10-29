@@ -235,4 +235,30 @@ assert.ok(writer.includes('.put("sfx", sfx)') &&
           writer.includes("it.sfx?'none'"),
   'SFX placement must use a distinct outline style without painting a large art-block cover');
 
-console.log('PASS: OCR quality wiring (scan downscale/fallback, whole-panel OCR, chapter-context windows, verified bubble cleaning, art-preserving SFX style, MI-GAN/Lens circuit breakers)');
+assert.ok(cleaner.includes('CLEAN_BRANCH') &&
+          cleaner.includes('scriptLabel != "JAPANESE" && maskPct < 25.0') &&
+          cleaner.includes('CLEAN_FILL_FALLBACK') &&
+          cleaner.includes('decision=fill_bbox script=$scriptLabel') &&
+          cleaner.includes('FILL_EDGE_PAD') &&
+          cleaner.includes('tier1Alpha = if (largeMask || ghostFixCandidate) LARGE_MASK_ALPHA else TIER1_FILL_ALPHA'),
+  'Korean/Chinese/Latin small masks must fill the padded bbox at alpha 1.0 while Japanese skips this fix');
+
+assert.ok(extractor.includes('fun chooseRealtimeSample(bytes: ByteArray, fullW: Int, fullH: Int)') &&
+          extractor.includes('edge < 0.05f && variance < 3.0') &&
+          extractor.includes('textLikely || fullW < 800') &&
+          extractor.includes('PANEL_SAMPLE') &&
+          extractor.includes('sampleDecision?.skipBlank == true'),
+  'realtime OCR must keep text-bearing panels at full/half resolution and use sample 8 only for genuinely blank previews');
+
+assert.ok(writer.includes('PLACE_UNCLEANED') &&
+          writer.includes('placed=true bgAlpha=1.0 script=$scriptLabel') &&
+          writer.includes("if(!it.cl)cover.style.opacity='1'"),
+  'nonempty translations must have an opaque fallback cover even when pixel cleaning did not erase the source text');
+assert.ok(mainActivity.includes('completeRealtimeVisiblePlacement(matched.size, matched.isNotEmpty(), "overlay_success")') &&
+          mainActivity.includes('markRealtimeVisiblePlacing("visible_ocr_complete")') &&
+          mainActivity.includes('AHEAD_QUEUE_BLOCKED') &&
+          mainActivity.includes('queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready, force = true)') &&
+          mainActivity.includes('coerceIn(0, 1)'),
+  'realtime advances to one-panel prefetch only after a nonempty visible overlay has been confirmed');
+
+console.log('PASS: OCR quality wiring (script-gated ghost fill, Japanese-preserving placement, current-screen-first state machine, uncleaned placement cover, readable realtime sampling, chapter-context pipeline)');
