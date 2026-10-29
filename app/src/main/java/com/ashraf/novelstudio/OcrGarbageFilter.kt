@@ -47,7 +47,7 @@ internal object OcrGarbageFilter {
         val compact = text.filter(Char::isLetterOrDigit)
         val onomatopoeia = compact in (koreanOnomatopoeia + japaneseOnomatopoeia)
 
-        if (letters.size == 1 && latin == 1) return "single_char"
+        if (letters.length == 1 && latin == 1) return "single_char"
 
         if (script == OcrScript.KOREAN) {
             if (compact in knownKoreanNoise) return "latin_mixed"
@@ -69,9 +69,9 @@ internal object OcrGarbageFilter {
             OcrScript.CHINESE -> han
             OcrScript.LATIN -> latin
         }
-        if (letters.isNotEmpty() && (letters.size - expected) * 2 > letters.size) return "script_mismatch"
+        if (letters.isNotEmpty() && (letters.length - expected) * 2 > letters.length) return "script_mismatch"
 
-        if (letters.size == 1 && !onomatopoeia &&
+        if (letters.length == 1 && !onomatopoeia &&
             (hangul == 1 || script == OcrScript.JAPANESE && (kana + han) == 1)) {
             return "single_char"
         }
