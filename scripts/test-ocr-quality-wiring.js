@@ -87,5 +87,7 @@ assert.ok(cleaner.includes('MIGAN_STATUS') && cleaner.includes('migan_unavailabl
   'dilation, residual-driven escalation, MI-GAN status and failure diagnostics must be wired');
 assert.ok(extractor.includes('realtimeMode = req.visibleOnly'),
   'full scan may use unlimited tier-3 budget while realtime mode remains budget-limited');
+assert.ok(!cleaner.includes('bubble.free && !smoothSurround'),
+  'MI-GAN unavailability must not bypass Tier 2; verify residual and warn instead');
 
-console.log('PASS: OCR quality wiring (short dialogue, cache telemetry, batch alignment, timing buckets, memory guard, alpha, dilation, residual-driven MI-GAN tiers, bundled MI-GAN)');
+console.log('PASS: OCR quality wiring (short dialogue, cache telemetry, batch alignment, timing buckets, memory guard, alpha, dilation, residual-driven MI-GAN tiers, Tier-2 fallback, bundled MI-GAN)');
