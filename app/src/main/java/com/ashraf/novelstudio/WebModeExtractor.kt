@@ -1561,7 +1561,7 @@ internal class WebModeExtractor(
 
             var stable = 0
             var driftRetries = 0
-            val maxDriftRecaptures = if (req.visibleOnly) 3 else 1
+            val maxDriftRecaptures = if (req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())) 3 else 1
             var steps = 0
             while (true) {
                 if (!alive()) { forceFail(WebModeError.NAVIGATION_INVALIDATED); return }
