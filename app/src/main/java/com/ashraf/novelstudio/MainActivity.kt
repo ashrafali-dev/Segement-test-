@@ -7244,6 +7244,11 @@ return t.length>=40?'TXT:'+t:'';
             forceFresh -> "manual"          // Auto Real-time OCR off: one tap, one crop
             else -> "scanning"
         })
+        OcrDiag.log(
+            "MODE_ENGAGED",
+            "mode=${if (realtimeViewport) "realtime" else "scan"} " +
+                "expectations=${if (realtimeViewport) "fast" else "premium"} reason=job_start"
+        )
         val jobSeq = ++webModeJobSerial
         webModeHandle?.cancel()
         webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()
