@@ -3039,6 +3039,11 @@ return t.length>=40?'TXT:'+t:'';
     )
     /** Active scanning jobs only; real-time batch translation deliberately never enters this map. */
     private val scanChapterStates = HashMap<Int, ScanChapterTranslationState>()
+    /** Only full/non-viewport image extraction marks a chapter eligible for chapter-context translation. */
+    private val scanTranslationEligibleKeys = linkedSetOf<String>()
+
+    private fun scanTranslationKey(ch: Chapter): String =
+        "${cleanUrl(ch.url)}|${ch.text.length}|${ch.text.hashCode()}"
     // Randomized request spacing: normal chapter jobs keep the safer 3.0–4.5 s gap, while
     // real-time OCR uses 0.8–1.4 s so upcoming panels can be pre-translated before the reader reaches them.
     // The gap applies after sends and completed replies; no delay is added once the gate has expired.
