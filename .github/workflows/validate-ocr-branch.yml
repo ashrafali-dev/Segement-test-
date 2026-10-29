@@ -7,6 +7,7 @@ on:
       - fix/canvas-page-overlay-lifecycle-20261025
       - experiment/migan-inpainting-rt-ocr-20261028
       - fix/ocr-placement-quality-and-adaptive-bg-20261029
+      - fix/webtoon-bubble-mask-cleanup-20261029
   workflow_dispatch:
 
 permissions:
