@@ -302,6 +302,13 @@ assert.ok(cleaner.includes('CLEAN_FILL_ENTER') && cleaner.includes('CLEAN_FILL_D
           cleaner.includes('return stored && allBubblesClean') && extractor.includes('CLEAN_REALTIME') &&
           extractor.includes('CLEAN_SKIP'),
   'cleaning must verify full-bbox fill coverage and require bbox residual below 5 for strict panel success');
+assert.ok(extractor.includes('private fun foregroundVisibleOcr(): Boolean = req.visibleOnly && req.ahead <= 0') &&
+          extractor.includes('if (freshOcrRequired() || !req.forceOcrSrc.isNullOrBlank()) false else') &&
+          extractor.includes('forceFresh = targeted || freshOcrRequired()') &&
+          extractor.includes('BUBBLE_PIXEL_FIT') &&
+          !extractor.includes('textArea * 5 >= coverArea'),
+  'foreground visible OCR must bypass read-ahead negative-cache/pre-filter suppression, and verified bubble shape fitting must not be rejected only because lettering is small');
+
 assert.ok(extractor.includes('DETECT_REALTIME') &&
           extractor.includes('source=${if (realtimePixelBubbleTargets > 0) "pixel" else "text_bbox"}') &&
           extractor.includes('pixel_bubble_fit'),

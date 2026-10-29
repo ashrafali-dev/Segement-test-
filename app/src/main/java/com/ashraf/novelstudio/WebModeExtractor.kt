@@ -244,6 +244,14 @@ internal class WebModeExtractor(
             return validCache
         }
         private fun elapsed() = SystemClock.elapsedRealtime() - startedAt
+
+        /**
+         * Foreground viewport OCR is a fresh read, not read-ahead. Read-ahead may cache a blank/misread
+         * panel; it must never suppress the OCR attempt when that same panel reaches the screen.
+         */
+        private fun foregroundVisibleOcr(): Boolean = req.visibleOnly && req.ahead <= 0
+        private fun freshOcrRequired(): Boolean =
+            req.forceFreshOcr || req.forceScreenOcr || foregroundVisibleOcr()
         private fun onMain(block: () -> Unit) { handler.post(block) }
 
         override fun cancel() { cancelled.set(true); diag.cancelled = true }
@@ -968,7 +976,7 @@ internal class WebModeExtractor(
                             // Local pre-filter on ITS OWN thread, so ML Kit inference never holds one of the
                             // Lens worker threads (and therefore never delays a network request).
                             var prefilterMs = 0L
-                            val silent = if (req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false else {
+                            val silent = if (freshOcrRequired() || !req.forceOcrSrc.isNullOrBlank()) false else {
                                 val prefilterStartedAt = SystemClock.elapsedRealtime()
                                 val skip = prefilterPool.submit(java.util.concurrent.Callable {
                                     scanPrefilterSaysEmpty(bytes, panelScript, i + 1)
@@ -982,7 +990,7 @@ internal class WebModeExtractor(
                             } else {
                                 LensPanelOcrAttempt(ocrBytes(
                                     bytes, panelScript, p.src, fastMode = true,
-                                    forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank(),
+                                    forceFresh = freshOcrRequired() || !req.forceOcrSrc.isNullOrBlank(),
                                     panelNo = i + 1, timingStartedAtMs = tFetch, prefilterMs = prefilterMs
                                 ), null)
                             }
@@ -1008,7 +1016,7 @@ internal class WebModeExtractor(
                         // Some Android codecs throw while decoding a selected region. Retry with a
                         // bounded downsampled bitmap rather than aborting manual OCR.
                         try {
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted || req.forceFreshOcr, panelNo = i + 1, timingStartedAtMs = tFetch)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted || freshOcrRequired(), panelNo = i + 1, timingStartedAtMs = tFetch)
                         } catch (cropError: RuntimeException) {
                             Log.w(TAG, "Force OCR crop failed; retrying bitmap crop: ${cropError.javaClass.simpleName}: ${cropError.message}")
                             ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true, forceFresh = targeted || req.forceFreshOcr, panelNo = i + 1, timingStartedAtMs = tFetch)
@@ -1725,8 +1733,11 @@ internal class WebModeExtractor(
             fun readWholeViewport(): Boolean {
                 if (!alive()) return false
                 val t0 = SystemClock.elapsedRealtime()
+                if (foregroundVisibleOcr()) {
+                    OcrDiag.log("OCR_FRESH_POLICY", "source=viewport reason=foreground_visible bypassNegativeCache=true")
+                }
                 val result = try {
-                    recognize(bmp, st, fastMode = req.visibleOnly && !req.forceFreshOcr && !req.forceScreenOcr, forceFresh = req.forceFreshOcr || req.forceScreenOcr)
+                    recognize(bmp, st, fastMode = req.visibleOnly && !req.forceFreshOcr && !req.forceScreenOcr, forceFresh = freshOcrRequired())
                 } catch (e: OcrUnavailableException) {
                     OcrDiag.log("SCREEN_OCR", "engine unavailable: ${e.message}")
                     throw e
@@ -1862,7 +1873,7 @@ internal class WebModeExtractor(
                         for ((index, task) in pending.withIndex()) {
                             futures.add(completion.submit(java.util.concurrent.Callable {
                                 val result = try {
-                                    if (req.forceFreshOcr) routing!!.recognizeFresh(task.bitmap, st.current, fastMode = false)
+                                    if (freshOcrRequired()) routing!!.recognizeFresh(task.bitmap, st.current, fastMode = req.visibleOnly && !req.forceFreshOcr && !req.forceScreenOcr)
                                     else engine.recognizeFast(task.bitmap, st.current)
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "parallel Lens viewport OCR failed for crop $index: ${e.javaClass.simpleName}")
@@ -1900,7 +1911,7 @@ internal class WebModeExtractor(
                             readSlice(
                                 task.bitmap, st, task.offY, 1, task.fullW, task.fullH, task.src,
                                 task.acc.texts, task.acc.bubbles, task.first, task.last, task.offX,
-                                fastMode = req.visibleOnly && !req.forceFreshOcr, forceFresh = req.forceFreshOcr, preRecognized = recognized
+                                fastMode = req.visibleOnly && !req.forceFreshOcr && !req.forceScreenOcr, forceFresh = freshOcrRequired(), preRecognized = recognized
                             )
                         }
                     } finally {
@@ -1912,7 +1923,7 @@ internal class WebModeExtractor(
                         readSlice(
                             task.bitmap, st, task.offY, 1, task.fullW, task.fullH, task.src,
                             task.acc.texts, task.acc.bubbles, task.first, task.last, task.offX,
-                            fastMode = req.visibleOnly && !req.forceFreshOcr, forceFresh = req.forceFreshOcr
+                            fastMode = req.visibleOnly && !req.forceFreshOcr && !req.forceScreenOcr, forceFresh = freshOcrRequired()
                         )
                     }
                 }
@@ -2902,12 +2913,29 @@ internal class WebModeExtractor(
                         val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
                         val coverArea = (cR - cL).toLong() * (cB - cT)
                         val textArea = (xr - xl).toLong() * (xb - xt)
-                        if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
+                        val candidateBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
+                        val coverCoverage = if (coverArea > 0L) fit.coverage(cL, cT, cR, cB) else 0f
+                        val safeCoverage = if (xr > xl && xb > xt) fit.coverage(xl, xt, xr, xb) else 0f
+                        val accepted = xr - xl >= 10 && xb - xt >= 10 && coverArea > 0L &&
+                            coverCoverage >= 0.90f && safeCoverage >= 0.95f && candidateBands.isNotEmpty()
+                        OcrDiag.log(
+                            "BUBBLE_PIXEL_FIT",
+                            "marker=${out.size + 1} accepted=$accepted reason=${when {
+                                candidateBands.isEmpty() -> "no_shape_bands"
+                                coverArea <= 0L -> "empty_cover"
+                                coverCoverage < 0.90f -> "cover_outside_shape"
+                                safeCoverage < 0.95f -> "safe_rect_outside_shape"
+                                xr - xl < 10 || xb - xt < 10 -> "safe_rect_too_small"
+                                else -> "shape_verified"
+                            }} coverArea=$coverArea safeArea=$textArea " +
+                                "coverCoverage=${String.format(java.util.Locale.US, "%.3f", coverCoverage)} " +
+                                "safeCoverage=${String.format(java.util.Locale.US, "%.3f", safeCoverage)} bands=${candidateBands.size}"
+                        )
+                        if (accepted) {
                             if (req.visibleOnly) realtimePixelBubbleTargets++
                             tL = xl; tT = xt; tR = xr; tB = xb
-                            // The whole interior (not just the lettering box) is what gets painted over when the picture
-                            // itself is not cleaned.
-                            coverBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
+                            // Paint and position against the verified shape, regardless of how small the OCR glyph box is.
+                            coverBands = candidateBands
                             cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
                         }
                     }
