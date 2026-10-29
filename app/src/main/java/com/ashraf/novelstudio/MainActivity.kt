@@ -9983,7 +9983,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (pending.bubbles.isEmpty()) clearRealtimeVisibleOcrBatch()
         }
 
-        novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null)
+        if (realtimeOverlayActive) clearRealtimeOverlay("scroll")
+        else novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null)
         hasTr = false
         shownTranslated = false
         shownTrRaw = ""
