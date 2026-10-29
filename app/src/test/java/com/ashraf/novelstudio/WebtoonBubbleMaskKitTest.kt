@@ -1,5 +1,6 @@
 package com.ashraf.novelstudio
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -10,6 +11,19 @@ class WebtoonBubbleMaskKitTest {
         assertTrue(WebtoonBubbleMaskKit.shouldHandle(
             "https://www.toongood.org/webtoon/the-heavenly-demon-cant-live-a-normal-life"
         ))
+    }
+
+    @Test
+    fun overlaySafetyMaskSurvivesLayoutCacheRoundTrip() {
+        val cover = listOf(0.31f, 0.42f, 0.69f, 0.48f)
+        val bubble = WmBubble(
+            src = "https://www.toongood.org/webtoon/example",
+            cx = 0.5f, cy = 0.45f, w = 0.6f, h = 0.2f,
+            angle = 0f, font = 0.03f, bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
+            sourceText = "HELLO", overlayCv = cover
+        )
+        val stored = WebModeLayout.fromJson(WebModeLayout(0, listOf(bubble)).toJson())!!
+        assertEquals(cover, stored.bubbles.single().overlayCv)
     }
 
     @Test
