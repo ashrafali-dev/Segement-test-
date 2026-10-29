@@ -1561,6 +1561,7 @@ internal class WebModeExtractor(
 
             var stable = 0
             var driftRetries = 0
+            val maxDriftRecaptures = if (req.visibleOnly) 3 else 1
             var steps = 0
             while (true) {
                 if (!alive()) { forceFail(WebModeError.NAVIGATION_INVALIDATED); return }
@@ -1585,7 +1586,11 @@ internal class WebModeExtractor(
                 } == true
                 // Always take the screenshot WITHOUT our own translation overlay, otherwise the Bengali text drawn on the
                 // page is read again as if it were lettering (and for a non-Bengali target it is even "translated").
-                val hideOverlayForShot = req.visibleOnly
+                // Webtoon visible-capture OCR rejects the Bengali overlay as a script mismatch.
+                // Keep the rendered text visible on that route to prevent a noticeable disappear/reappear flash.
+                val keepWebtoonOverlay = req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())
+                val hideOverlayForShot = req.visibleOnly && !keepWebtoonOverlay
+                if (keepWebtoonOverlay) OcrDiag.log("OVERLAY_CAPTURE", "kept=true reason=webtoon_anti_flicker scriptFilterHandlesOwnText=true")
                 if (hideOverlayForShot) {
                     evalWait(wrap(JS_TEMP_HIDE_OVERLAY)) { null }
                     // Wait for the visibility change to reach the WebView surface before PixelCopy.
@@ -1638,9 +1643,9 @@ internal class WebModeExtractor(
                         val after = probe.optDouble("y", Double.NaN)
                         if (before.isFinite() && after.isFinite() && Math.abs(after - before) > 1.0) {
                             val movedBy = after - before
-                            if (driftRetries < 1) {
+                            if (driftRetries < maxDriftRecaptures) {
                                 driftRetries++
-                                OcrDiag.log("FORCE_STEP", "page moved during capture (dy=$movedBy) -> recapture $driftRetries/1")
+                                OcrDiag.log("FORCE_STEP", "page moved during capture (dy=$movedBy) -> recapture $driftRetries/$maxDriftRecaptures")
                                 bmp.recycle()
                                 continue
                             }
@@ -2884,6 +2889,7 @@ internal class WebModeExtractor(
                 // tiny) or into an oval's bounding box (its corners lie outside the outline: text left the bubble).
                 var tL = 0; var tT = 0; var tR = 0; var tB = 0
                 var coverBands: List<IntArray> = emptyList()
+                var overlaySafetyBox: IntArray? = null
                 // Free lettering (sound effects, narration on artwork) has no bubble to fit into.
                 if (!rotated && !freeAt(i) && Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     val seedBox = refinedSeed[i] ?: rects[i]
@@ -2938,8 +2944,17 @@ internal class WebModeExtractor(
                         if (accepted) {
                             if (req.visibleOnly) realtimePixelBubbleTargets++
                             tL = xl; tT = xt; tR = xr; tB = xb
-                            // Paint and position against the verified shape, regardless of how small the OCR glyph box is.
+                            // Keep the source-image cleaner mask and the on-screen cover geometry separate.
+                            // A Webtoon-only tight cover hides antialiased glyph edges outside curved fit bands.
+                            // It never enters the pixel cleaner, so paper-colour sampling stays shape-based.
                             coverBands = candidateBands
+                            if (WebtoonBubbleMaskKit.shouldHandle(startUrl)) {
+                                overlaySafetyBox = intArrayOf(
+                                    (aL - 4).coerceAtLeast(0), (aT - 4).coerceAtLeast(0),
+                                    (aR + 4).coerceAtMost(bmp.width), (aB + 4).coerceAtMost(bmp.height)
+                                )
+                                OcrDiag.log("WEBTOON_OVERLAY_COVER", "marker=${out.size + 1} accepted=true pad=4 shapeBands=${candidateBands.size}")
+                            }
                             cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
                         }
                     }
@@ -2961,7 +2976,11 @@ internal class WebModeExtractor(
                             lst.add((x0 + cb[0] * k) / fullW); lst.add((y0 + cb[1] * k) / fullH)
                             lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
                         }
-                    } else emptyList()
+                    } else emptyList(),
+                    overlayCv = overlaySafetyBox?.let { safe -> listOf(
+                        (x0 + safe[0] * k) / fullW, (y0 + safe[1] * k) / fullH,
+                        (x0 + safe[2] * k) / fullW, (y0 + safe[3] * k) / fullH
+                    ) } ?: emptyList()
                 )
                 // Real balloon outline from the segmentation model: hide the old lettering everywhere inside THIS balloon
                 // (paper colour), and make sure the cover reaches the balloon, not just the tight OCR box.
