@@ -145,6 +145,9 @@ internal object WebModeTextRemover {
             // Scan mode may load lazily if a hard bubble needs Tier 3. Realtime only warms in background.
             val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown &&
                 (!realtimeMode || aiLoadedAtStart)
+            if (!aiWanted) {
+                OcrDiag.log("CLEAN", "migan_unavailable reason=$miganStatusReason tier3_skipped")
+            }
             if (allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown && !aiLoadedAtStart) {
                 WebModeInpainter.warmUpAsync(context)
             }
@@ -415,7 +418,7 @@ internal object WebModeTextRemover {
                     if (residual1 > TIER2_RESIDUAL_THRESHOLD) {
                         OcrDiag.log(
                             "CLEAN_WARN",
-                            "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} reason=ghost_likely"
+                            "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} reason=ghost_likely failed=${residual1 > CLEAN_FAILED_RESIDUAL_THRESHOLD}"
                         )
                     }
                     if (residual1 > TIER3_RESIDUAL_THRESHOLD && !aiWanted) {
