@@ -131,6 +131,26 @@ internal object WebModeTextRemover {
                 return false
             }
             val cleaned = cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode, pageUrl)
+            if (!cleaned) {
+                // Do not let an OOM/exception/early return leave a partial request looking like an unmeasured clean.
+                // Preserve each real per-bubble residual/failure and only finalize entries that never reached a decision.
+                bubbles.forEach { bubble ->
+                    val storageKey = bubbleResultStorageKey(sourceKey, bubble)
+                    val previous = bubbleCleanResults[storageKey]
+                    if (previous == null || previous.reason == "clean_pending") {
+                        rememberBubbleCleanResult(
+                            sourceKey, bubble,
+                            BubbleCleanResult(
+                                previous?.residualMask,
+                                previous?.residualBbox,
+                                previous?.bboxCoveragePct,
+                                false,
+                                "clean_incomplete"
+                            )
+                        )
+                    }
+                }
+            }
             cleanedBySource[sourceKey] = cleaned
             if (cleanedBySource.size > 512) {
                 val staleKey = cleanedBySource.keys.firstOrNull { it != sourceKey }
