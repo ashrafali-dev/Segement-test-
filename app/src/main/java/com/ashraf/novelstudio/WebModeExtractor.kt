@@ -248,6 +248,7 @@ internal class WebModeExtractor(
         @Volatile private var how = "dom"
         /** The selected image vanished (canvas readers re-create their nodes): the visible screen was read instead. */
         @Volatile private var ignoreForceSrc = false
+        @Volatile private var forceCrossOriginCanvas = false
 
         private fun fail(e: WebModeError, msg: String = e.label) {
             // Realtime viewport mode must also recover when DOM discovery reports NO_IMAGES:
@@ -748,6 +749,8 @@ internal class WebModeExtractor(
             if (liveView && !hasCanvas && lastDiscoveryDebug.contains("canvasErr=SecurityError") &&
                 Regex("(\\d+) canvas").find(lastDiscoveryDebug)?.groupValues?.get(1)?.toIntOrNull()?.let { it > 0 } == true) {
                 // Pixel-locked canvas reader: downloads can only return unrelated images, so go straight to the screen.
+                forceCrossOriginCanvas = true
+                OcrDiag.log("FORCE_MODE", "reason=cross_origin_canvas action=fast_screenshot_fallback")
                 fail(WebModeError.IMAGES_NOT_LOADED, "Canvas reader: reading the screen directly")
                 return
             }
@@ -1415,7 +1418,7 @@ internal class WebModeExtractor(
                 } catch (_: Throwable) {
                 } finally { latch.countDown() }
             }
-            latch.await(if (req.visibleOnly) 1_500L else 20_000L, TimeUnit.MILLISECONDS)
+            latch.await(if (req.visibleOnly) if (forceCrossOriginCanvas) 700L else 1_500L else 20_000L, TimeUnit.MILLISECONDS)
             return out
         }
 
@@ -1439,6 +1442,7 @@ internal class WebModeExtractor(
             fellBackToForce = true   // never run the screenshot path twice for one job
             how = "screen"
             OcrDiag.log("FORCE_BEGIN", "visibleOnly=${req.visibleOnly} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
+            if (forceCrossOriginCanvas) OcrDiag.log("FORCE_MODE", "reason=cross_origin_canvas retryPolicy=fast_capture")
             // A viewport-only recovery needs chapter metadata, not a full-page inventory. Defer
             // candidate collection until JS_FORCE_INFO so CSS-background panels are not lost to
             // cands()' 1200 ms background-probe throttle between these two calls.
@@ -1477,7 +1481,9 @@ internal class WebModeExtractor(
             if (!req.visibleOnly) evalWait(wrap(LIB + JS_FORCE_TOP)) { null }
 
             // Avoid screenshots during active scrolling: require three consecutive 100 ms probes with dy < 5 px.
-            val settleDeadline = SystemClock.elapsedRealtime() + 1_500L
+            val settleTimeoutMs = if (forceCrossOriginCanvas) 450L else 1_500L
+            val settleSampleMs = if (forceCrossOriginCanvas) 50L else 100L
+            val settleDeadline = SystemClock.elapsedRealtime() + settleTimeoutMs
             var previousY = Double.NaN
             var lastDy = Double.NaN
             var stableSamples = 0
@@ -1485,7 +1491,7 @@ internal class WebModeExtractor(
                 val remainingMs = (settleDeadline - SystemClock.elapsedRealtime()).coerceAtLeast(1L)
                 val probe = evalWait(
                     wrap(LIB + JS_SCROLL_PROBE),
-                    timeoutMs = minOf(180L, remainingMs)
+                    timeoutMs = minOf(if (forceCrossOriginCanvas) 100L else 180L, remainingMs)
                 ) { parseJson(it) }
                 val y = probe?.optDouble("y", Double.NaN) ?: Double.NaN
                 if (y.isFinite()) {
@@ -1496,12 +1502,12 @@ internal class WebModeExtractor(
                     previousY = y
                 }
                 if (stableSamples < 3) {
-                    try { Thread.sleep(100L) } catch (_: InterruptedException) { return }
+                    try { Thread.sleep(settleSampleMs) } catch (_: InterruptedException) { return }
                 }
             }
             val scrollSettled = stableSamples >= 3
             val dyLog = if (lastDy.isFinite()) String.format(java.util.Locale.US, "%.1f", lastDy) else "unknown"
-            OcrDiag.log("FORCE_CAPTURE", "unstable=${!scrollSettled} dy=$dyLog stableSamples=$stableSamples timeoutMs=1500")
+            OcrDiag.log("FORCE_CAPTURE", "unstable=${!scrollSettled} dy=$dyLog stableSamples=$stableSamples timeoutMs=$settleTimeoutMs")
 
             var stable = 0
             var driftRetries = 0
@@ -1510,7 +1516,14 @@ internal class WebModeExtractor(
                 if (!alive()) { forceFail(WebModeError.NAVIGATION_INVALIDATED); return }
                 if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; forceFail(WebModeError.TIMEOUT); return }
                 if (steps > MAX_TICKS) break
-                try { Thread.sleep(if (steps == 0) 450L else 350L) } catch (_: InterruptedException) { return }
+                try {
+                    Thread.sleep(when {
+                        forceCrossOriginCanvas && steps == 0 -> 60L
+                        forceCrossOriginCanvas -> 100L
+                        steps == 0 -> 450L
+                        else -> 350L
+                    })
+                } catch (_: InterruptedException) { return }
                 val info = evalWait(wrap(LIB + forceInfoScript)) { parseJson(it) }
                 val blankBefore = forceBlank
                 // Only fingerprint screenshot crops explicitly identified as canvas sources.
@@ -1537,9 +1550,12 @@ internal class WebModeExtractor(
                     bmp = captureView()
                     // A single blank PixelCopy happens while the WebView surface is repainting (just after scroll,
                     // page switch or a renderer restart). Retry a few times instead of failing the whole job.
-                    while (bmp == null && blankTry < 3 && alive() && !req.isOccluded()) {
+                    val maxBlankRetries = if (forceCrossOriginCanvas) 1 else 3
+                    while (bmp == null && blankTry < maxBlankRetries && alive() && !req.isOccluded()) {
                         blankTry++
-                        try { Thread.sleep(220L * blankTry) } catch (_: InterruptedException) { return }
+                        try {
+                            Thread.sleep(if (forceCrossOriginCanvas) 80L else 220L * blankTry)
+                        } catch (_: InterruptedException) { return }
                         bmp = captureView()
                     }
                     if (bmp == null && req.visibleOnly && !req.isOccluded() && alive()) {
