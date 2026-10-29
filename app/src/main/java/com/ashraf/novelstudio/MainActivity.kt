@@ -2713,13 +2713,47 @@ return t.length>=40?'TXT:'+t:'';
                 // A fast flick through the page is not read: the panel is gone before OCR could finish. Slow
                 // reading and standing still are never held back (see ScrollGate).
                 val scrollHold = ScrollGate.holdOcr(android.os.SystemClock.elapsedRealtime(), novelWv.height)
-                val periodicRecheck = hasImages && !runningAhead && !scrollHold &&
+                val pausedSameVisible = signature.isNotBlank() && signature == realtimePausedSignature
+                val periodicRecheck = hasImages && !runningAhead && !scrollHold && !pausedSameVisible &&
                     signature != deepSeekStallBlockedSignature &&
                     now - deepSeekLastOcrAtMs >= 45000L
                 // Wait for scrolling to settle before starting network OCR. This ~300 ms debounce
                 // avoids competing with fast flick-scrolls and prevents repeated OCR on transient panels.
                 if (signature != deepSeekPendingSig) { deepSeekPendingSig = signature; deepSeekPendingSince = now }
                 val settled = now - deepSeekPendingSince >= 300L && !scrollHold
+                val viewportChangedAfterSettle = hasImages && changed && settled &&
+                    signature.isNotBlank() && signature != realtimeCurrentSignature
+                if (viewportChangedAfterSettle && realtimeReadState != RealtimeReadState.IDLE) {
+                    OcrDiag.log("REALTIME_CANCEL", "reason=user_scrolled newVisible=${signature.take(180)}")
+                    when (realtimeReadState) {
+                        RealtimeReadState.READING_VISIBLE -> {
+                            if (realtimeVisibleJobActive) {
+                                webModeJobSerial++
+                                webModeHandle?.cancel()
+                                webModeHandle = null
+                                webModeLastProgressAtMs = 0L
+                            }
+                            realtimeVisibleJobActive = false
+                            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+                        }
+                        RealtimeReadState.PREFETCH_NEXT -> {
+                            aheadOcrSeq++
+                            aheadOcrHandle?.cancel()
+                            aheadOcrHandle = null
+                            aheadOcrStage = ""
+                            aheadOcrPct = -1
+                            realtimeVisiblePlaced = false
+                            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+                        }
+                        RealtimeReadState.PLACING_VISIBLE -> {
+                            // The prior overlay callback may finish for its own image, but it cannot
+                            // unlock a prefetch for this new viewport because completion checks the state.
+                            realtimeVisiblePlaced = false
+                            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+                        }
+                        RealtimeReadState.IDLE -> Unit
+                    }
+                }
                 // Foreground OCR may pre-empt only an ahead-translation job; it must never interrupt
                 // a visible-panel translation or a user-initiated extraction.
                 // Reading the screen (OCR) does not use the chatbot, so it must not wait for the chatbot to finish
@@ -2733,6 +2767,11 @@ return t.length>=40?'TXT:'+t:'';
                     ((hasImages && ((changed && settled) || periodicRecheck)) || textFallbackDue)) {
                     if (runningAhead && changed && settled) interruptRealtimeAheadForVisiblePanel()
                     deepSeekVisibleSignature = signature
+                    if (hasImages && ((changed && settled) || periodicRecheck)) {
+                        beginRealtimeVisibleRead(signature)
+                    } else if (textFallbackDue) {
+                        pauseRealtimeVisible("visible_empty")
+                    }
                     deepSeekLastOcrAtMs = now
                     if (!hasImages) deepSeekNoImageTriedUrl = pageKeyNow
                     val token = navToken
@@ -2744,10 +2783,9 @@ return t.length>=40?'TXT:'+t:'';
                 // Keep the DOM probe light enough that it does not compete with touch scrolling.
                 // Rule: the panel in front of the reader comes first. Look ahead only when the visible screen is
                 // already read (nothing new waiting) - never while a changed screen is still waiting for its turn.
-                if (hasImages && !scrollHold && webModeHandle == null && aheadOcrHandle == null && !changed &&
-                    // Keep a bounded OCR/translation pipeline: allow the next ten-panel batch
-                    // to be prepared while the previous batch is still being translated.
-                    rtAheadTranslationQueue.size < 4 &&
+                if (realtimeReadState == RealtimeReadState.PREFETCH_NEXT && realtimeVisiblePlaced &&
+                    hasImages && !scrollHold && webModeHandle == null && aheadOcrHandle == null && !changed &&
+                    rtAheadTranslationQueue.isEmpty() && !rtAheadWorkerBusy &&
                     System.currentTimeMillis() - deepSeekAheadAtMs >= 220L) {
                     startAheadOcr()
                 }
@@ -7155,6 +7193,9 @@ return t.length>=40?'TXT:'+t:'';
         token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false,
         onHandled: (() -> Unit)? = null
     ) {
+        if (realtimeViewport && !(realtimeReadState == RealtimeReadState.READING_VISIBLE && realtimeVisibleJobActive)) {
+            beginRealtimeVisibleRead(realtimeCurrentSignature.ifBlank { novelWv.url.orEmpty() })
+        }
         // In real-time mode the ahead worker has its own low-priority executor and does not scroll
         // the page. Let it finish caching upcoming panels while the visible panel is scanned and
         // translated; cancelling it on every viewport change made the 9-panel read-ahead starve.
@@ -7209,6 +7250,7 @@ return t.length>=40?'TXT:'+t:'';
                 if (token == navToken && jobSeq == webModeJobSerial) {
                     webModeHandle = null
                     webModeLastProgressAtMs = 0L
+                    if (realtimeViewport) realtimeVisibleJobActive = false
                     clearWebModeProgress()
                     when (out) {
                         is WebModeOutcome.Success -> {
