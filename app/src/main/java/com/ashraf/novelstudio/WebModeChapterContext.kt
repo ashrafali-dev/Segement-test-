@@ -80,10 +80,7 @@ internal data class WebModeChapterContext(
         }
         return spans.mapIndexed { index, span ->
             val inRange = entries.filter { it.panelIndex in span.first..span.second }
-            val outputStart = if (index == 0) span.first else {
-                val prevEnd = spans[index - 1].second
-                maxOf(span.first, prevEnd - overlap + 1)
-            }
+            val outputStart = if (index == 0) span.first else spans[index - 1].second + 1
             val out = inRange.filter { it.panelIndex >= outputStart }
             WebModeChapterWindow(index, span.first, span.second, inRange, out)
         }
