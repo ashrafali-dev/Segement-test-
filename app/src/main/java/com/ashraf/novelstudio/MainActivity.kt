@@ -8649,10 +8649,13 @@ merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
         val imageMode = webModeOn() && ch.contentSel.isBlank()
-        val scanLayout = if (imageMode && !isRealtimeBubbleBatch(ch)) {
+        val structuredScanEligible = imageMode &&
+            scanTranslationEligibleKeys.contains(scanTranslationKey(ch)) &&
+            !isRealtimeBubbleBatch(ch) && !isDeepSeekLivePanel(ch)
+        val scanLayout = if (structuredScanEligible) {
             WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
         } else null
-        val chapterContext = if (imageMode && !isRealtimeBubbleBatch(ch) &&
+        val chapterContext = if (structuredScanEligible &&
             scanLayout != null && scanLayout.bubbles.isNotEmpty()) {
             WebModeChapterContext.fromMarkedText(
                 chapterId = keyOf(ch),
