@@ -1263,11 +1263,11 @@ class MainActivity : Activity() {
             clearRealtimeVisibleOcrBatch()
         }
         val staleQueued = queue.filter { ch ->
-            isRealtimeBubbleBatch(ch) && realtimeBatchSignatureByChapter[ch] != nextSignature
+            isRealtimeBubbleBatch(ch) && realtimeBatchSignature[ch] != nextSignature
         }
         for (ch in staleQueued) {
             val layout = realtimeBatchLayout(ch)
-            val oldSignature = realtimeBatchSignatureByChapter[ch].orEmpty()
+            val oldSignature = realtimeBatchSignature[ch].orEmpty()
             val oldTop = panelTopFromSignature(oldSignature)
             layout?.bubbles?.forEachIndexed { index, bubble ->
                 OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
@@ -1278,7 +1278,7 @@ class MainActivity : Activity() {
         }
         val active = running
         if (active != null && isRealtimeBubbleBatch(active) &&
-            realtimeBatchSignatureByChapter[active] != nextSignature) {
+            realtimeBatchSignature[active] != nextSignature) {
             dropped += realtimeBatchLayout(active)?.bubbles?.size ?: 1
             // Keep its identity until the reply returns; applyTranslation will reject it by the captured signature.
         }
