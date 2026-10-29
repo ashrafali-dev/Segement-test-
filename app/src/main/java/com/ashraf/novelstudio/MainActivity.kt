@@ -10029,9 +10029,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             shownTrRaw = text
             if (lastChapter !== ch) return
             injectBengaliFont()
-            // Real-time batches must align against the exact bubbles that produced this reply,
-            // then merge into the cumulative page overlay. Never replace the bubbles already translated.
+            // Real-time batches must match both their OCR layout and the exact visible panel signature.
             val livePanelBatch = isRealtimeBubbleBatch(ch)
+            val livePanelSignature = if (livePanelBatch) realtimeBatchSignature(ch).orEmpty() else ""
+            if (livePanelBatch && (livePanelSignature.isBlank() || livePanelSignature != realtimeCurrentSignature)) {
+                val staleLayout = realtimeBatchLayout(ch)
+                val oldTop = panelTopFromSignature(livePanelSignature)
+                staleLayout?.bubbles?.forEachIndexed { index, bubble ->
+                    OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                }
+                OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${staleLayout?.bubbles?.size ?: 0}")
+                releaseDeepSeekHashBatch(ch)
+                completeRealtimeVisiblePlacement(0, false, "stale_panel")
+                restoreChapterAfterBubbleJob(ch.url)
+                return
+            }
             // The URL's latest scan may already belong to another viewport. A live reply may only
             // use the layout captured with its own request; if absent, fail closed rather than guess.
             val wmLayout = if (livePanelBatch) realtimeBatchLayout(ch)
@@ -10088,8 +10100,22 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 return
             }
             val placementId = beginTranslationPlacement()
-            novelWv.evaluateJavascript(wmScript) { r ->
+            if (livePanelBatch && realtimeOverlayActive && realtimeOverlaySignature == livePanelSignature) {
+                OcrDiag.log("OVERLAY_CLEAR", "reason=replace panelTop=${panelTopFromSignature(livePanelSignature)} placed=$realtimeOverlayPlacedCount")
+            }
+            val placementScript = if (livePanelBatch) guardedRealtimePlacementScript(wmScript, livePanelSignature) else wmScript
+            novelWv.evaluateJavascript(placementScript) { r ->
                 finishTranslationPlacement(placementId)
+                if (livePanelBatch && (livePanelSignature != realtimeCurrentSignature || decode(r).contains("stale-panel"))) {
+                    val oldTop = panelTopFromSignature(livePanelSignature)
+                    wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                    }
+                    releaseDeepSeekHashBatch(ch)
+                    completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
+                    restoreChapterAfterBubbleJob(ch.url)
+                    return@evaluateJavascript
+                }
                 if (lastChapter !== ch) {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
                     completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
@@ -10097,9 +10123,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 }
                 if (r != null && r.contains("ok")) {
                     if (livePanelBatch) {
-                        val matched = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
-                            if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else WebModeLayout.fingerprint(bubble)
-                        }?.toSet().orEmpty()
+                        val matchedIndices = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
+                            if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else index
+                        }.orEmpty()
+                        val matched = matchedIndices.mapNotNull { index ->
+                            wmLayout?.bubbles?.getOrNull(index)?.let { WebModeLayout.fingerprint(it) }
+                        }.toSet()
+                        val panelTop = panelTopFromSignature(livePanelSignature)
+                        matchedIndices.forEach { index ->
+                            OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                        }
+                        realtimeOverlayActive = true
+                        realtimeOverlaySignature = livePanelSignature
+                        realtimeOverlayPlacedCount = matched.size
+                        realtimeOverlayPanelTop = panelTop
+                        verifyRealtimeOverlay(panelTop, matched.size, livePanelSignature)
                         completeDeepSeekHashBatch(ch, matched)
                         completeRealtimeVisiblePlacement(matched.size, matched.isNotEmpty(), "overlay_success")
                     }
