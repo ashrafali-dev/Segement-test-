@@ -8652,9 +8652,7 @@ markers preserved.
         val structuredScanEligible = imageMode &&
             scanTranslationEligibleKeys.contains(scanTranslationKey(ch)) &&
             !isRealtimeBubbleBatch(ch)
-        val scanLayout = if (structuredScanEligible) {
-            WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
-        } else null
+        val scanLayout = if (structuredScanEligible) WebModeLayoutStore.getScan(ch.url) else null
         val chapterContext = if (structuredScanEligible &&
             scanLayout != null && scanLayout.bubbles.isNotEmpty()) {
             WebModeChapterContext.fromMarkedText(
@@ -8666,6 +8664,9 @@ markers preserved.
                 layout = scanLayout
             )
         } else null
+        if (structuredScanEligible && chapterContext == null) {
+            scanTranslationEligibleKeys.remove(scanTranslationKey(ch))
+        }
         if (chapterContext != null) {
             val windows = chapterContext.windows()
             if (windows.isNotEmpty()) {
@@ -9183,6 +9184,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     }
                 }
             }
+            if (structuredScan) scanTranslationEligibleKeys.remove(scanTranslationKey(ch))
             deferNextChatbotRequest()
             remember(t)
             // A live batch is only the newly visible bubbles; saving it against the whole chapter URL
@@ -9254,6 +9256,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     private fun failJob(tok: Int, ch: Chapter, msg: String, fallback: Boolean = false, autoRetry: Boolean = false) {
         if (tok != runToken) return
         scanChapterStates.remove(tok)
+        if (!fallback) scanTranslationEligibleKeys.remove(scanTranslationKey(ch))
         NovelStudioAnalytics.track(
             this, "translation_failed",
             mode = analyticsReadMode(),
