@@ -20,9 +20,14 @@ internal object WebtoonBubbleMaskKit {
     // Curved Webtoon balloons need finer bands than the legacy Japanese-manga default.
     internal const val SHAPE_BANDS = 96
     internal const val DEFAULT_SHAPE_BANDS = 28
+    internal const val SEGMENTATION_BANDS = 64
+    internal const val DEFAULT_SEGMENTATION_BANDS = 14
 
     internal fun shapeBandLimit(pageUrl: String): Int =
         if (shouldHandle(pageUrl)) SHAPE_BANDS else DEFAULT_SHAPE_BANDS
+
+    internal fun segmentationBandLimit(pageUrl: String): Int =
+        if (shouldHandle(pageUrl)) SEGMENTATION_BANDS else DEFAULT_SEGMENTATION_BANDS
 
     internal data class FillResult(
         val accepted: Boolean,
