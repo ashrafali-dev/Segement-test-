@@ -2175,6 +2175,7 @@ internal class WebModeExtractor(
             val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
             val texts = ArrayList<String>()
             val bubbles = ArrayList<WmBubble>()
+            val scanMode = !req.visibleOnly && req.ahead <= 0
             fun finishResult(): PanelOcr {
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
