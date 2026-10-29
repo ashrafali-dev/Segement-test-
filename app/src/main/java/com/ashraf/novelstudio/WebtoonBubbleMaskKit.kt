@@ -139,7 +139,7 @@ internal object WebtoonBubbleMaskKit {
 
         val fallback = opaque(fallbackBackground)
         val paper = inferPaperColour(lightSamples, allEdgeSamples)
-            ?: if (isLightPaper(fallback)) fallback else null
+            ?: fallback.takeIf { isLightPaper(it) }
             ?: return FillResult(false, "paper_colour_uncertain", bands.size, area)
 
         // Validate the entire shape before modifying a single pixel. Text and anti-aliasing may be
