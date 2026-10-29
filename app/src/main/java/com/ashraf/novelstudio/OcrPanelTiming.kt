@@ -2,9 +2,8 @@ package com.ashraf.novelstudio
 
 import android.os.SystemClock
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicInteger
 
-/** Per-panel timing. cold=first actual Lens request in this process; hot=subsequent Lens-request panels. */
+/** Per-panel timing. cold=first actual Lens request for each reader host; hot=subsequent requests to that host. */
 internal object OcrPanelTiming {
     private data class Frame(
         val panel: Int,
@@ -16,13 +15,18 @@ internal object OcrPanelTiming {
         var cleanMs: Long = 0L
     )
     private val active = ThreadLocal<Frame?>()
-    private val firstLensCall = AtomicInteger(0)
     private val statsLock = Any()
+    private val lensHostsSeen = HashSet<String>()
     private var coldPanels = 0L
     private var hotPanels = 0L
     private var coldTotalMs = 0L
     private var hotTotalMs = 0L
-    private data class HostBucketCounts(var cold: Long = 0L, var hot: Long = 0L)
+    private data class HostBucketCounts(
+        var cold: Long = 0L,
+        var hot: Long = 0L,
+        var coldTotalMs: Long = 0L,
+        var hotTotalMs: Long = 0L
+    )
     private val hostBuckets = HashMap<String, HostBucketCounts>()
 
     fun normalizeHost(host: String): String {
@@ -52,8 +56,10 @@ internal object OcrPanelTiming {
     fun noteLensCall() {
         val frame = active.get() ?: return
         frame.lensCalls++
-        if (frame.lensBucket.isEmpty()) frame.lensBucket =
-            if (firstLensCall.getAndIncrement() == 0) "cold" else "hot"
+        if (frame.lensBucket.isEmpty()) {
+            val firstForHost = synchronized(statsLock) { lensHostsSeen.add(frame.host) }
+            frame.lensBucket = if (firstForHost) "cold" else "hot"
+        }
     }
 
     fun addOcr(ms: Long) { active.get()?.let { it.ocrMs += ms.coerceAtLeast(0L) } }
@@ -69,16 +75,22 @@ internal object OcrPanelTiming {
         if (bucket == "cold" || bucket == "hot") {
             val summary: String
             synchronized(statsLock) {
+                val host = hostBuckets.getOrPut(frame.host) { HostBucketCounts() }
                 if (bucket == "cold") {
                     coldPanels++; coldTotalMs += totalMs
-                    hostBuckets.getOrPut(frame.host) { HostBucketCounts() }.cold++
+                    host.cold++
+                    host.coldTotalMs += totalMs
                 } else {
                     hotPanels++; hotTotalMs += totalMs
-                    hostBuckets.getOrPut(frame.host) { HostBucketCounts() }.hot++
+                    host.hot++
+                    host.hotTotalMs += totalMs
                 }
                 val avgCold = if (coldPanels == 0L) 0L else coldTotalMs / coldPanels
                 val avgHot = if (hotPanels == 0L) 0L else hotTotalMs / hotPanels
-                summary = "cold=$coldPanels hot=$hotPanels avgCold=$avgCold avgHot=$avgHot metric=totalMs"
+                val hostAvgCold = if (host.cold == 0L) 0L else host.coldTotalMs / host.cold
+                val hostAvgHot = if (host.hot == 0L) 0L else host.hotTotalMs / host.hot
+                summary = "host=${frame.host} cold=$coldPanels hot=$hotPanels avgCold=$avgCold avgHot=$avgHot " +
+                    "hostCold=${host.cold} hostHot=${host.hot} hostAvgCold=$hostAvgCold hostAvgHot=$hostAvgHot metric=totalMs"
             }
             OcrDiag.log("TIMING_BUCKET", summary)
         }
