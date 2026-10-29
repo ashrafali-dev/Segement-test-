@@ -193,6 +193,9 @@ internal object WebModeWriter {
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
           +'pointer-events:none;will-change:transform;background:'+(hasCv?'transparent':it.bg)+';';
+        // A failed pixel clean must never gate placement: keep a fully opaque cover below the translation.
+        // The Japanese box coordinates/size/font fields are still the same serialized values as before.
+        if(!it.cl)cover.style.opacity='1';
         if(hasCv){
           for(var ci=0;ci+3<it.cv.length;ci+=4){
             var cd=document.createElement('div');cd.className='__ns_cv';
@@ -1258,7 +1261,17 @@ internal object WebModeWriter {
         }
         for ((i, b) in layout.bubbles.withIndex()) {
             if (i in hidden) continue
-            val t = WmSfx.fix(translated.getOrNull(i)?.trim().orEmpty())
+            val translatedText = translated.getOrNull(i)?.trim().orEmpty()
+            if (translatedText.isNotBlank() && b.sourceText.isNotBlank() &&
+                !WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))) {
+                val scriptLabel = WebModeTextRemover.scriptLabelForBubble(b.sourceText, b.src, pageId)
+                OcrDiag.log(
+                    "PLACE_UNCLEANED",
+                    "bubble=${i + 1} residual=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)} " +
+                        "placed=true bgAlpha=1.0 script=$scriptLabel"
+                )
+            }
+            val t = WmSfx.fix(translatedText)
             if (t.isEmpty()) {
                 // Erased in the cleaned picture but not translated (yet): cut a HOLE in the cleaned picture there, so the
                 // original lettering stays visible instead of vanishing - and every OTHER bubble of the picture can still
