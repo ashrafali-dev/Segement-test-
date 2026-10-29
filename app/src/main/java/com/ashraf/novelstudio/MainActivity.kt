@@ -2865,11 +2865,14 @@ if(!hasLargeImage&&bgSig)v.push(bgSig);
 v.sort();
 if(v.length){var sig='IMG:'+v.join('|');window.__nsRtVisibleSig=sig;return sig;}
 var rootEl=document.querySelector('[class*=chapter-content],[class*=chapter-body],[id*=chapter],article,main')||document.body;
-var t=String((rootEl&&(rootEl.innerText||rootEl.textContent))||'').replace(/\s+/g,' ').trim().slice(0,1200);
+var textRoot=rootEl?rootEl.cloneNode(true):document.body.cloneNode(true);
+var nsUi=textRoot.querySelectorAll('#__ns_wm_overlay,#__ns_rt_translating,[data-ns-ui="1"]');
+for(var ui=0;ui<nsUi.length;ui++)if(nsUi[ui].parentNode)nsUi[ui].parentNode.removeChild(nsUi[ui]);
+var t=String((textRoot&&(textRoot.innerText||textRoot.textContent))||'').replace(/\s+/g,' ').trim().slice(0,1200);
 var textSig=t.length>=40?'TXT:'+t:'';
 window.__nsRtVisibleSig=textSig;
 return textSig;
-}catch(e){return '';}})();"""
+}catch(e){window.__nsRtVisibleSig='';return '';}})();"""
             val probeSeq = ++deepSeekPollEvalSeq
             deepSeekProbeInFlight = true
             deepSeekProbeStartedAtMs = android.os.SystemClock.elapsedRealtime()
