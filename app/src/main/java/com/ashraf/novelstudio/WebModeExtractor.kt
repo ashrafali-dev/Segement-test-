@@ -2654,6 +2654,30 @@ internal class WebModeExtractor(
                 } else if (scanMode && scanDetect && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
+            val segmentationSplit = BubbleSegCore.splitAdjacentRoundSegments(dets?.mapNotNull { it.seg })
+            for (event in segmentationSplit.splits) {
+                OcrDiag.log(
+                    "BUBBLE_SPLIT",
+                    "reason=adjacent_circles axis=${event.axis} " +
+                        "a_center=(${event.aCenterX},${event.aCenterY}) b_center=(${event.bCenterX},${event.bCenterY}) " +
+                        "valleyRatio=${String.format(java.util.Locale.US, "%.3f", event.valleyRatio)}"
+                )
+            }
+            for (event in segmentationSplit.merges) {
+                OcrDiag.log(
+                    "BUBBLE_MERGE",
+                    "reason=touching_same_shape axis=${event.axis} " +
+                        "a_center=(${event.aCenterX},${event.aCenterY}) b_center=(${event.bCenterX},${event.bCenterY}) " +
+                        "valleyRatio=${String.format(java.util.Locale.US, "%.3f", event.valleyRatio)} action=keep_unsplit"
+                )
+            }
+            if (segmentationSplit.splits.isNotEmpty() || segmentationSplit.merges.isNotEmpty()) {
+                OcrDiag.log(
+                    "BUBBLE_SEG_POST",
+                    "before=${dets?.count { it.seg != null } ?: 0} after=${segmentationSplit.segments.size} " +
+                        "split=${segmentationSplit.splits.size} mergeCandidates=${segmentationSplit.merges.size} modelChanged=false"
+                )
+            }
             val detectRan = detectWanted || cachedDets != null || earlyDet != null
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
@@ -2911,7 +2935,7 @@ internal class WebModeExtractor(
                 // (paper colour), and make sure the cover reaches the balloon, not just the tight OCR box.
                 val nb = run {
                     val seg = if (dets == null || freeAt(i)) null
-                        else BubbleSegCore.balloonAt(dets.mapNotNull { it.seg }, ((rects[i][0] + rects[i][2]) / 2), ((rects[i][1] + rects[i][3]) / 2))
+                        else BubbleSegCore.balloonAt(segmentationSplit.segments, ((rects[i][0] + rects[i][2]) / 2), ((rects[i][1] + rects[i][3]) / 2))
                     if (seg == null) {
                         OcrDiag.log("BUBBLE_MASK_FALLBACK", "marker=${out.size + 1} reason=no_bubble text_bbox_fallback=true textPresent=${text.isNotBlank()}")
                         nb0

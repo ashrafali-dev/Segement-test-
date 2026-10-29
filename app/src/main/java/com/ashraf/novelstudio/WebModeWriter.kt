@@ -1291,6 +1291,16 @@ internal object WebModeWriter {
                 else a1.w * a1.h >= b1.w * b1.h
             hidden.add(if (dropJ) j else i)
         }
+        val requestOrdinalByLayoutIndex = HashMap<Int, Int>()
+        if (auditBubbleFingerprints != null) {
+            var requestOrdinal = 0
+            layout.bubbles.forEachIndexed { layoutIndex, bubble ->
+                if (WebModeLayout.fingerprint(bubble) in auditBubbleFingerprints) {
+                    requestOrdinal++
+                    requestOrdinalByLayoutIndex[layoutIndex] = requestOrdinal
+                }
+            }
+        }
         for ((i, b) in layout.bubbles.withIndex()) {
             if (i in hidden) continue
             val translatedText = translated.getOrNull(i)?.trim().orEmpty()
@@ -1299,17 +1309,27 @@ internal object WebModeWriter {
             if (belongsToCurrentRequest && translatedText.isNotBlank() && b.sourceText.isNotBlank() &&
                 !WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))) {
                 val scriptLabel = WebModeTextRemover.scriptLabelForBubble(b.sourceText, b.src, pageId)
-                val residualForBubble = WebModeTextRemover.residualForSource(b.src)
-                val cleanStatus = WebModeTextRemover.cleanStatusForSource(b.src)
-                if (cleanStatus == false || residualForBubble == null || residualForBubble > 5f) {
+                val cleanResult = WebModeTextRemover.bubbleCleanResultFor(b.src, b)
+                val residualForBubble = if (scriptLabel == "JAPANESE") cleanResult?.residualMask else cleanResult?.residualBbox
+                if (cleanResult?.cleaned != true) {
                     val reason = when {
-                        cleanStatus == false -> "clean_skip_or_failed"
-                        residualForBubble == null -> "clean_skip_or_unmeasured"
-                        else -> "residual_gt_5"
+                        cleanResult == null -> "clean_skip_or_unmeasured"
+                        residualForBubble == null -> when (cleanResult.reason) {
+                            "clean_pending", "not_processed" -> "clean_skip_or_unmeasured"
+                            else -> cleanResult.reason.ifBlank { "clean_skip_or_unmeasured" }
+                        }
+                        residualForBubble >= 5f -> "residual_gt_5"
+                        scriptLabel != "JAPANESE" && (cleanResult.bboxCoveragePct ?: 0f) < 95f -> "bbox_underfilled"
+                        else -> cleanResult.reason.ifBlank { "clean_skip_or_unmeasured" }
                     }
+                    val bubbleLabel = requestOrdinalByLayoutIndex[i]?.toString() ?: "layout"
+                    val cleanKey = WebModeTextRemover.cleanResultKey(b.src, b)
                     OcrDiag.log(
                         "PLACE_UNCLEANED",
-                        "bubble=${i + 1} residual=${residualForBubble?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                        "bubble=$bubbleLabel key=$cleanKey " +
+                            "residual=${residualForBubble?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                            "residualBbox=${cleanResult?.residualBbox?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                            "residualMask=${cleanResult?.residualMask?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
                             "placed=true bgAlpha=1.0 script=$scriptLabel reason=$reason"
                     )
                 }

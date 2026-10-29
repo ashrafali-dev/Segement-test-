@@ -18,6 +18,7 @@ const diag = read('app/src/main/java/com/ashraf/novelstudio/OcrDiag.kt');
 const lensTransport = read('app/src/main/java/com/ashraf/novelstudio/LensOcrEngine.kt');
 const chapterContext = read('app/src/main/java/com/ashraf/novelstudio/WebModeChapterContext.kt');
 const writer = read('app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt');
+const bubbleSeg = read('app/src/main/java/com/ashraf/novelstudio/BubbleSegCore.kt');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
 const localFastStart = routing.indexOf('fun recognizeLocalFast(');
@@ -283,14 +284,21 @@ assert.ok(mainActivity.includes('PLACE_QUEUE_CLEAR') && mainActivity.includes('P
           mainActivity.includes('panelSignature != realtimeCurrentSignature') &&
           mainActivity.includes('realtimeBatchSignatureByKey'),
   'placement queues and callbacks must be isolated by the current visible panel signature');
-assert.ok(cleaner.includes('realtimeMode) {') && cleaner.includes('realtime_tier1_only') &&
-          cleaner.includes('lastTier1Count') && extractor.includes('CLEAN_REALTIME') &&
+assert.ok(cleaner.includes('CLEAN_FILL_ENTER') && cleaner.includes('CLEAN_FILL_DONE') &&
+          cleaner.includes('CLEAN_FILL_VERIFY_FAIL') && cleaner.includes('bboxCoveragePct') &&
+          cleaner.includes('residualEnergyBox') && cleaner.includes('scope=bbox') &&
+          cleaner.includes('return stored && allBubblesClean') && extractor.includes('CLEAN_REALTIME') &&
           extractor.includes('CLEAN_SKIP'),
-  'every visible OCR panel must log fast Tier-1 cleaning or a specific CLEAN_SKIP');
+  'cleaning must verify full-bbox fill coverage and require bbox residual below 5 for strict panel success');
 assert.ok(extractor.includes('DETECT_REALTIME') &&
           extractor.includes('source=${if (realtimePixelBubbleTargets > 0) "pixel" else "text_bbox"}') &&
           extractor.includes('pixel_bubble_fit'),
   'realtime OCR must log pixel-derived bubble-fit placement targets or the text-bbox fallback');
+assert.ok(bubbleSeg.includes('splitAdjacentRoundSegments') &&
+          bubbleSeg.includes('valleyRatio <= 0.48f') && extractor.includes('BUBBLE_SPLIT') &&
+          extractor.includes('BUBBLE_MERGE') && extractor.includes('modelChanged=false'),
+  'touching rounded detector masks must be split conservatively without changing the detector model');
+
 assert.ok(extractor.includes('adOrRedirectSkipReason(startUrl)') &&
           extractor.includes('JOB_SKIP') && extractor.includes('ng88b.com') &&
           extractor.includes('doubleclick.net') && extractor.includes('amazon-adsystem.com') &&
@@ -299,8 +307,9 @@ assert.ok(extractor.includes('adOrRedirectSkipReason(startUrl)') &&
 assert.ok(mainActivity.includes('TRANSLATING_UI') && mainActivity.includes('অনুবাদ হচ্ছে') &&
           layout.includes('"translating"'),
   'visible translation delay must show a pill that cannot itself be translated by OCR');
-assert.ok(writer.includes('auditBubbleFingerprints') && writer.includes('residualForSource(b.src)') &&
-          writer.includes('cleanStatusForSource(b.src)') && cleaner.includes('cleanStatusForSource'),
-  'PLACE_UNCLEANED must use the current request bubble set and its own source residual/clean status');
+assert.ok(writer.includes('auditBubbleFingerprints') && writer.includes('bubbleCleanResultFor(b.src, b)') &&
+          writer.includes('cleanResultKey(b.src, b)') && cleaner.includes('cleanResultKey(sourceUrl, bubble)') &&
+          mainActivity.includes('overlayInvalidated') && mainActivity.includes('realtimeOverlayPanelSignature'),
+  'CLEAN and PLACE must share a stable source+geometry key and clear old-panel placement state');
 
 console.log('PASS: OCR quality wiring (script-gated ghost fill, Japanese-preserving placement, current-screen-first state machine, uncleaned placement cover, readable realtime sampling, chapter-context pipeline)');

@@ -1168,6 +1168,7 @@ class MainActivity : Activity() {
     // Only retain placement metadata for persistence/scroll logs; WebModeWriter owns the DOM renderer.
     private var realtimeOverlayPlacedCount = 0
     private var realtimeOverlayPanelTop = 0
+    private var realtimeOverlayPanelSignature = ""
     private var translatingPillSignature = ""
 
     private fun panelTopFromSignature(signature: String): Int =
@@ -1186,6 +1187,7 @@ class MainActivity : Activity() {
         try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
         realtimeOverlayPlacedCount = 0
         realtimeOverlayPanelTop = 0
+        realtimeOverlayPanelSignature = ""
     }
 
     private fun showRealtimeTranslatingPill(signature: String) {
@@ -1219,6 +1221,11 @@ class MainActivity : Activity() {
 
     private fun clearRealtimePlacementQueue(nextSignature: String) {
         var dropped = 0
+        val overlayInvalidated = if (
+            realtimeOverlayPlacedCount > 0 &&
+            realtimeOverlayPanelSignature.isNotBlank() &&
+            realtimeOverlayPanelSignature != nextSignature
+        ) realtimeOverlayPlacedCount else 0
         val pending = rtVisibleOcrBatch
         if (pending != null && pending.panelSignature != nextSignature) {
             dropped += pending.bubbles.size
@@ -1232,7 +1239,7 @@ class MainActivity : Activity() {
             val oldSignature = realtimeBatchSignature(ch).orEmpty()
             val oldTop = panelTopFromSignature(oldSignature)
             layout?.bubbles?.forEachIndexed { index, bubble ->
-                OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
             }
             dropped += layout?.bubbles?.size ?: 1
             queue.remove(ch)
@@ -1244,7 +1251,11 @@ class MainActivity : Activity() {
             dropped += realtimeBatchLayout(active)?.bubbles?.size ?: 1
             // Keep its identity until the reply returns; applyTranslation will reject it by the captured signature.
         }
-        OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=$dropped")
+        OcrDiag.log(
+            "PLACE_QUEUE_CLEAR",
+            "reason=visible_panel_changed dropped=$dropped overlayInvalidated=$overlayInvalidated " +
+                "previousPanel=$realtimeOverlayPanelSignature nextPanel=$nextSignature"
+        )
     }
 
     private fun transitionRealtimeReadState(next: RealtimeReadState, reason: String) {
@@ -1741,12 +1752,12 @@ class MainActivity : Activity() {
         )
         val panelTop = panelTopFromSignature(panelSignature)
         bubbles.forEachIndexed { index, bubble ->
-            OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1}")
+            OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)}")
         }
         novelWv.evaluateJavascript(script) { raw ->
             if (panelSignature != realtimeCurrentSignature) {
                 bubbles.forEachIndexed { index, bubble ->
-                    OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=false reason=stale")
+                    OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
                 }
                 if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "stale_cached_placement")
                 return@evaluateJavascript
@@ -1757,10 +1768,11 @@ class MainActivity : Activity() {
                 if (accepted > 0) {
                     realtimeOverlayPlacedCount = accepted
                     realtimeOverlayPanelTop = panelTop
+                    realtimeOverlayPanelSignature = panelSignature
                 }
                 bubbles.forEachIndexed { index, bubble ->
                     if (!values.getOrNull(index).isNullOrBlank()) {
-                        OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                        OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=true")
                     }
                 }
                 if (completesVisiblePlacement) {
@@ -7432,7 +7444,7 @@ return textSig;
                     }
                     val oldTop = panelTopFromSignature(realtimeSignatureAtStart)
                     staleLayout?.bubbles?.forEachIndexed { index, bubble ->
-                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
                     }
                     OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${staleLayout?.bubbles?.size ?: 0}")
                     if (translatingPillSignature == realtimeSignatureAtStart) hideRealtimeTranslatingPill("cancelled")
@@ -9871,7 +9883,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             realtimeBatchLayouts[key] = layout
             val panelTop = panelTopFromSignature(realtimeCurrentSignature)
             layout.bubbles.forEachIndexed { index, bubble ->
-                OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1}")
+                OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)}")
             }
         }
         while (realtimeBatchLayouts.size > 64) {
@@ -10007,7 +10019,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 val staleLayout = realtimeBatchLayout(ch)
                 val oldTop = panelTopFromSignature(livePanelSignature)
                 staleLayout?.bubbles?.forEachIndexed { index, bubble ->
-                    OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                    OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
                 }
                 OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${staleLayout?.bubbles?.size ?: 0}")
                 releaseDeepSeekHashBatch(ch)
@@ -10077,7 +10089,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 if (livePanelBatch && livePanelSignature != realtimeCurrentSignature) {
                     val oldTop = panelTopFromSignature(livePanelSignature)
                     wmLayout?.bubbles?.forEachIndexed { index, bubble ->
-                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
                     }
                     releaseDeepSeekHashBatch(ch)
                     completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
@@ -10106,10 +10118,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                             completeRealtimeVisiblePlacement(0, false, "no_translation_text")
                         } else {
                             matchedIndices.forEach { index ->
-                                OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                                OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=true")
                             }
                             realtimeOverlayPlacedCount = matched.size
                             realtimeOverlayPanelTop = panelTop
+                            realtimeOverlayPanelSignature = livePanelSignature
                             completeDeepSeekHashBatch(ch, matched)
                             completeRealtimeVisiblePlacement(matched.size, true, "overlay_success")
                             hasTr = true

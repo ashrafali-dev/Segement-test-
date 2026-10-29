@@ -24,6 +24,14 @@ import kotlin.math.min
  * This is a lightweight first-stage cleaner, not a neural inpainting model. It is intentionally
  * bounded for phones and returns false when the image is too large or the mask is unsafe.
  */
+internal data class BubbleCleanResult(
+    val residualMask: Float?,
+    val residualBbox: Float?,
+    val bboxCoveragePct: Float?,
+    val cleaned: Boolean,
+    val reason: String
+)
+
 internal object WebModeTextRemover {
     // Residual is normalized to a 0..100 percentage of full RGB contrast across the text mask.
     private const val TIER2_RESIDUAL_THRESHOLD = 5f
@@ -42,6 +50,38 @@ internal object WebModeTextRemover {
         private set
     private val residualBySource = ConcurrentHashMap<String, Float>()
     private val cleanedBySource = ConcurrentHashMap<String, Boolean>()
+    private val bubbleCleanResults = ConcurrentHashMap<String, BubbleCleanResult>()
+
+    private fun normalizedSourceKey(sourceUrl: String): String =
+        WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }
+
+    private fun bubbleResultStorageKey(sourceUrl: String, bubble: WmBubble): String =
+        normalizedSourceKey(sourceUrl) + "|" + WebModeTextRemovalCache.bubbleKey(bubble)
+
+    /** Stable source+geometry identity shared by cleaner and placement; never a global bubble counter. */
+    internal fun cleanResultKey(sourceUrl: String, bubble: WmBubble): String =
+        Integer.toHexString(normalizedSourceKey(sourceUrl).hashCode()) + ":" +
+            WebModeTextRemovalCache.bubbleKey(bubble)
+
+    internal fun bubbleCleanResultFor(sourceUrl: String, bubble: WmBubble): BubbleCleanResult? =
+        bubbleCleanResults[bubbleResultStorageKey(sourceUrl, bubble)]
+
+    private fun rememberBubbleCleanResult(sourceUrl: String, bubble: WmBubble, result: BubbleCleanResult) {
+        bubbleCleanResults[bubbleResultStorageKey(sourceUrl, bubble)] = result
+        if (bubbleCleanResults.size > 4000) {
+            val currentPrefix = normalizedSourceKey(sourceUrl) + "|"
+            for (key in bubbleCleanResults.keys) {
+                if (!key.startsWith(currentPrefix)) bubbleCleanResults.remove(key)
+                if (bubbleCleanResults.size <= 3500) break
+            }
+        }
+    }
+
+    private fun clearBubbleCleanResults(sourceKey: String) {
+        val prefix = sourceKey + "|"
+        for (key in bubbleCleanResults.keys) if (key.startsWith(prefix)) bubbleCleanResults.remove(key)
+    }
+
     fun residualForSource(sourceUrl: String): Float? = residualBySource[WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }]
     fun cleanStatusForSource(sourceUrl: String): Boolean? = cleanedBySource[WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }]
     private val cleanSemaphore = Semaphore(2, true)
@@ -70,6 +110,10 @@ internal object WebModeTextRemover {
         val sourceKey = WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }
         cleanedBySource.remove(sourceKey)
         residualBySource.remove(sourceKey)
+        clearBubbleCleanResults(sourceKey)
+        bubbles.forEach { bubble ->
+            rememberBubbleCleanResult(sourceKey, bubble, BubbleCleanResult(null, null, null, false, "clean_pending"))
+        }
         var acquired = false
         try {
             acquired = try { cleanSemaphore.tryAcquire(1, TimeUnit.SECONDS) }
@@ -79,6 +123,9 @@ internal object WebModeTextRemover {
                 if (realtimeMode) {
                     OcrDiag.log("CLEAN_SKIP", "reason=concurrency_limit bubbles=${bubbles.size}")
                     OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=1000 cleaned=false")
+                }
+                bubbles.forEach { bubble ->
+                    rememberBubbleCleanResult(sourceKey, bubble, BubbleCleanResult(null, null, null, false, "concurrency_limit"))
                 }
                 cleanedBySource[sourceKey] = false
                 return false
@@ -113,6 +160,9 @@ internal object WebModeTextRemover {
         val sourceKey = WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
         fun earlySkip(reason: String): Boolean {
+            bubbles.forEach { bubble ->
+                rememberBubbleCleanResult(sourceKey, bubble, BubbleCleanResult(null, null, null, false, reason))
+            }
             if (realtimeMode) {
                 OcrDiag.log("CLEAN_SKIP", "reason=$reason bubbles=${bubbles.size}")
                 OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=${android.os.SystemClock.elapsedRealtime() - callStartedMs} cleaned=false")
@@ -275,19 +325,32 @@ internal object WebModeTextRemover {
                 .take(500)
                 .toList()
 
-            fun logMaskSkip(bubbleNo: Int, reason: String) {
+            fun logMaskSkip(bubbleNo: Int, reason: String, bubble: WmBubble? = null) {
+                val key = bubble?.let { cleanResultKey(sourceUrl, it) } ?: "unknown"
+                bubble?.let {
+                    rememberBubbleCleanResult(sourceUrl, it, BubbleCleanResult(null, null, 0f, false, reason))
+                }
                 OcrDiag.log(
                     "MASK_DILATE",
-                    "bubble=$bubbleNo origArea=0 dilatedArea=0 increasePct=0.0 " +
+                    "bubble=$bubbleNo key=$key origArea=0 dilatedArea=0 increasePct=0.0 " +
                         "scope=mask kernel=3x3 iterations=1 bboxPad=$BBOX_DILATION_PX skipped=$reason"
                 )
                 OcrDiag.log(
+                    "CLEAN_FILL_ENTER",
+                    "bubble=$bubbleNo key=$key bboxArea=0 maskArea=0 fillMode=mask_only alpha=0.00 ringSamplePad=$BBOX_DILATION_PX"
+                )
+                OcrDiag.log(
+                    "CLEAN_FILL_DONE",
+                    "bubble=$bubbleNo key=$key bboxFilledPx=0 maskFilledPx=0 totalFilledPx=0 " +
+                        "bboxCoveragePct=0.00 maskCoveragePct=0.00 bboxArea=0 maskArea=0"
+                )
+                OcrDiag.log(
                     "CLEAN_FILL",
-                    "bubble=$bubbleNo maskArea=0 fillArea=0 appliedAlpha=0.00 reason=$reason"
+                    "bubble=$bubbleNo key=$key bboxArea=0 maskArea=0 fillArea=0 bboxFillArea=0 fillMode=mask_only appliedAlpha=0.00 reason=$reason"
                 )
                 OcrDiag.log(
                     "CLEAN_ASSERT",
-                    "bubble=$bubbleNo tier1_covers_mask=false maskArea=0 fillArea=0 reason=$reason"
+                    "bubble=$bubbleNo key=$key tier1_covers_mask=false maskArea=0 fillArea=0 reason=$reason"
                 )
             }
 
@@ -303,7 +366,7 @@ internal object WebModeTextRemover {
                 val bh = bubble.h * height
                 if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite()) {
                     OcrDiag.log("MASK_DILATE", "bubble=$bubbleNo origArea=0 dilatedArea=0 increasePct=0.0 scope=bbox pad=$BBOX_DILATION_PX reason=invalid_bbox")
-                    logMaskSkip(bubbleNo, "invalid_bbox")
+                    logMaskSkip(bubbleNo, "invalid_bbox", bubble)
                     continue
                 }
                 // Widen the OCR box before mask creation: OCR geometry often cuts antialiased letter edges.
@@ -328,7 +391,7 @@ internal object WebModeTextRemover {
                 val innerW = ox1 - ox0
                 val innerH = oy1 - oy0
                 if (innerW < 4 || innerH < 4 || innerW.toLong() * innerH.toLong() > 1_250_000L) {
-                    logMaskSkip(bubbleNo, "bbox_out_of_bounds")
+                    logMaskSkip(bubbleNo, "bbox_out_of_bounds", bubble)
                     continue
                 }
 
@@ -339,7 +402,7 @@ internal object WebModeTextRemover {
                 // Outline colour of fill+stroke lettering is ink too (otherwise a white edge would stay behind).
                 val fg3 = if (bubble.stroke != 0) opaque(bubble.stroke) else fg2
                 if (distance(bg, fg1) < 52 && distance(bg, fg2) < 52 && distance(bg, fg3) < 52) {
-                    logMaskSkip(bubbleNo, "foreground_background_low_contrast")
+                    logMaskSkip(bubbleNo, "foreground_background_low_contrast", bubble)
                     continue
                 }
 
@@ -356,7 +419,7 @@ internal object WebModeTextRemover {
                 val rh = y1 - y0
                 val regionSize = rw.toLong() * rh.toLong()
                 if (regionSize > 2_000_000L) {
-                    logMaskSkip(bubbleNo, "region_too_large")
+                    logMaskSkip(bubbleNo, "region_too_large", bubble)
                     continue
                 }
                 val regionCount = regionSize.toInt()
@@ -493,7 +556,7 @@ internal object WebModeTextRemover {
                             "bubble=$bubbleNo reason=text_bbox_fallback textPresent=true bboxPad=5 maskArea=$selectedCount mode=scan"
                         )
                     } else {
-                        logMaskSkip(bubbleNo, "mask_rejected")
+                        logMaskSkip(bubbleNo, "mask_rejected", bubble)
                         continue
                     }
                 }
@@ -559,6 +622,7 @@ internal object WebModeTextRemover {
                 val maskArea = mask.count { it.toInt() != 0 }
                 val bboxArea = innerArea.coerceAtLeast(1L)
                 val scriptLabel = scriptLabelForBubble(bubble.sourceText, sourceUrl, pageUrl)
+                val cleanKey = cleanResultKey(sourceUrl, bubble)
                 val maskPct = maskArea.toDouble() * 100.0 / bboxArea.toDouble()
                 var unmaskedCandidatePixels = 0
                 var unmaskedProtectedCandidatePixels = 0
@@ -570,17 +634,18 @@ internal object WebModeTextRemover {
                 }
                 val unmaskedCandidateThreshold = max(12, maskArea / 100)
                 val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0
-                // A flat speech bubble already receives a rounded-box fill. Only fail closed when the
-                // renderer would otherwise expose unmasked foreground-colour candidates (art/free-text path).
-                val bboxFillExpected = ghostFixCandidate || (!soft && !bubble.free)
+                // Keep the existing language gate and Japanese geometry. Non-Japanese speech bubbles get an
+                // explicitly verified full bbox fill; artwork/free-text still follows the conservative mask path.
+                val applyRoundedBox = ghostFixCandidate || (!soft && !bubble.free)
+                val bboxFillExpected = scriptLabel != "JAPANESE" && applyRoundedBox
                 val unmaskedCandidateLikelyInk = scriptLabel != "JAPANESE" &&
                     !bboxFillExpected && unmaskedCandidatePixels > unmaskedCandidateThreshold
                 OcrDiag.log(
                     "CLEAN_BBOX_AUDIT",
-                    "bubble=$bubbleNo script=$scriptLabel bboxArea=$bboxArea maskArea=$maskArea " +
+                    "bubble=$bubbleNo key=$cleanKey script=$scriptLabel bboxArea=$bboxArea maskArea=$maskArea " +
                         "unmaskedCandidatePixels=$unmaskedCandidatePixels " +
                         "protectedCandidates=$unmaskedProtectedCandidatePixels threshold=$unmaskedCandidateThreshold " +
-                        "bboxFillExpected=$bboxFillExpected scope=bbox residualMetric=mask_only " +
+                        "bboxFillExpected=$bboxFillExpected scope=bbox residualMetric=dual " +
                         "likelyInkOutsideMask=$unmaskedCandidateLikelyInk"
                 )
                 OcrDiag.log(
@@ -617,111 +682,177 @@ internal object WebModeTextRemover {
                 val tier1Start = android.os.SystemClock.elapsedRealtime()
                 val tier1Region = region.copyOf()
                 val fillPad = grow.coerceIn(1, 8)
-                var fillArea = 0
                 var bboxFillArea = 0
-                if (ghostFixCandidate || (!soft && !bubble.free)) {
-                    val coverPad = if (ghostFixCandidate) 3 else fillPad
-                    val coverL = (ix0 - coverPad).coerceAtLeast(0)
-                    val coverT = (iy0 - coverPad).coerceAtLeast(0)
-                    val coverR = (ix1 + coverPad).coerceAtMost(rw)
-                    val coverB = (iy1 + coverPad).coerceAtMost(rh)
-                    if (ghostFixCandidate) {
-                        // For Korean/Chinese/Latin text whose detected ink mask is tiny relative to its
-                        // OCR box, cover that dilated bbox. Japanese deliberately retains its old mask-only path.
-                        bboxFillArea = fillRoundedRect(
-                            tier1Region, rw, rh, coverL, coverT, coverR, coverB,
-                            paper, 1.0f, (fontPx * 0.18f).toInt().coerceIn(1, 12)
-                        )
-                    } else {
-                        bboxFillArea = fillRoundedRect(
-                            tier1Region, rw, rh, coverL, coverT, coverR, coverB,
-                            paper, tier1Alpha, (fontPx * 0.18f).toInt().coerceIn(1, 12)
-                        )
+                var bboxFilledPx = 0
+                var bboxFillExtraPx = 0
+                var maskFilledPx = 0
+                var maskPixelsCoveredByBbox = 0
+                val fillMode = if (applyRoundedBox) "rounded_bbox_plus_mask" else "mask_only"
+                val fillAlpha = if (bboxFillExpected) 1.0f else tier1Alpha
+                val coverPad = if (ghostFixCandidate) 3 else fillPad
+                val coverL = (ix0 - coverPad).coerceAtLeast(0)
+                val coverT = (iy0 - coverPad).coerceAtLeast(0)
+                val coverR = (ix1 + coverPad).coerceAtMost(rw)
+                val coverB = (iy1 + coverPad).coerceAtMost(rh)
+                val coverRadius = if (scriptLabel == "JAPANESE")
+                    (fontPx * 0.18f).toInt().coerceIn(1, 12) else 6
+                OcrDiag.log(
+                    "CLEAN_FILL_ENTER",
+                    "bubble=$bubbleNo key=$cleanKey bboxArea=$bboxArea maskArea=$maskArea " +
+                        "fillMode=$fillMode alpha=$fillAlpha ringSamplePad=${BBOX_DILATION_PX + ringSamplePad}"
+                )
+                if (applyRoundedBox) {
+                    bboxFillArea = fillRoundedRect(
+                        tier1Region, rw, rh, coverL, coverT, coverR, coverB,
+                        paper, fillAlpha, coverRadius
+                    )
+                    for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                        if (insideRoundedRect(rx, ry, coverL, coverT, coverR, coverB, coverRadius)) bboxFilledPx++
                     }
-                    // The rounded rectangle can clip glyph pixels at its corners. Explicitly cover every
-                    // binary-mask pixel with the same alpha so no selected text edge remains untouched.
+                }
+                var bboxFallbackApplied = false
+                if (bboxFillExpected && bboxArea > 0L && bboxFilledPx.toLong() < bboxArea) {
+                    for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                        if (insideRoundedRect(rx, ry, coverL, coverT, coverR, coverB, coverRadius)) continue
+                        val at = ry * rw + rx
+                        tier1Region[at] = blendPixel(region[at], paper, 1.0f)
+                        bboxFilledPx++
+                        bboxFillExtraPx++
+                    }
+                    bboxFallbackApplied = bboxFillExtraPx > 0
+                }
+                if (applyRoundedBox) {
                     for (at in mask.indices) {
                         if (mask[at].toInt() == 0) continue
-                        tier1Region[at] = blendPixel(region[at], paper, tier1Alpha)
-                        fillArea++
+                        val mx = at % rw
+                        val my = at / rw
+                        val inRoundFill = insideRoundedRect(mx, my, coverL, coverT, coverR, coverB, coverRadius)
+                        val inFallback = bboxFallbackApplied && mx in ix0 until ix1 && my in iy0 until iy1
+                        if (inRoundFill || inFallback) maskPixelsCoveredByBbox++
+                        tier1Region[at] = blendPixel(region[at], paper, fillAlpha)
+                        maskFilledPx++
                     }
                 } else {
-                    // On artwork/free lettering use the nearest unmasked ring as a lightweight local fill.
-                    // This preserves texture and avoids running the expensive directional interpolator twice.
+                    // On artwork/free lettering use only the text mask; preserve the surrounding illustration.
                     for (at in mask.indices) {
                         if (mask[at].toInt() == 0) continue
                         var predicted = neighbourMean(region, mask, at, rw) ?: paper
                         if (distance(region[at], predicted) < 12f) predicted = paper
                         tier1Region[at] = blendPixel(region[at], predicted, tier1Alpha)
-                        fillArea++
+                        maskFilledPx++
                     }
                 }
-                val tier1CoversMask = maskArea > 0 && fillArea >= maskArea
+                val bboxAreaPixels = bboxArea.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                val bboxCoveragePct = if (bboxAreaPixels <= 0) 0.0
+                    else bboxFilledPx.toDouble() * 100.0 / bboxAreaPixels.toDouble()
+                val maskCoveragePct = if (maskArea <= 0) 100.0
+                    else maskFilledPx.toDouble() * 100.0 / maskArea.toDouble()
+                val totalFilledPx = if (applyRoundedBox)
+                    (bboxFillArea + bboxFillExtraPx + maskFilledPx - maskPixelsCoveredByBbox).coerceAtLeast(0)
+                else maskFilledPx
+                val fillArea = totalFilledPx
+                val tier1CoversMask = maskArea > 0 && maskFilledPx >= maskArea
+                OcrDiag.log(
+                    "CLEAN_FILL_DONE",
+                    "bubble=$bubbleNo key=$cleanKey bboxFilledPx=$bboxFilledPx maskFilledPx=$maskFilledPx " +
+                        "totalFilledPx=$totalFilledPx bboxCoveragePct=${String.format(java.util.Locale.US, "%.2f", bboxCoveragePct)} " +
+                        "maskCoveragePct=${String.format(java.util.Locale.US, "%.2f", maskCoveragePct)} " +
+                        "bboxArea=$bboxArea maskArea=$maskArea fillMode=$fillMode"
+                )
+                if (bboxFillExpected && (bboxCoveragePct < 95.0 || fillArea.toLong() < bboxArea)) {
+                    OcrDiag.log(
+                        "CLEAN_FILL_VERIFY_FAIL",
+                        "bubble=$bubbleNo key=$cleanKey bboxArea=$bboxArea bboxFilledPx=$bboxFilledPx " +
+                            "fillArea=$fillArea bboxCoveragePct=${String.format(java.util.Locale.US, "%.2f", bboxCoveragePct)} " +
+                            "reason=${if (bboxCoveragePct < 95.0) "bbox_underfilled" else "total_fill_under_bbox_area"}"
+                    )
+                }
                 OcrDiag.log(
                     "CLEAN_FILL",
-                    "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea bboxFillArea=$bboxFillArea " +
-                        "fillMode=${if (bboxFillArea > 0) "rounded_bbox_plus_mask" else "mask_only"} " +
-                        "appliedAlpha=$tier1Alpha largeMask=$largeMask " +
+                    "bubble=$bubbleNo key=$cleanKey bboxArea=$bboxArea maskArea=$maskArea fillArea=$fillArea " +
+                        "bboxFillArea=$bboxFillArea bboxFilledPx=$bboxFilledPx " +
+                        "bboxCoveragePct=${String.format(java.util.Locale.US, "%.2f", bboxCoveragePct)} " +
+                        "fillMode=$fillMode appliedAlpha=$fillAlpha largeMask=$largeMask " +
                         "ringSamplePad=${BBOX_DILATION_PX + ringSamplePad}"
                 )
                 OcrDiag.log(
                     "CLEAN_ASSERT",
-                    "bubble=$bubbleNo tier1_covers_mask=$tier1CoversMask maskArea=$maskArea fillArea=$fillArea"
+                    "bubble=$bubbleNo key=$cleanKey tier1_covers_mask=$tier1CoversMask maskArea=$maskArea " +
+                        "fillArea=$fillArea bboxArea=$bboxArea bboxCoveragePct=${String.format(java.util.Locale.US, "%.2f", bboxCoveragePct)}"
                 )
-                val residual1 = residualEnergy(tier1Region, mask, paper, soft, rw, baseline = region)
+                val residual1Mask = residualEnergy(tier1Region, mask, paper, soft, rw, baseline = region)
+                val residual1Bbox = residualEnergyBox(
+                    tier1Region, ix0, iy0, ix1, iy1, mask, paper, soft, rw, baseline = region
+                )
+                val residual1 = if (scriptLabel == "JAPANESE") residual1Mask else residual1Bbox
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
-                    "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                    "bubble=$bubbleNo key=$cleanKey tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1Bbox)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} scope=bbox metric=normalized_0_100"
+                )
+                OcrDiag.log(
+                    "CLEAN_RESIDUAL",
+                    "bubble=$bubbleNo key=$cleanKey tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1Mask)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} scope=mask metric=normalized_0_100"
                 )
-                if (realtimeMode) {
-                    // Visible realtime is the fast product: persist Tier 1 only. Do not start OpenCV or MI-GAN
-                    // while the reader waits; scanning still uses the full tiered path.
-                    bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
-                    tier1Count++
-                    panelResidualMax = max(panelResidualMax, residual1)
-                    OcrDiag.log(
-                        "CLEAN_TIER",
-                        "bubble=$bubbleNo tier=1 realtime=true ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$tier1Alpha"
-                    )
-                    if (residual1 <= TIER2_RESIDUAL_THRESHOLD && !unmaskedCandidateLikelyInk) {
-                        totalRemoved += selectedCount
-                        erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
-                    } else if (unmaskedCandidateLikelyInk) {
-                        OcrDiag.log(
-                            "CLEAN_WARN",
-                            "bubble=$bubbleNo reason=ink_candidates_outside_mask " +
-                                "unmaskedCandidatePixels=$unmaskedCandidatePixels threshold=$unmaskedCandidateThreshold " +
-                                "action=retain_opaque_cover"
-                        )
-                    }
-                    OcrDiag.log(
-                        "BUBBLE_CLEAN_VERIFY",
-                        "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
-                            "finalAlpha=$tier1Alpha extraPass=false reason=realtime_tier1_only"
-                    )
-                    continue
-                }
-                if (residual1 <= TIER2_RESIDUAL_THRESHOLD && !largeMask) {
+                if (realtimeMode && residual1 < TIER2_RESIDUAL_THRESHOLD &&
+                    !unmaskedCandidateLikelyInk && (!bboxFillExpected || bboxCoveragePct >= 95.0)) {
                     bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
                     totalRemoved += selectedCount
                     tier1Count++
                     panelResidualMax = max(panelResidualMax, residual1)
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                    rememberBubbleCleanResult(
+                        sourceUrl, bubble,
+                        BubbleCleanResult(residual1Mask, residual1Bbox, bboxCoveragePct.toFloat(), true, "tier1_residual_under_5")
+                    )
                     OcrDiag.log(
                         "CLEAN_TIER",
-                        "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$tier1Alpha"
+                        "bubble=$bubbleNo key=$cleanKey tier=1 realtime=true ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$fillAlpha"
                     )
                     OcrDiag.log(
                         "BUBBLE_CLEAN_VERIFY",
-                        "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
-                            "finalAlpha=$tier1Alpha extraPass=false reason=residual_under_5"
+                        "bubble=$bubbleNo key=$cleanKey residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                            "residualBbox=${String.format(java.util.Locale.US, "%.2f", residual1Bbox)} " +
+                            "residualMask=${String.format(java.util.Locale.US, "%.2f", residual1Mask)} cleaned=true " +
+                            "bboxCoveragePct=${String.format(java.util.Locale.US, "%.2f", bboxCoveragePct)} extraPass=false"
+                    )
+                    continue
+                }
+                if (realtimeMode && residual1 >= TIER2_RESIDUAL_THRESHOLD) {
+                    OcrDiag.log(
+                        "CLEAN_ESCALATE",
+                        "bubble=$bubbleNo key=$cleanKey tierFrom=1 tierTo=2 residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                            "reason=full_bbox_residual_gt_5 realtime=true"
+                    )
+                }
+                if (residual1 < TIER2_RESIDUAL_THRESHOLD && !largeMask && !unmaskedCandidateLikelyInk &&
+                    (!bboxFillExpected || bboxCoveragePct >= 95.0)) {
+                    bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
+                    totalRemoved += selectedCount
+                    tier1Count++
+                    panelResidualMax = max(panelResidualMax, residual1)
+                    erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                    rememberBubbleCleanResult(
+                        sourceUrl, bubble,
+                        BubbleCleanResult(residual1Mask, residual1Bbox, bboxCoveragePct.toFloat(), true, "tier1_residual_under_5")
+                    )
+                    OcrDiag.log(
+                        "CLEAN_TIER",
+                        "bubble=$bubbleNo key=$cleanKey tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$fillAlpha"
+                    )
+                    OcrDiag.log(
+                        "BUBBLE_CLEAN_VERIFY",
+                        "bubble=$bubbleNo key=$cleanKey residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                            "residualBbox=${String.format(java.util.Locale.US, "%.2f", residual1Bbox)} " +
+                            "residualMask=${String.format(java.util.Locale.US, "%.2f", residual1Mask)} cleaned=true " +
+                            "bboxCoveragePct=${String.format(java.util.Locale.US, "%.2f", bboxCoveragePct)} extraPass=false reason=residual_under_5"
                     )
                     continue
                 }
                 OcrDiag.log(
                     "CLEAN_ESCALATE",
-                    "bubble=$bubbleNo tierFrom=1 tierTo=2 residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                    "bubble=$bubbleNo key=$cleanKey tierFrom=1 tierTo=2 residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)}"
                 )
                 // Tier 2 starts from Tier 1 output. Large masks use 200px tiles with 20px overlap
@@ -785,36 +916,47 @@ internal object WebModeTextRemover {
                 }
                 tier2Count++
                 val tier2Ms = android.os.SystemClock.elapsedRealtime() - tier2Start
-                val tier2CandidateResidual = residualEnergy(out, mask, paper, soft, rw, baseline = region)
+                val tier2MaskResidual = residualEnergy(out, mask, paper, soft, rw, baseline = region)
+                val tier2BboxResidual = residualEnergyBox(out, ix0, iy0, ix1, iy1, mask, paper, soft, rw, baseline = region)
+                val tier2CandidateResidual = if (scriptLabel == "JAPANESE") tier2MaskResidual else tier2BboxResidual
                 OcrDiag.log(
                     "CLEAN_TIER",
-                    "bubble=$bubbleNo tier=2 ms=$tier2Ms reason=tier1_incomplete alpha=$TIER2_FILL_ALPHA"
+                    "bubble=$bubbleNo key=$cleanKey tier=2 ms=$tier2Ms reason=tier1_incomplete alpha=$TIER2_FILL_ALPHA"
                 )
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
-                    "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", tier2CandidateResidual)} " +
+                    "bubble=$bubbleNo key=$cleanKey tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", tier2BboxResidual)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)} scope=bbox metric=normalized_0_100"
+                )
+                OcrDiag.log(
+                    "CLEAN_RESIDUAL",
+                    "bubble=$bubbleNo key=$cleanKey tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", tier2MaskResidual)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)} scope=mask metric=normalized_0_100"
                 )
                 var residualFinal = tier2CandidateResidual
+                var residualMaskFinal = tier2MaskResidual
+                var residualBboxFinal = tier2BboxResidual
                 if (tier2CandidateResidual > residual1 * 1.1f) {
                     OcrDiag.log(
                         "CLEAN_ROLLBACK",
-                        "bubble=$bubbleNo tier=2 keptTier1=true " +
+                        "bubble=$bubbleNo key=$cleanKey tier=2 keptTier1=true " +
                             "residualBefore=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
                             "residualAfter=${String.format(java.util.Locale.US, "%.2f", tier2CandidateResidual)}"
                     )
                     out = tier1Region.copyOf()
                     residualFinal = residual1
+                    residualMaskFinal = residual1Mask
+                    residualBboxFinal = residual1Bbox
                 }
                 val tier2Residual = residualFinal
                 // Snapshot the best accepted result at the end of Tier 2; Tier 3 can only replace it if better.
                 val tier2BestOut = out.copyOf()
 
                 // A 512x512 MI-GAN context cannot safely repair the largest text masks; tiled Tier 2 is the fallback.
-                if (residualFinal > TIER3_RESIDUAL_THRESHOLD) {
+                if (residualFinal >= TIER3_RESIDUAL_THRESHOLD) {
                     OcrDiag.log(
                         "CLEAN_ESCALATE",
-                        "bubble=$bubbleNo tierFrom=2 tierTo=3 residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                        "bubble=$bubbleNo key=$cleanKey tierFrom=2 tierTo=3 residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
                             "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)}"
                     )
                     if (largeMask && maskArea > MIGAN_MAX_MASK_AREA) {
@@ -875,36 +1017,49 @@ internal object WebModeTextRemover {
                                         tier3Candidate[at] = blendPixel(out[at], aiFill[at], TIER3_FILL_ALPHA)
                                     }
                                 }
-                                val tier3CandidateResidual = residualEnergy(
+                                val tier3MaskResidual = residualEnergy(
                                     tier3Candidate, mask, paper, soft, rw, baseline = region
                                 )
+                                val tier3BboxResidual = residualEnergyBox(
+                                    tier3Candidate, ix0, iy0, ix1, iy1, mask, paper, soft, rw, baseline = region
+                                )
+                                val tier3CandidateResidual = if (scriptLabel == "JAPANESE") tier3MaskResidual else tier3BboxResidual
                                 OcrDiag.log(
                                     "CLEAN_TIER",
-                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
+                                    "bubble=$bubbleNo key=$cleanKey tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
                                         "reason=tier2_residual conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}"
                                 )
                                 OcrDiag.log(
                                     "CLEAN_RESIDUAL",
-                                    "bubble=$bubbleNo tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)} " +
+                                    "bubble=$bubbleNo key=$cleanKey tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3BboxResidual)} " +
+                                        "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} scope=bbox metric=normalized_0_100"
+                                )
+                                OcrDiag.log(
+                                    "CLEAN_RESIDUAL",
+                                    "bubble=$bubbleNo key=$cleanKey tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3MaskResidual)} " +
                                         "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} scope=mask metric=normalized_0_100"
                                 )
                                 if (tier3CandidateResidual > tier2Residual) {
                                     OcrDiag.log(
                                         "CLEAN_ROLLBACK",
-                                        "bubble=$bubbleNo tier=3 keptTier2=true " +
+                                        "bubble=$bubbleNo key=$cleanKey tier=3 keptTier2=true " +
                                             "residualBefore=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} " +
                                             "residualAfter=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)}"
                                     )
                                     out = tier2BestOut.copyOf()
                                     residualFinal = tier2Residual
+                                    residualMaskFinal = tier2MaskResidual
+                                    residualBboxFinal = tier2BboxResidual
                                 } else {
                                     out = tier3Candidate
                                     residualFinal = tier3CandidateResidual
+                                    residualMaskFinal = tier3MaskResidual
+                                    residualBboxFinal = tier3BboxResidual
                                 }
                             } else {
                                 OcrDiag.log(
                                     "CLEAN_TIER",
-                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
+                                    "bubble=$bubbleNo key=$cleanKey tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
                                 )
                                 OcrDiag.log("CLEAN", "migan_unavailable reason=initialization_or_inference_failed tier3_skipped")
                                 OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
@@ -921,12 +1076,16 @@ internal object WebModeTextRemover {
                     }
                     OcrDiag.log(
                         "CLEAN_RESIDUAL",
-                        "bubble=$bubbleNo tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} scope=mask metric=normalized_0_100"
+                        "bubble=$bubbleNo key=$cleanKey tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualBboxFinal)} scope=bbox metric=normalized_0_100"
+                    )
+                    OcrDiag.log(
+                        "CLEAN_RESIDUAL",
+                        "bubble=$bubbleNo key=$cleanKey tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualMaskFinal)} scope=mask metric=normalized_0_100"
                     )
                 }
                 // One extra pass is permitted only for flat dialogue bubbles. Sound effects/free lettering
                 // must preserve the original illustration, so their masks are never expanded with a solid rectangle.
-                if (residualFinal > TIER2_RESIDUAL_THRESHOLD && !soft && !bubble.free) {
+                if (residualFinal >= TIER2_RESIDUAL_THRESHOLD && !soft && !bubble.free) {
                     val verifyMask = mask.copyOf()
                     for (ry in 0 until rh) for (rx in 0 until rw) {
                         val at = ry * rw + rx
@@ -946,19 +1105,27 @@ internal object WebModeTextRemover {
                             verifyOut[at] = blendPixel(verifyOut[at], paper, 1.0f)
                         }
                     }
-                    val verifyResidual = residualEnergy(verifyOut, mask, paper, soft, rw, baseline = region)
+                    val verifyResidualMask = residualEnergy(verifyOut, mask, paper, soft, rw, baseline = region)
+                    val verifyResidualBbox = residualEnergyBox(verifyOut, ix0, iy0, ix1, iy1, mask, paper, soft, rw, baseline = region)
+                    val verifyResidual = if (scriptLabel == "JAPANESE") verifyResidualMask else verifyResidualBbox
                     if (verifyResidual < residualFinal) {
                         out = verifyOut
                         residualFinal = verifyResidual
+                        residualMaskFinal = verifyResidualMask
+                        residualBboxFinal = verifyResidualBbox
                         OcrDiag.log(
                             "BUBBLE_CLEAN_VERIFY",
-                            "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                            "bubble=$bubbleNo key=$cleanKey residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                                "residualBbox=${String.format(java.util.Locale.US, "%.2f", residualBboxFinal)} " +
+                                "residualMask=${String.format(java.util.Locale.US, "%.2f", residualMaskFinal)} " +
                                 "finalAlpha=1.0 extraPass=true accepted=true dilatePx=2"
                         )
                     } else {
                         OcrDiag.log(
                             "BUBBLE_CLEAN_VERIFY",
-                            "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                            "bubble=$bubbleNo key=$cleanKey residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                                "residualBbox=${String.format(java.util.Locale.US, "%.2f", residualBboxFinal)} " +
+                                "residualMask=${String.format(java.util.Locale.US, "%.2f", residualMaskFinal)} " +
                                 "finalAlpha=1.0 extraPass=true accepted=false candidate=${String.format(java.util.Locale.US, "%.2f", verifyResidual)} dilatePx=2"
                         )
                     }
@@ -973,32 +1140,49 @@ internal object WebModeTextRemover {
                 panelResidualMax = max(panelResidualMax, residualFinal)
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
-                    "bubble=$bubbleNo tier=final residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                    "bubble=$bubbleNo key=$cleanKey tier=final residual_max=${String.format(java.util.Locale.US, "%.2f", residualBboxFinal)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} scope=bbox metric=normalized_0_100"
+                )
+                OcrDiag.log(
+                    "CLEAN_RESIDUAL",
+                    "bubble=$bubbleNo key=$cleanKey tier=final residual_max=${String.format(java.util.Locale.US, "%.2f", residualMaskFinal)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} scope=mask metric=normalized_0_100"
                 )
                 val largeMaskAccepted = largeMask && residualFinal < 20f
                 val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= CLEAN_FAILED_RESIDUAL_THRESHOLD
                 if (largeMaskAccepted) acceptedLargeMask = true
                 if (bubbleHardFailure) panelHardFailure = true
-                if (residualFinal > TIER2_RESIDUAL_THRESHOLD) {
+                val resultCleaned = residualFinal < TIER2_RESIDUAL_THRESHOLD &&
+                    (!bboxFillExpected || (bboxCoveragePct >= 95.0 && fillArea.toLong() >= bboxArea)) &&
+                    !unmaskedCandidateLikelyInk
+                val resultReason = when {
+                    unmaskedCandidateLikelyInk -> "ink_candidates_outside_mask"
+                    bboxFillExpected && bboxCoveragePct < 95.0 -> "bbox_underfilled"
+                    resultCleaned -> "residual_under_5"
+                    else -> "residual_gt_5"
+                }
+                rememberBubbleCleanResult(
+                    sourceUrl, bubble,
+                    BubbleCleanResult(residualMaskFinal, residualBboxFinal, bboxCoveragePct.toFloat(), resultCleaned, resultReason)
+                )
+                if (residualFinal >= TIER2_RESIDUAL_THRESHOLD) {
                     OcrDiag.log(
                         "CLEAN_WARN",
-                        "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                        "bubble=$bubbleNo key=$cleanKey residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                            "residualBbox=${String.format(java.util.Locale.US, "%.2f", residualBboxFinal)} " +
                             "reason=ghost_likely failed=$bubbleHardFailure maskArea=$maskArea " +
-                            "note=${if (largeMaskAccepted) "best_effort_large_mask" else if (largeMask) "large_mask_residual_high" else "normal_mask"}"
+                            "note=${if (largeMaskAccepted) "best_effort_large_mask_not_clean" else if (largeMask) "large_mask_residual_high" else "normal_mask"}"
                     )
                 }
                 bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                // A large mask below residual 20 is accepted as best-effort; do not restore the original text
-                // merely because realistic artwork residuals cannot reach the flat-bubble <5% target.
-                if ((residualFinal <= TIER2_RESIDUAL_THRESHOLD || largeMaskAccepted) &&
-                    !unmaskedCandidateLikelyInk) {
+                // Best-effort pixels may be cached for the opaque-cover fallback, but are never called clean.
+                if (resultCleaned) {
                     totalRemoved += selectedCount
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
                 } else if (unmaskedCandidateLikelyInk) {
                     OcrDiag.log(
                         "CLEAN_WARN",
-                        "bubble=$bubbleNo reason=ink_candidates_outside_mask " +
+                        "bubble=$bubbleNo key=$cleanKey reason=ink_candidates_outside_mask " +
                             "unmaskedCandidatePixels=$unmaskedCandidatePixels threshold=$unmaskedCandidateThreshold " +
                             "action=retain_opaque_cover"
                     )
@@ -1051,14 +1235,31 @@ internal object WebModeTextRemover {
             // size-bounded inline data URL so the writer can show the locally cleaned pixels without retaining large
             // pages in memory. Oversized items use the small OCR-box cover instead of a false "cleaned" success.
             if (sourceUrl.startsWith("ns-canvas:", true) || sourceUrl.startsWith("blob:", true)) {
+                val requiredBubbles = boundedBubbles.filter { it.sourceText.isNotBlank() && it.w > 0f && it.h > 0f }
+                val cleanCount = requiredBubbles.count { bubbleCleanResults[bubbleResultStorageKey(sourceUrl, it)]?.cleaned == true }
+                val allBubblesClean = requiredBubbles.isNotEmpty() && cleanCount == requiredBubbles.size
+                OcrDiag.log(
+                    "CLEAN_PANEL_VERIFY",
+                    "sourceKey=${Integer.toHexString(sourceKey.hashCode())} bubbles=${requiredBubbles.size} " +
+                        "cleanedBubbles=$cleanCount unresolved=${requiredBubbles.size - cleanCount} " +
+                        "stored=true cleaned=$allBubblesClean"
+                )
                 val stored = WebModeTextRemovalCache.storeInlineCleanedBytes(sourceUrl, cleaned, mime)
                 if (!stored) return false
                 WebModeTextRemovalCache.setErased(sourceUrl, erased)
-                return true
+                return allBubblesClean
             }
+            val requiredBubbles = boundedBubbles.filter { it.sourceText.isNotBlank() && it.w > 0f && it.h > 0f }
+            val cleanCount = requiredBubbles.count { bubbleCleanResults[bubbleResultStorageKey(sourceUrl, it)]?.cleaned == true }
+            val allBubblesClean = requiredBubbles.isNotEmpty() && cleanCount == requiredBubbles.size
+            OcrDiag.log(
+                "CLEAN_PANEL_VERIFY",
+                "sourceKey=${Integer.toHexString(sourceKey.hashCode())} bubbles=${requiredBubbles.size} " +
+                    "cleanedBubbles=$cleanCount unresolved=${requiredBubbles.size - cleanCount} stored=true cleaned=$allBubblesClean"
+            )
             val stored = WebModeTextRemovalCache.store(context, sourceUrl, cleaned, mime)
             if (stored) WebModeTextRemovalCache.setErased(sourceUrl, erased)
-            return stored
+            return stored && allBubblesClean
         } catch (_: OutOfMemoryError) {
             return false
         } catch (_: Exception) {
@@ -1070,7 +1271,9 @@ internal object WebModeTextRemover {
                 "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count aiExecutionAllowed=$allowAi " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
-                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} residual_scope=mask metric=normalized_0_100 failedMaskArea>$MIGAN_MAX_MASK_AREA failedResidual>=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
+                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} " +
+                        "residual_scope=decision_bbox_except_japanese metric=normalized_0_100 " +
+                        "failedMaskArea>$MIGAN_MAX_MASK_AREA failedResidual>=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
             )
             val releasedKb = bitmap.byteCount / 1024L
             bitmap.recycle()
@@ -1102,6 +1305,24 @@ internal object WebModeTextRemover {
         val bs = IntArray(samples.size) { blue(samples[it]) }.also { it.sort() }
         val mid = samples.size / 2
         return 0xFF000000.toInt() or (rs[mid] shl 16) or (gs[mid] shl 8) or bs[mid]
+    }
+
+    private fun insideRoundedRect(
+        x: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, radius: Int
+    ): Boolean {
+        if (x < x0 || x >= x1 || y < y0 || y >= y1 || x1 <= x0 || y1 <= y0) return false
+        val r = radius.coerceIn(0, min((x1 - x0) / 2, (y1 - y0) / 2))
+        val dx = when {
+            x < x0 + r -> (x0 + r - x).toFloat()
+            x >= x1 - r -> (x - (x1 - r - 1)).toFloat()
+            else -> 0f
+        }
+        val dy = when {
+            y < y0 + r -> (y0 + r - y).toFloat()
+            y >= y1 - r -> (y - (y1 - r - 1)).toFloat()
+            else -> 0f
+        }
+        return !(dx > 0f && dy > 0f && dx * dx + dy * dy > r * r)
     }
 
     private fun fillRoundedRect(
@@ -1136,6 +1357,43 @@ internal object WebModeTextRemover {
             }
         }
         return paintedPixels
+    }
+
+    /**
+     * Residual over the complete OCR/bubble bbox. This checks unchanged pixels outside the text mask too.
+     */
+    private fun residualEnergyBox(
+        candidate: IntArray,
+        x0: Int,
+        y0: Int,
+        x1: Int,
+        y1: Int,
+        referenceMask: ByteArray,
+        background: Int,
+        soft: Boolean,
+        width: Int,
+        baseline: IntArray
+    ): Float {
+        if (width <= 0 || x1 <= x0 || y1 <= y0) return 100f
+        var remainingEnergy = 0.0
+        var originalEnergy = 0.0
+        val height = baseline.size / width
+        for (y in y0.coerceAtLeast(0) until y1.coerceAtMost(height)) {
+            for (x in x0.coerceAtLeast(0) until x1.coerceAtMost(width)) {
+                val at = y * width + x
+                val sourcePixel = baseline[at]
+                val sample = if (soft) neighbourMean(baseline, referenceMask, at, width) else null
+                val reference = sample ?: background
+                remainingEnergy += (abs(red(candidate[at]) - red(reference)) +
+                    abs(green(candidate[at]) - green(reference)) +
+                    abs(blue(candidate[at]) - blue(reference))) / 3.0
+                originalEnergy += (abs(red(sourcePixel) - red(reference)) +
+                    abs(green(sourcePixel) - green(reference)) +
+                    abs(blue(sourcePixel) - blue(reference))) / 3.0
+            }
+        }
+        if (originalEnergy <= 0.0) return 0f
+        return ((remainingEnergy / originalEnergy) * 100.0).coerceIn(0.0, 100.0).toFloat()
     }
 
     /**
