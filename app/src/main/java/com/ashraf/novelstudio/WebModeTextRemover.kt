@@ -49,7 +49,9 @@ internal object WebModeTextRemover {
         encoded: ByteArray,
         bubbles: List<WmBubble>,
         allowAi: Boolean = true,
-        realtimeMode: Boolean = false
+        realtimeMode: Boolean = false,
+        prefetchMode: Boolean = false,
+        panelNo: Int = -1
     ): Boolean {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         var acquired = false
@@ -60,7 +62,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log("MEM_GUARD", "clean_skipped_concurrency activeLimit=2 waitMs=1000")
                 return false
             }
-            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode)
+            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo)
         } finally {
             if (acquired) cleanSemaphore.release()
             cleanDurationMs.set(android.os.SystemClock.elapsedRealtime() - startedAt)
@@ -73,7 +75,9 @@ internal object WebModeTextRemover {
         encoded: ByteArray,
         bubbles: List<WmBubble>,
         allowAi: Boolean,
-        realtimeMode: Boolean
+        realtimeMode: Boolean,
+        prefetchMode: Boolean,
+        panelNo: Int
     ): Boolean {
         lastResidualMax = 0f
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
@@ -123,8 +127,12 @@ internal object WebModeTextRemover {
         var panelResidualMax = 0f
         try {
             var totalRemoved = 0
-            // Full scans may run MI-GAN on each hard bubble; realtime keeps a strict three-call budget.
-            var aiBudget = if (realtimeMode) 3 else Int.MAX_VALUE
+            // Prefetch has a per-panel limit of two calls; realtime keeps three; thorough scan is capped globally.
+            var aiBudget = when {
+                prefetchMode -> 2
+                realtimeMode -> 3
+                else -> Int.MAX_VALUE
+            }
             val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
             val aiModelReady = WebModeInpainter.isReady(context)
             val aiCoolingDown = WebModeInpainter.tooSlow
@@ -140,7 +148,7 @@ internal object WebModeTextRemover {
             }
             OcrDiag.log(
                 "MIGAN_STATUS",
-                "loaded=$aiLoadedAtStart reason=$miganStatusReason mode=${if (realtimeMode) "realtime" else "scan"}"
+                "loaded=$aiLoadedAtStart reason=$miganStatusReason mode=${when { prefetchMode -> "prefetch"; realtimeMode -> "realtime"; else -> "scan" }}"
             )
             // Scan mode may load lazily if a hard bubble needs Tier 3. Realtime only warms in background.
             val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown &&
@@ -402,6 +410,8 @@ internal object WebModeTextRemover {
                 val tier1Start = android.os.SystemClock.elapsedRealtime()
                 val tier1Region = region.copyOf()
                 val fillPad = grow.coerceIn(1, 8)
+                val maskArea = mask.count { it.toInt() != 0 }
+                var fillArea = 0
                 if (!soft && !bubble.free) {
                     fillRoundedRect(
                         tier1Region, rw, rh,
@@ -409,14 +419,47 @@ internal object WebModeTextRemover {
                         (ix1 + fillPad).coerceAtMost(rw), (iy1 + fillPad).coerceAtMost(rh),
                         paper, TIER1_FILL_ALPHA, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                     )
+                    // The rounded rectangle can clip glyph pixels at its corners. Explicitly cover every
+                    // binary-mask pixel with the same alpha so no selected text edge remains untouched.
+                    for (at in mask.indices) {
+                        if (mask[at].toInt() == 0) continue
+                        tier1Region[at] = blendPixel(region[at], paper, TIER1_FILL_ALPHA)
+                        fillArea++
+                    }
+                } else {
+                    // On artwork/free lettering preserve local texture: predict a fill for each mask pixel,
+                    // then blend it fully and uniformly instead of leaving Tier 1 as a no-op.
+                    for (ry in 0 until rh) for (rx in 0 until rw) {
+                        val at = ry * rw + rx
+                        if (mask[at].toInt() == 0) continue
+                        var predicted = gradientFill(
+                            region, mask, rw, rh, rx, ry,
+                            (fontPx * 1.6f).toInt().coerceIn(8, 60), bg
+                        )
+                        if (distance(region[at], predicted) < 18f) {
+                            predicted = neighbourMean(region, mask, at, rw) ?: paper
+                        }
+                        if (distance(region[at], predicted) < 12f) predicted = paper
+                        tier1Region[at] = blendPixel(region[at], predicted, TIER1_FILL_ALPHA)
+                        fillArea++
+                    }
                 }
+                val tier1CoversMask = maskArea > 0 && fillArea >= maskArea
+                OcrDiag.log(
+                    "CLEAN_FILL",
+                    "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea appliedAlpha=$TIER1_FILL_ALPHA"
+                )
+                OcrDiag.log(
+                    "CLEAN_ASSERT",
+                    "bubble=$bubbleNo tier1_covers_mask=$tier1CoversMask maskArea=$maskArea fillArea=$fillArea"
+                )
                 val residual1 = residualEnergy(tier1Region, mask, paper, soft, rw, baseline = region)
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
                     "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
                 )
-                if (!soft && !bubble.free && residual1 <= TIER2_RESIDUAL_THRESHOLD) {
+                if (residual1 <= TIER2_RESIDUAL_THRESHOLD) {
                     bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
                     totalRemoved += selectedCount
                     tier1Count++
@@ -439,10 +482,11 @@ internal object WebModeTextRemover {
                 val tier2Start = android.os.SystemClock.elapsedRealtime()
                 val cvConfidence = if (!soft) 0.82f
                     else if (estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1) != null) 0.78f else 0.42f
-                val cvOut = openCvInpaint(region, rw, rh, mask)
-                val out = cvOut ?: region.copyOf()
+                // IMPORTANT: Tier 2 must receive Tier 1's edited pixels, never the original text bitmap.
+                val cvOut = openCvInpaint(tier1Region, rw, rh, mask)
+                var out = cvOut ?: tier1Region.copyOf()
                 val tele = if (cvOut == null && soft) onionFill(
-                    region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
+                    tier1Region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
                 ) else null
                 for (ry in 0 until rh) {
                     for (rx in 0 until rw) {
@@ -455,7 +499,7 @@ internal object WebModeTextRemover {
                         if (soft) {
                             out[at] = if (tele != null) (0xFF000000.toInt() or (tele[at] and 0xFFFFFF))
                                 else 0xFF000000.toInt() or
-                                    gradientFill(region, mask, rw, rh, rx, ry, (fontPx * 1.6f).toInt().coerceIn(8, 60), bg)
+                                    gradientFill(tier1Region, mask, rw, rh, rx, ry, (fontPx * 1.6f).toInt().coerceIn(8, 60), bg)
                             continue
                         }
                         var sampleN = 0
@@ -468,7 +512,7 @@ internal object WebModeTextRemover {
                                 if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue
                                 val ni = ny * rw + nx
                                 if (mask[ni].toInt() != 0) continue
-                                val p = region[ni]
+                                val p = tier1Region[ni]
                                 if (distance(p, paper) > 72f) continue
                                 sumR += red(p); sumG += green(p); sumB += blue(p); sampleN++
                             }
@@ -480,20 +524,34 @@ internal object WebModeTextRemover {
                     }
                 }
                 for (at in mask.indices) {
-                    if (mask[at].toInt() != 0) out[at] = blendPixel(region[at], out[at], TIER2_FILL_ALPHA)
+                    if (mask[at].toInt() != 0) out[at] = blendPixel(tier1Region[at], out[at], TIER2_FILL_ALPHA)
                 }
                 tier2Count++
                 val tier2Ms = android.os.SystemClock.elapsedRealtime() - tier2Start
-                var residualFinal = residualEnergy(out, mask, paper, soft, rw, baseline = region)
+                val tier2CandidateResidual = residualEnergy(out, mask, paper, soft, rw, baseline = region)
                 OcrDiag.log(
                     "CLEAN_TIER",
                     "bubble=$bubbleNo tier=2 ms=$tier2Ms reason=tier1_incomplete alpha=$TIER2_FILL_ALPHA"
                 )
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
-                    "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                    "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", tier2CandidateResidual)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
                 )
+                var residualFinal = tier2CandidateResidual
+                if (tier2CandidateResidual > residual1 * 1.1f) {
+                    OcrDiag.log(
+                        "CLEAN_ROLLBACK",
+                        "bubble=$bubbleNo tier=2 keptTier1=true " +
+                            "residualBefore=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                            "residualAfter=${String.format(java.util.Locale.US, "%.2f", tier2CandidateResidual)}"
+                    )
+                    out = tier1Region.copyOf()
+                    residualFinal = residual1
+                }
+                val tier2Residual = residualFinal
+                // Snapshot the best accepted result at the end of Tier 2; Tier 3 can only replace it if better.
+                val tier2BestOut = out.copyOf()
 
                 // Tier 3 uses residual only (not CV confidence). Scans have no bubble cap; realtime keeps three calls.
                 if (residualFinal > TIER3_RESIDUAL_THRESHOLD) {
@@ -517,6 +575,14 @@ internal object WebModeTextRemover {
                             realtimeMode && !WebModeInpainter.isLoaded() -> "not_loaded_realtime"
                             else -> miganStatusReason
                         }
+                        if (prefetchMode) {
+                            val prefetchReason = when {
+                                !aiWanted -> reason
+                                aiBudget <= 0 -> "panel_budget_exhausted"
+                                else -> reason
+                            }
+                            OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=$prefetchReason")
+                        }
                         OcrDiag.log("CLEAN", "migan_unavailable reason=$reason tier3_skipped")
                     } else {
                         val heap = Runtime.getRuntime()
@@ -526,41 +592,78 @@ internal object WebModeTextRemover {
                             OcrDiag.log("CLEAN", "migan_unavailable reason=low_heap tier3_skipped")
                             WebModeInpainter.releaseRuntimeForMemoryPressure()
                         } else {
-                            val t3Start = android.os.SystemClock.elapsedRealtime()
-                            aiBudget--
-                            aiCallsAttempted++
-                            tier3Count++
-                            val aiFill = try {
-                                WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask)
-                            } catch (_: Throwable) { null }
-                            aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
-                            aiTotalMs += aiLastMs
-                            if (aiFill != null) {
-                                aiCallsSucceeded++
-                                for (at in mask.indices) {
-                                    if (mask[at].toInt() != 0 && aiFill[at] != 0) {
-                                        out[at] = blendPixel(region[at], aiFill[at], TIER3_FILL_ALPHA)
-                                    }
-                                }
-                                residualFinal = residualEnergy(out, mask, paper, soft, rw, baseline = region)
-                                OcrDiag.log(
-                                    "CLEAN_TIER",
-                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
-                                        "reason=tier2_residual conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}"
-                                )
-                            } else {
-                                OcrDiag.log(
-                                    "CLEAN_TIER",
-                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
-                                )
-                                OcrDiag.log("CLEAN", "migan_unavailable reason=initialization_or_inference_failed tier3_skipped")
-                                OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
-                            }
-                            val afterHeap = Runtime.getRuntime()
-                            val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
-                            if (afterFreeMb < 30L) {
-                                OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
+                            val heap = Runtime.getRuntime()
+                            val freeHeapMb = (heap.maxMemory() - (heap.totalMemory() - heap.freeMemory())) / 1_048_576L
+                            if (freeHeapMb < 30L) {
+                                OcrDiag.log("MEM_GUARD", "migan_skipped_oom bubble=$bubbleNo freeHeapMB=$freeHeapMb")
+                                OcrDiag.log("CLEAN", "migan_unavailable reason=low_heap tier3_skipped")
+                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=low_heap")
                                 WebModeInpainter.releaseRuntimeForMemoryPressure()
+                            } else if (!WebModeInpainter.tryAcquireGlobalCallBudget()) {
+                                OcrDiag.log("CLEAN", "migan_unavailable reason=global_budget_exhausted tier3_skipped")
+                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=budget_exhausted")
+                            } else {
+                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=true reason=residual>8")
+                                val t3Start = android.os.SystemClock.elapsedRealtime()
+                                aiBudget--
+                                aiCallsAttempted++
+                                tier3Count++
+                                // Make MI-GAN's context include the accepted Tier-2 output, not original lettering.
+                                bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
+                                val aiFill = try {
+                                    WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask)
+                                } catch (_: Throwable) { null }
+                                aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
+                                aiTotalMs += aiLastMs
+                                if (aiFill != null) {
+                                    aiCallsSucceeded++
+                                    val tier3Candidate = out.copyOf()
+                                    for (at in mask.indices) {
+                                        if (mask[at].toInt() != 0 && aiFill[at] != 0) {
+                                            tier3Candidate[at] = blendPixel(out[at], aiFill[at], TIER3_FILL_ALPHA)
+                                        }
+                                    }
+                                    val tier3CandidateResidual = residualEnergy(
+                                        tier3Candidate, mask, paper, soft, rw, baseline = region
+                                    )
+                                    OcrDiag.log(
+                                        "CLEAN_TIER",
+                                        "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
+                                            "reason=tier2_residual conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}"
+                                    )
+                                    OcrDiag.log(
+                                        "CLEAN_RESIDUAL",
+                                        "bubble=$bubbleNo tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)} " +
+                                            "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} metric=normalized_0_100"
+                                    )
+                                    if (tier3CandidateResidual > tier2Residual) {
+                                        OcrDiag.log(
+                                            "CLEAN_ROLLBACK",
+                                            "bubble=$bubbleNo tier=3 keptTier2=true " +
+                                                "residualBefore=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} " +
+                                                "residualAfter=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)}"
+                                        )
+                                        out = tier2BestOut.copyOf()
+                                        residualFinal = tier2Residual
+                                    } else {
+                                        out = tier3Candidate
+                                        residualFinal = tier3CandidateResidual
+                                    }
+                                } else {
+                                    OcrDiag.log(
+                                        "CLEAN_TIER",
+                                        "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
+                                    )
+                                    OcrDiag.log("CLEAN", "migan_unavailable reason=initialization_or_inference_failed tier3_skipped")
+                                    OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
+                                    if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=inference_failed")
+                                }
+                                val afterHeap = Runtime.getRuntime()
+                                val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
+                                if (afterFreeMb < 30L) {
+                                    OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
+                                    WebModeInpainter.releaseRuntimeForMemoryPressure()
+                                }
                             }
                         }
                     }
