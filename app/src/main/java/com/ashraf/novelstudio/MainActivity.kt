@@ -1156,6 +1156,70 @@ class MainActivity : Activity() {
     private val rtVisibleOcrMaxHoldMs: Long get() = if (lensRealtimeFastPath()) 500L else longArrayOf(1000L, 1800L, 3000L, 4500L)[rtBatchLevel()]
     private var rtVisibleOcrFirstAtMs = 0L
 
+    // Realtime is intentionally a strict state machine: visible read -> visible placement -> one-panel prefetch.
+    private enum class RealtimeReadState { IDLE, READING_VISIBLE, PLACING_VISIBLE, PREFETCH_NEXT }
+    private var realtimeReadState = RealtimeReadState.IDLE
+    private var realtimeVisibleJobActive = false
+    private var realtimeVisiblePlaced = false
+    private var realtimeCurrentSignature = ""
+    private var realtimePausedSignature = ""
+
+    private fun transitionRealtimeReadState(next: RealtimeReadState, reason: String) {
+        val previous = realtimeReadState
+        if (previous == next) return
+        realtimeReadState = next
+        OcrDiag.log("REALTIME_STATE", "from=$previous to=$next reason=$reason")
+    }
+
+    private fun beginRealtimeVisibleRead(signature: String) {
+        realtimeCurrentSignature = signature
+        if (realtimePausedSignature.isNotBlank() && realtimePausedSignature != signature) realtimePausedSignature = ""
+        realtimeVisiblePlaced = false
+        realtimeVisibleJobActive = true
+        if (realtimeReadState != RealtimeReadState.IDLE && realtimeReadState != RealtimeReadState.READING_VISIBLE) {
+            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+        }
+        transitionRealtimeReadState(RealtimeReadState.READING_VISIBLE, "visible_panel_changed")
+    }
+
+    private fun markRealtimeVisiblePlacing(reason: String) {
+        realtimeVisibleJobActive = false
+        if (realtimeReadState == RealtimeReadState.IDLE) {
+            transitionRealtimeReadState(RealtimeReadState.READING_VISIBLE, "visible_ocr_ready")
+        }
+        transitionRealtimeReadState(RealtimeReadState.PLACING_VISIBLE, reason)
+    }
+
+    private fun pauseRealtimeVisible(reason: String = "visible_empty") {
+        realtimeVisibleJobActive = false
+        realtimeVisiblePlaced = false
+        realtimePausedSignature = realtimeCurrentSignature
+        OcrDiag.log("REALTIME_PAUSE", "reason=$reason waitingFor=user_scroll")
+        transitionRealtimeReadState(RealtimeReadState.IDLE, reason)
+    }
+
+    private fun completeRealtimeVisiblePlacement(placedCount: Int, success: Boolean, reason: String) {
+        // Ignore stale placement callbacks after a newer viewport has already taken ownership.
+        if (realtimeReadState != RealtimeReadState.PLACING_VISIBLE) return
+        realtimeVisibleJobActive = false
+        if (success && placedCount > 0) {
+            realtimeVisiblePlaced = true
+            realtimePausedSignature = ""
+            OcrDiag.log("REALTIME_PLACE_DONE", "placed=$placedCount reason=$reason")
+            transitionRealtimeReadState(RealtimeReadState.PREFETCH_NEXT, "visible_placement_complete")
+        } else {
+            pauseRealtimeVisible("visible_empty")
+        }
+    }
+
+    private fun finishRealtimePrefetchIfIdle(reason: String) {
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) return
+        if (aheadOcrHandle != null || rtAheadTranslationQueue.isNotEmpty() || rtAheadWorkerBusy ||
+            rtAheadHold.isNotEmpty() || rtAheadHoldFlushRunnable != null) return
+        realtimeVisiblePlaced = false
+        transitionRealtimeReadState(RealtimeReadState.IDLE, reason)
+    }
+
     private val rtAheadTranslationQueue = ArrayList<RtAheadTranslationTask>()
     private val rtAheadTranslationQueuedIds = mutableSetOf<String>()
     private val rtAheadTranslationSuppressedIds = mutableSetOf<String>()
