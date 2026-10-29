@@ -134,9 +134,11 @@ assert.ok(cleaner.includes('tier2CandidateResidual > residual1 * 1.1f') &&
           cleaner.includes('tier=2 keptTier1=true') &&
           cleaner.includes('tier=3 keptTier2=true'),
   'Tier 2 and Tier 3 worsening results must be rolled back');
-assert.ok(cleaner.includes('CLEAN_FILL') && cleaner.includes('CLEAN_ASSERT') &&
-          cleaner.includes('tier1CoversMask') && cleaner.includes('fillArea++'),
-  'Tier 1 must log alpha, fill coverage and mask coverage assertion');
+assert.ok(cleaner.includes('CLEAN_FILL_ENTER') && cleaner.includes('CLEAN_FILL_DONE') &&
+          cleaner.includes('CLEAN_ASSERT') && cleaner.includes('bboxCoveragePct=') &&
+          cleaner.includes('maskCoveragePct=') && cleaner.includes('maskFilledPx++') &&
+          cleaner.includes('alpha=$fillAlpha'),
+  'Tier 1 must log alpha, actual bbox fill coverage and actual mask fill coverage');
 assert.ok(cleaner.includes('bboxFillArea=$bboxFillArea') &&
           cleaner.includes('fillMode=') && cleaner.includes('paintedPixels++') &&
           cleaner.includes('CLEAN_BBOX_AUDIT') && cleaner.includes('unmaskedCandidatePixels=') &&
