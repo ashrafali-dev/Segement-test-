@@ -499,7 +499,7 @@ internal object WebModeTextRemover {
                     "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
                 )
-                if (residual1 <= TIER2_RESIDUAL_THRESHOLD) {
+                if (residual1 <= TIER2_RESIDUAL_THRESHOLD && !largeMask) {
                     bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
                     totalRemoved += selectedCount
                     tier1Count++
