@@ -9614,6 +9614,30 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // Strict marker alignment first; a single-bubble layout falls back to its one box instead of
             // dropping the answer ("marker not found" used to leave the bubble untranslated).
             val wmPlaced = wmLayout?.let { WebModeLayout.alignWithFallback(text, it) }
+            if (!livePanelBatch && wmLayout != null && wmPlaced != null) {
+                val hostForApply = Uri.parse(ch.url).host?.lowercase().orEmpty()
+                val wtrForApply = hostForApply == "wtr-lab.com" || hostForApply.endsWith(".wtr-lab.com")
+                val applyContext = WebModeChapterContext.fromMarkedText(
+                    chapterId = keyOf(ch),
+                    mangaTitle = ch.novel.ifBlank { ch.title },
+                    chapterNumber = ch.number,
+                    targetLanguage = Langs.target(this),
+                    markedText = addInternalMarkers(ch.text, splitSingleLines = wtrForApply),
+                    layout = wmLayout
+                )
+                if (applyContext != null) {
+                    for ((panelIndex, entries) in applyContext.entries.groupBy { it.panelIndex }.toSortedMap()) {
+                        val translatedCount = entries.count { entry ->
+                            val idx = applyContext.entries.indexOfFirst { it.markerNumber == entry.markerNumber }
+                            !wmPlaced.getOrNull(idx).isNullOrBlank()
+                        }
+                        OcrDiag.log(
+                            "CHAPTER_APPLY",
+                            "panel=$panelIndex bubbles=${entries.size} translated=$translatedCount placed=$translatedCount"
+                        )
+                    }
+                }
+            }
             val wmScript: String
             if (livePanelBatch) {
                 if (wmLayout == null || wmPlaced == null) {
