@@ -6,6 +6,7 @@ on:
       - fix/lens-ocr-model-routing-manual-extract-20261024
       - fix/canvas-page-overlay-lifecycle-20261025
       - experiment/migan-inpainting-rt-ocr-20261028
+      - fix/ocr-placement-quality-and-adaptive-bg-20261029
   workflow_dispatch:
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
-      - name: Test embedded WebView overlay layout
+      - name: Test OCR report diagnostics, script filtering and cache bypass
+        run: node scripts/test-ocr-quality-wiring.js
+      - name: Test embedded WebView overlay layout + cleaned-image lifecycle
         run: node scripts/test-webmode-overlay-layout.js
       - name: Configure the existing release signing key required by app/build.gradle
         env:
@@ -44,13 +47,24 @@ jobs:
           test -s "$KEYSTORE_PATH"
           keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
           echo "Release key validated."
-      - name: Run unit tests and debug build
+      - name: Run unit tests and debug build (tiered cleaner performance path)
         env:
           KEYSTORE_FILE: ${{ runner.temp }}/novelstudio-release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon
+      - name: Verify optional model stays out of APK and report package size
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          if unzip -Z1 "$APK" | grep -Fxq "assets/migan_fp16.tflite"; then
+            echo "::error::Optional MI-GAN model must not be bundled in the APK."
+            exit 1
+          fi
+          echo "PASS: optional MI-GAN model is not packaged."
+          ls -lh "$APK" app/build/outputs/apk/debug/app-debug.apk
       - name: Verify permanent release signing certificate
         run: |
           set -euo pipefail

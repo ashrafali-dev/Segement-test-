@@ -13,6 +13,19 @@ import org.json.JSONObject
  *    (same position, rotation and text size, over the cleaned bubble). The page stays scrollable.
  *  - [script]: fallback reader panel, used when the translation cannot be matched to the bubbles.
  */
+/**
+ * Normalized placement fields shared by the overlay serializer and its Japanese geometry regression test.
+ * Values are rounded exactly as the existing writer rounded them before JSON serialization.
+ */
+internal data class WebModeBubblePlacementContract(
+    val cx: Double,
+    val cy: Double,
+    val w: Double,
+    val h: Double,
+    val angle: Double,
+    val font: Double
+)
+
 internal object WebModeWriter {
     /** Height (CSS px) of the dock that floats over the page; the in-page OCR tools button sits above it. */
     @Volatile var bottomInsetPx: Int = 0
@@ -178,6 +191,11 @@ internal object WebModeWriter {
         t.style.webkitBackgroundClip='text'; t.style.backgroundClip='text';
         t.style.webkitTextFillColor='transparent'; t.style.color='transparent';
       }
+      if(it.sfx){
+        // Distinct lettering treatment, but leave the original art visible under a successful clean image.
+        t.style.fontWeight='800'; t.style.fontStyle='italic'; t.style.opacity='0.98';
+        t.style.webkitTextStroke='0.75px rgba(255,255,255,0.72)';
+      }
       b.appendChild(t);
       var cover=null;
       var hasCv=!!(it.cv&&it.cv.length>=4);
@@ -188,6 +206,9 @@ internal object WebModeWriter {
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
           +'pointer-events:none;will-change:transform;background:'+(hasCv?'transparent':it.bg)+';';
+        // A failed pixel clean must never gate placement: keep a fully opaque cover below the translation.
+        // The Japanese box coordinates/size/font fields are still the same serialized values as before.
+        if(!it.cl)cover.style.opacity='1';
         if(hasCv){
           for(var ci=0;ci+3<it.cv.length;ci+=4){
             var cd=document.createElement('div');cd.className='__ns_cv';
@@ -196,8 +217,8 @@ internal object WebModeWriter {
             cover.appendChild(cd);
           }
         }else{
-          cover.style.borderRadius=it.sf?'12px':'4px';
-          cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
+          cover.style.borderRadius=it.sfx?'0':(it.sf?'12px':'4px');
+          cover.style.boxShadow=it.sfx?'none':(it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg);
         }
         cover.__nsWaitClean=!!it.cl&&!hasCv;
         coverLayer.appendChild(cover);
@@ -1207,11 +1228,30 @@ internal object WebModeWriter {
     private fun css(c: Int) = String.format("#%06X", c and 0xFFFFFF)
     private fun r5(x: Float): Double = Math.round(x * 100000.0) / 100000.0
 
+    /** Production geometry contract; returns null only when no translation should be placed. */
+    internal fun placementContract(bubble: WmBubble, translated: String): WebModeBubblePlacementContract? {
+        if (translated.isBlank()) return null
+        return WebModeBubblePlacementContract(
+            cx = r5(bubble.cx),
+            cy = r5(bubble.cy),
+            w = r5(bubble.w),
+            h = r5(bubble.h),
+            angle = r5(bubble.angle),
+            font = r5(bubble.font)
+        )
+    }
+
     /**
      * Draws each translated paragraph on the spot of its original text. [translated] is index-aligned
      * with [WebModeLayout.bubbles]; a null/blank entry leaves that bubble's original text untouched.
      */
-    fun bubbleScript(layout: WebModeLayout, translated: List<String?>, font: String, pageId: String): String {
+    fun bubbleScript(
+        layout: WebModeLayout,
+        translated: List<String?>,
+        font: String,
+        pageId: String,
+        auditBubbleFingerprints: Set<String>? = null
+    ): String {
         val arr = JSONArray()
         // The cleaner records exactly which bubbles it erased (flat and artwork alike). The cleaned image is
         // shown only if every ERASED bubble of that image has a translation; otherwise the original <img>
@@ -1251,9 +1291,50 @@ internal object WebModeWriter {
                 else a1.w * a1.h >= b1.w * b1.h
             hidden.add(if (dropJ) j else i)
         }
+        val requestOrdinalByLayoutIndex = HashMap<Int, Int>()
+        if (auditBubbleFingerprints != null) {
+            var requestOrdinal = 0
+            layout.bubbles.forEachIndexed { layoutIndex, bubble ->
+                if (WebModeLayout.fingerprint(bubble) in auditBubbleFingerprints) {
+                    requestOrdinal++
+                    requestOrdinalByLayoutIndex[layoutIndex] = requestOrdinal
+                }
+            }
+        }
         for ((i, b) in layout.bubbles.withIndex()) {
             if (i in hidden) continue
-            val t = WmSfx.fix(translated.getOrNull(i)?.trim().orEmpty())
+            val translatedText = translated.getOrNull(i)?.trim().orEmpty()
+            val belongsToCurrentRequest = auditBubbleFingerprints == null ||
+                WebModeLayout.fingerprint(b) in auditBubbleFingerprints
+            if (belongsToCurrentRequest && translatedText.isNotBlank() && b.sourceText.isNotBlank() &&
+                !WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))) {
+                val scriptLabel = WebModeTextRemover.scriptLabelForBubble(b.sourceText, b.src, pageId)
+                val cleanResult = WebModeTextRemover.bubbleCleanResultFor(b.src, b)
+                val residualForBubble = if (scriptLabel == "JAPANESE") cleanResult?.residualMask else cleanResult?.residualBbox
+                if (cleanResult?.cleaned != true) {
+                    val reason = when {
+                        cleanResult == null -> "clean_skip_or_unmeasured"
+                        residualForBubble == null -> when (cleanResult.reason) {
+                            "clean_pending", "not_processed" -> "clean_skip_or_unmeasured"
+                            else -> cleanResult.reason.ifBlank { "clean_skip_or_unmeasured" }
+                        }
+                        residualForBubble >= 5f -> "residual_gt_5"
+                        scriptLabel != "JAPANESE" && (cleanResult.bboxCoveragePct ?: 0f) < 95f -> "bbox_underfilled"
+                        else -> cleanResult.reason.ifBlank { "clean_skip_or_unmeasured" }
+                    }
+                    val bubbleLabel = requestOrdinalByLayoutIndex[i]?.toString() ?: "layout"
+                    val cleanKey = WebModeTextRemover.cleanResultKey(b.src, b)
+                    OcrDiag.log(
+                        "PLACE_UNCLEANED",
+                        "bubble=$bubbleLabel key=$cleanKey " +
+                            "residual=${residualForBubble?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                            "residualBbox=${cleanResult?.residualBbox?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                            "residualMask=${cleanResult?.residualMask?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                            "placed=true bgAlpha=1.0 script=$scriptLabel reason=$reason"
+                    )
+                }
+            }
+            val t = WmSfx.fix(translatedText)
             if (t.isEmpty()) {
                 // Erased in the cleaned picture but not translated (yet): cut a HOLE in the cleaned picture there, so the
                 // original lettering stays visible instead of vanishing - and every OTHER bubble of the picture can still
@@ -1272,10 +1353,18 @@ internal object WebModeWriter {
                 }
                 continue
             }
+            val placement = placementContract(b, t) ?: continue
+            val sfx = WebModeChapterContext.classifyRole(b.sourceText, b) == WebModeTextRole.SFX
+            if (sfx) {
+                val original = b.sourceText.replace('\n', ' ').replace('"', '\'').take(36)
+                val result = t.replace('\n', ' ').replace('"', '\'').take(36)
+                OcrDiag.log("SFX_PLACE", "bubble=${i + 1} origText=\"$original\" translated=\"$result\" " +
+                    "style=bold_italic position=original_bbox")
+            }
             arr.put(JSONObject()
                 .put("t", t).put("s", WebModeLogic.normalizeUrl(b.src))
-                .put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
-                .put("a", r5(b.angle)).put("f", r5(b.font))
+                .put("cx", placement.cx).put("cy", placement.cy).put("w", placement.w).put("h", placement.h)
+                .put("a", placement.angle).put("f", placement.font)
                 .apply {
                     if (b.tbw > 0f && b.tbh > 0f && b.w > 0f && b.h > 0f) {
                         val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
@@ -1288,7 +1377,8 @@ internal object WebModeWriter {
                                 .put(r5(Math.max(0f, mr))).put(r5(Math.max(0f, mb))))
                     }
                 }
-                .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
+                .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("sfx", sfx)
+                .put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // If the source image was cleaned, keep the local text-box cover until the replacement really loads.
                 // The clean image removes only the recognized lettering patch; failed/unsupported sources retain the
                 // small text-box cover instead of flattening the whole speech-bubble interior.

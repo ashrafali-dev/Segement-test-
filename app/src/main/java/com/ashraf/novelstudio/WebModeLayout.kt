@@ -52,7 +52,7 @@ internal object UiChromeFilter {
     private val PHRASES = listOf(
         "reading this screen", "reading ahead", "reading the page", "sending to chatbot", "ai painter",
         "detector on", "detector off", "detector not installed", "mask only mode", "balloon masks",
-        "এআই পেইন্টার", "ডিটেক্টর", "স্ক্রিনটি পড়া হচ্ছে", "পেইন্টার বন্ধ"
+        "translating", "অনুবাদ হচ্ছে", "এআই পেইন্টার", "ডিটেক্টর", "স্ক্রিনটি পড়া হচ্ছে", "পেইন্টার বন্ধ"
     )
     fun isChrome(text: String): Boolean {
         val n = text.lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
@@ -176,7 +176,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
 
             val markers = MARK.findAll(text).toList()
             if (markers.isEmpty()) {
-                OcrDiag.log("ALIGN", "bubbles=$n markers=0 -> REJECT (no markers)")
+                OcrDiag.log("ALIGN", "bubbles=$n markers=0 placed=0 missing=$n -> REJECT")
+                for (i in 0 until n) OcrDiag.log("ALIGN_MISS", "marker=${1 + layout.titleOffset + i} reason=no_text")
                 return null
             }
 
@@ -213,15 +214,39 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             duplicates.forEach { byNo.remove(it) }
             val out = List(n) { i -> byNo[expectedFirst + i]?.replace(NL, " ") }
             val placed = out.count { !it.isNullOrBlank() }
-            if (placed == 0) {
-                OcrDiag.log("ALIGN", "bubbles=$n markers=${markers.size} -> REJECT (no usable entries)")
-                return null
-            }
             val missing = n - placed
+            val verdict = when {
+                placed == n -> "ACCEPT"
+                placed == 0 -> "REJECT"
+                else -> "PARTIAL"
+            }
             OcrDiag.log(
                 "ALIGN",
-                "bubbles=$n markers=${markers.size} placed=$placed missing=$missing skipped=$skipped duplicates=${duplicates.size} unknown=$unknown -> ACCEPT_PARTIAL"
+                "bubbles=$n markers=${markers.size} placed=$placed missing=$missing skipped=$skipped duplicates=${duplicates.size} unknown=$unknown -> $verdict"
             )
+            // Explain every unplaced bubble with its own marker id. Missing ids are never silently shifted.
+            for (i in out.indices) {
+                if (!out[i].isNullOrBlank()) continue
+                val no = expectedFirst + i
+                val matchingBodies = markers.mapIndexedNotNull { markerIndex, marker ->
+                    if (marker.groupValues[1].toIntOrNull() != no) null else {
+                        val end = if (markerIndex + 1 < markers.size) markers[markerIndex + 1].range.first else text.length
+                        text.substring(marker.range.last + 1, end).trim()
+                    }
+                }
+                val reason = if (no !in duplicates && matchingBodies.any {
+                    it.isEmpty() || it.matches(Regex("[~\\uFF5E]+"))
+                }) "empty_body" else "no_text"
+                OcrDiag.log("ALIGN_MISS", "marker=$no reason=$reason")
+            }
+            // Extra marker ids have no corresponding bubble in this layout.
+            for (marker in markers) {
+                val no = marker.groupValues[1].toIntOrNull() ?: continue
+                if (no !in expectedFirst..expectedLast) {
+                    OcrDiag.log("ALIGN_MISS", "marker=$no reason=no_bubble")
+                }
+            }
+            if (placed == 0) return null
             return out
         }
 

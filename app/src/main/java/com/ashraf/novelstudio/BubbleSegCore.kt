@@ -202,4 +202,159 @@ internal object BubbleSegCore {
         l += margin; t += margin; r -= margin; b -= margin
         return if (r - l >= 8 && b - t >= 8) intArrayOf(l, t, r, b) else null
     }
+
+    internal data class AdjacentShapeEvent(
+        val axis: String,
+        val aCenterX: Int,
+        val aCenterY: Int,
+        val bCenterX: Int,
+        val bCenterY: Int,
+        val valleyRatio: Float
+    )
+
+    internal data class AdjacentSplitResult(
+        val segments: List<Seg>,
+        val splits: List<AdjacentShapeEvent>,
+        val merges: List<AdjacentShapeEvent>
+    )
+
+    private data class SplitCandidate(val axis: String, val cut: Int, val valleyRatio: Float)
+
+    /**
+     * Conservative mask-only post-processing for the case where one segmentation mask contains two
+     * touching rounded lobes. This never changes detector weights, scores, NMS, or placement geometry.
+     */
+    fun splitAdjacentRoundSegments(input: List<Seg>?, minLobePixels: Int = 36): AdjacentSplitResult {
+        if (input.isNullOrEmpty()) return AdjacentSplitResult(emptyList(), emptyList(), emptyList())
+        val output = ArrayList<Seg>(input.size)
+        val splits = ArrayList<AdjacentShapeEvent>()
+        val merges = ArrayList<AdjacentShapeEvent>()
+        for (seg in input) {
+            val candidate = findSplitCandidate(seg)
+            if (candidate == null) {
+                output.add(seg)
+                continue
+            }
+            val first = cropHalf(seg, candidate.axis, candidate.cut, keepFirst = true)
+            val second = cropHalf(seg, candidate.axis, candidate.cut, keepFirst = false)
+            val twoRoundLobes = first != null && second != null &&
+                roughlyRound(first, minLobePixels) && roughlyRound(second, minLobePixels)
+            if (twoRoundLobes && candidate.valleyRatio <= 0.48f) {
+                output.add(first!!)
+                output.add(second!!)
+                splits.add(
+                    AdjacentShapeEvent(
+                        candidate.axis,
+                        (first.l + first.r) / 2, (first.t + first.b) / 2,
+                        (second.l + second.r) / 2, (second.t + second.b) / 2,
+                        candidate.valleyRatio
+                    )
+                )
+            } else {
+                output.add(seg)
+                // Keep a connected mask when the waist is not deep enough to split safely, but expose
+                // the likely touching-pair case instead of silently pretending no merge was considered.
+                if (twoRoundLobes && candidate.valleyRatio <= 0.72f) {
+                    merges.add(
+                        AdjacentShapeEvent(
+                            candidate.axis,
+                            (first!!.l + first.r) / 2, (first.t + first.b) / 2,
+                            (second!!.l + second.r) / 2, (second.t + second.b) / 2,
+                            candidate.valleyRatio
+                        )
+                    )
+                }
+            }
+        }
+        return AdjacentSplitResult(output, splits, merges)
+    }
+
+    private fun findSplitCandidate(seg: Seg): SplitCandidate? {
+        var best: SplitCandidate? = null
+        if (seg.w >= (seg.h * 1.25f).toInt().coerceAtLeast(seg.h + 1)) {
+            val counts = IntArray(seg.w)
+            for (x in 0 until seg.w) for (y in 0 until seg.h) {
+                if (seg.inside(seg.l + x, seg.t + y)) counts[x]++
+            }
+            val peak = counts.maxOrNull() ?: 0
+            val start = (seg.w * 0.25f).toInt().coerceAtLeast(1)
+            val end = (seg.w * 0.75f).toInt().coerceAtMost(seg.w - 1)
+            if (peak > 0 && end > start) {
+                var cut = -1
+                var valley = Int.MAX_VALUE
+                for (x in start until end) {
+                    if (counts[x] < valley || (counts[x] == valley && kotlin.math.abs(x - seg.w / 2) < kotlin.math.abs(cut - seg.w / 2))) {
+                        cut = x
+                        valley = counts[x]
+                    }
+                }
+                if (cut > 0) best = SplitCandidate("x", cut, valley.toFloat() / peak.toFloat())
+            }
+        }
+        if (seg.h >= (seg.w * 1.25f).toInt().coerceAtLeast(seg.w + 1)) {
+            val counts = IntArray(seg.h)
+            for (y in 0 until seg.h) for (x in 0 until seg.w) {
+                if (seg.inside(seg.l + x, seg.t + y)) counts[y]++
+            }
+            val peak = counts.maxOrNull() ?: 0
+            val start = (seg.h * 0.25f).toInt().coerceAtLeast(1)
+            val end = (seg.h * 0.75f).toInt().coerceAtMost(seg.h - 1)
+            if (peak > 0 && end > start) {
+                var cut = -1
+                var valley = Int.MAX_VALUE
+                for (y in start until end) {
+                    if (counts[y] < valley || (counts[y] == valley && kotlin.math.abs(y - seg.h / 2) < kotlin.math.abs(cut - seg.h / 2))) {
+                        cut = y
+                        valley = counts[y]
+                    }
+                }
+                if (cut > 0) {
+                    val candidate = SplitCandidate("y", cut, valley.toFloat() / peak.toFloat())
+                    if (best == null || candidate.valleyRatio < best.valleyRatio) best = candidate
+                }
+            }
+        }
+        return best
+    }
+
+    private fun cropHalf(seg: Seg, axis: String, cut: Int, keepFirst: Boolean): Seg? {
+        var minX = seg.r
+        var minY = seg.b
+        var maxX = seg.l - 1
+        var maxY = seg.t - 1
+        var count = 0
+        for (y in seg.t until seg.b) for (x in seg.l until seg.r) {
+            val allowed = if (axis == "x") {
+                if (keepFirst) x - seg.l < cut else x - seg.l >= cut
+            } else {
+                if (keepFirst) y - seg.t < cut else y - seg.t >= cut
+            }
+            if (!allowed || !seg.inside(x, y)) continue
+            minX = minOf(minX, x); minY = minOf(minY, y)
+            maxX = maxOf(maxX, x); maxY = maxOf(maxY, y)
+            count++
+        }
+        if (count < 1 || maxX < minX || maxY < minY) return null
+        val w = maxX - minX + 1
+        val h = maxY - minY + 1
+        val packed = ByteArray((w * h + 7) / 8)
+        for (y in minY..maxY) for (x in minX..maxX) {
+            if (!seg.inside(x, y)) continue
+            val idx = (y - minY) * w + (x - minX)
+            packed[idx shr 3] = (packed[idx shr 3].toInt() or (1 shl (idx and 7))).toByte()
+        }
+        return Seg(seg.score, minX, minY, maxX + 1, maxY + 1, packed)
+    }
+
+    private fun roughlyRound(seg: Seg, minPixels: Int): Boolean {
+        val w = seg.w
+        val h = seg.h
+        if (w < 6 || h < 6 || w.toLong() * h < minPixels.toLong()) return false
+        val aspect = w.toFloat() / h.toFloat()
+        if (aspect < 0.55f || aspect > 1.82f) return false
+        var pixels = 0
+        for (y in seg.t until seg.b) for (x in seg.l until seg.r) if (seg.inside(x, y)) pixels++
+        return pixels >= minPixels && pixels.toDouble() / (w.toLong() * h.toLong()).toDouble() >= 0.22
+    }
+
 }

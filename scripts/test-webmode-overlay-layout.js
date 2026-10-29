@@ -60,7 +60,9 @@ assert.ok(visibleHitSource.includes("var outerHit=document.elementFromPoint(x,y)
   "a same-origin iframe image must also be visible at the outer page stacking layer, not just inside its own document");
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
-assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
+assert.ok(extractor.includes("forceFresh = freshOcrRequired()") &&
+  extractor.includes("foregroundVisibleOcr()"),
+  "manual and foreground visible viewport OCR must bypass the negative cache while preserving their fast/thorough mode");
 const forceInfoAt = extractor.indexOf("val forceInfoScript = if (req.visibleOnly)");
 const forceInfoEnd = extractor.indexOf("else JS_FORCE_INFO", forceInfoAt);
 assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canvas-crop path");
@@ -74,15 +76,22 @@ assert.ok(rescan.includes("MIN_REMOTE_AUDIT_HEIGHT = 12"), "Lens audit must allo
 assert.ok(rescan.includes("findUncovered(bmp, base.blocks, REMOTE_AUDIT_CANDIDATE_LIMIT)"), "Lens audit must inspect multiple candidates");
 assert.ok(rescan.includes("REMOTE_AUDIT_MAX_REGIONS = 2"), "Lens audit must retry up to two likely missed regions");
 assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed labels must be prioritized over partial re-reads");
-// No-AI text removal: stable local background should allow colour-mask erasure before conservative component checks.
+// Tiered no-AI cleaner: median-ring solid fill first, then bounded local/OpenCV inpainting.
 assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
   "text remover must estimate local background outside the OCR box");
-assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI flat-background path");
+assert.ok(remover.includes("medianRingColor(") &&
+          remover.includes("ringSamplePad") &&
+          remover.includes("fillRoundedRect("),
+  "Tier 1 must use median-ring sampling and rounded solid fill, with an extra sampling-only margin on large masks");
+assert.ok(remover.includes("RESIDUAL_THRESHOLD") && remover.includes('"CLEAN_TIER"'),
+  "tiered cleaner must gate each tier on residual energy and log the selected tier");
+assert.ok(remover.includes("openCvInpaint(tier1Region, rw, rh, mask)") &&
+          !remover.includes("openCvInpaint(region, rw, rh, mask)"),
+  "Tier 2 must inpaint Tier 1 output and never reintroduce the original text pixels");
 assert.ok(remover.includes('"CLEAN_JP_AUDIT"') && remover.includes('unmatched='),
   "Japanese OCR bubbles that were not cleaned must be visible in compact diagnostics");
-assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
-  "flat-background erasure must expand the mask to clear anti-aliased text edges");
-assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
+assert.ok(remover.includes("onionFill(") && remover.includes("tier1Region, mask, rw, rh"),
+  "non-AI fallback must continue from Tier 1 output on non-flat artwork");
 assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
   "text removal must not flatten the full speech-bubble interior");
 assert.ok(remover.includes('sourceUrl.startsWith("blob:", true)') && remover.includes("storeInlineCleanedBytes"),
@@ -103,6 +112,9 @@ assert.ok(writer.includes("var hasCv=!!(it.cv&&it.cv.length>=4)") &&
   "the overlay must reconstruct the detected speech-bubble silhouette from cv rectangles");
 assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl&&!hasCv"),
   "the small OCR-box fallback should wait for cleaned image only when no bubble mask exists");
+assert.ok(writer.includes("if(!it.cl)cover.style.opacity='1'") &&
+  writer.includes("PLACE_UNCLEANED"),
+  "a translation must remain visible on an opaque fallback even when pixel cleaning failed");
 const layoutSource = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 assert.ok(layoutSource.includes("fun canvasBubbleCachePrefix(sourceUrl: String)"),
   "canvas cache keys need a source prefix that can be invalidated after a page transition");
@@ -130,15 +142,19 @@ assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = 
   "realtime scans must not eagerly download panels before checking ahead OCR cache");
 assert.ok(extractor.includes("hasAheadResult || alreadyReadingAhead || recentlyBlank"),
   "prefetch slots must skip panels already cached, being read ahead, or recently known blank");
-assert.ok(extractor.includes("val realtimePriority = fastMode || req.ahead > 0") &&
-  extractor.includes("allowAi = !fastMode && req.ahead <= 0"),
-  "read-ahead OCR must never launch AI inpainting even if a caller changes the fastMode flag");
-assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
-  extractor.includes("else if (!realtimePriority && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
-  "realtime and read-ahead OCR must not start RT-DETR or mask segmentation");
-assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
-  mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0"),
-  "ahead OCR must be reduced to one panel on low-heap devices and paused under memory pressure");
+assert.ok(extractor.includes("val realtimePriority = !scanMode") &&
+  extractor.includes("val scanMode = !req.visibleOnly && req.ahead <= 0") &&
+  extractor.includes("allowAi = true") &&
+  extractor.includes("prefetchMode = req.ahead > 0"),
+  "scanning mode must be independent of fast Lens dispatch while realtime/read-ahead stay latency-limited");
+assert.ok(extractor.includes("scanMode && remoteDet && detOk && scanDetect") &&
+  extractor.includes("else if (scanMode && scanDetect && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
+  "heavy RT-DETR must run only when scan detection is explicitly enabled; the pixel bbox fallback always remains");
+assert.ok(mainActivity.includes("coerceIn(0, 1)") &&
+  mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0") &&
+  mainActivity.includes("visible_placement_not_complete") &&
+  mainActivity.includes("AHEAD_QUEUE_BLOCKED"),
+  "realtime look-ahead must be limited to one panel and blocked until visible placement completes");
 assert.ok(extractor.includes('normalizedSource.contains("/link-slot-")') &&
   extractor.includes('normalizedSource.contains("/link_slot_")'),
   "promotional link-slot images must be excluded even when iframe collection bypasses page-script filtering");

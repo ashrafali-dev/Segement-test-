@@ -94,6 +94,24 @@ internal object OcrEngineStatus {
     }
     /** Last Lens failure that made the router fall back to ML Kit (shown in the OCR engine dialog). */
     @Volatile var lastError: String = ""
+    @Volatile var lastNetworkFallbackAtMs: Long = 0L
+        private set
+    @Volatile var lastNetworkFallbackReason: String = ""
+        private set
+    @Volatile var lastNetworkFallbackBlocks: Int = -1
+        private set
+
+    @Synchronized
+    fun noteNetworkFallback(reason: String, blocks: Int) {
+        lastNetworkFallbackAtMs = android.os.SystemClock.elapsedRealtime()
+        lastNetworkFallbackReason = reason.take(180)
+        lastNetworkFallbackBlocks = blocks
+    }
+
+    fun recentNetworkFallback(maxAgeMs: Long = 90_000L): Boolean {
+        val at = lastNetworkFallbackAtMs
+        return at > 0L && android.os.SystemClock.elapsedRealtime() - at <= maxAgeMs
+    }
     @Volatile private var lastToast: String = ""
 
     @Volatile private var lastCopied: String = ""
@@ -243,9 +261,23 @@ internal class RoutingOcrEngine : OcrEngine {
     private fun useful(result: OcrResult): Boolean =
         result.blocks.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } } >= 2
 
-    private fun route(bitmap: Bitmap, script: OcrScript, run: (OcrEngine) -> OcrResult): OcrResult {
-        val waited = OcrGate.Waited()
+    private fun route(
+        bitmap: Bitmap,
+        script: OcrScript,
+        bypassNegativeCache: Boolean = false,
+        run: (OcrEngine) -> OcrResult
+    ): OcrResult {
         val t0 = android.os.SystemClock.elapsedRealtime()
+        // The negative cache is deliberately checked before OcrGate: a hit must not wait behind ML Kit work.
+        if (!bypassNegativeCache && OcrNegativeCache.hit(bitmap)) {
+            val cached = OcrResult(emptyList())
+            cached.engineLabel = "negative-cache (no OCR run)"
+            OcrDiag.log("ROUTE", "requestedEngine=$selectedMode language=${script.name} activeEngine=negative-cache " +
+                "fallbackUsed=false gateWaitMs=0 totalMs=${android.os.SystemClock.elapsedRealtime() - t0} " +
+                "image=${bitmap.width}x${bitmap.height}")
+            return cached
+        }
+        val waited = OcrGate.Waited()
         val foregroundRoute = !OcrGate.isBackgroundThread()
         val statusTicket = OcrEngineStatus.beginRoute(foregroundRoute)
         lensThread.set(false)
@@ -253,7 +285,15 @@ internal class RoutingOcrEngine : OcrEngine {
         var fellBack = false
         try {
             val routeBlock: () -> OcrResult = {
-                routeInner(bitmap, script, run) { engine, fb -> used = engine; fellBack = fb }
+                val attemptStarted = android.os.SystemClock.elapsedRealtime()
+                val raw = routeInner(bitmap, script, run) { engine, fb -> used = engine; fellBack = fb }
+                val filtered = OcrGarbageFilter.filter(raw.blocks, script, bitmap.width, bitmap.height)
+                val result = if (filtered.size == raw.blocks.size) raw else OcrResult(filtered)
+                if (!Thread.currentThread().isInterrupted) {
+                    OcrNegativeCache.record(bitmap, result.blocks.isEmpty(),
+                        android.os.SystemClock.elapsedRealtime() - attemptStarted)
+                }
+                result
             }
             // Do not queue visible Lens OCR behind a remote read-ahead request. Local model engines
             // and the first Lens activation still use the serialized gate for safe lifecycle changes.
@@ -325,6 +365,7 @@ internal class RoutingOcrEngine : OcrEngine {
             var lens: OcrResult? = null
             var failure: String? = null
             try {
+                OcrPanelTiming.noteLensCall()
                 lens = run(chosen)
             } catch (e: OcrUnavailableException) {
                 failure = (e.message ?: "unavailable").take(160)
@@ -365,6 +406,33 @@ internal class RoutingOcrEngine : OcrEngine {
                     report("lens(error)", false)
                     return OcrResult(emptyList())
                 }
+                // The endpoint-level circuit already owns its cooldown. While it is open, go directly to
+                // ML Kit rather than counting skipped calls as more outages or pausing the entire scan.
+                val circuitOpen = failure.contains("paused after", ignoreCase = true) ||
+                    failure.contains("circuit open", ignoreCase = true) ||
+                    LensOcrEngine.breakerStatus().startsWith("OPEN", ignoreCase = true)
+                if (circuitOpen) {
+                    OcrDiag.log("LENS_SKIP", "reason=circuit_open fallback=mlkit")
+                    report("mlkit(lens-error-fallback)", true)
+                    lensThread.set(false)
+                    val fallbackStarted = android.os.SystemClock.elapsedRealtime()
+                    val fallbackResult = try {
+                        run(mlKit)
+                    } catch (fallback: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        OcrResult(emptyList())
+                    } catch (fallback: Throwable) {
+                        OcrEngineStatus.lastError += "; ML Kit fallback failed: ${fallback.message ?: fallback.javaClass.simpleName}"
+                        OcrResult(emptyList())
+                    }
+                    val waitedMs = android.os.SystemClock.elapsedRealtime() - fallbackStarted
+                    OcrDiag.log(
+                        "BATCH_WAIT_OCR",
+                        "reason=lens_failed waitedMs=$waitedMs mlkitBlocks=${fallbackResult.blocks.size} circuit=open"
+                    )
+                    OcrEngineStatus.noteNetworkFallback(failure, fallbackResult.blocks.size)
+                    return fallbackResult
+                }
                 // 5 panels in a row that never reached Lens means the connection (or the IP) is really down.
                 // Pausing is honest; silently reading the rest of the chapter with ML Kit is not.
                 if (LensFailure.recordUnreachable()) {
@@ -374,10 +442,12 @@ internal class RoutingOcrEngine : OcrEngine {
                     report("lens(paused)", false)
                     return OcrResult(emptyList())
                 }
-                OcrDiag.log("FALLBACK", "panel used ML Kit: Lens failed with '$failure' (panel-only, next panel retries Lens)")
-                // This panel only: the next panel calls route() again and tries Lens first.
+                OcrDiag.log("FALLBACK", "panel used ML Kit: Lens failed with '$failure' (breaker decides when Lens is retried)")
+                // The ML Kit result is synchronously complete before route() returns to the batcher/aligner.
                 report("mlkit(lens-error-fallback)", true)
-                return try { run(mlKit) } catch (fallback: InterruptedException) {
+                lensThread.set(false)
+                val fallbackStarted = android.os.SystemClock.elapsedRealtime()
+                val fallbackResult = try { run(mlKit) } catch (fallback: InterruptedException) {
                     Thread.currentThread().interrupt()
                     Log.i("NovelStudioOCR", "ML Kit fallback cancelled after Lens error; newer OCR job owns the viewport")
                     OcrResult(emptyList())
@@ -389,6 +459,13 @@ internal class RoutingOcrEngine : OcrEngine {
                     OcrEngineStatus.lastError += "; ML Kit fallback ran out of memory"
                     OcrResult(emptyList())
                 }
+                val waitedMs = android.os.SystemClock.elapsedRealtime() - fallbackStarted
+                OcrDiag.log(
+                    "BATCH_WAIT_OCR",
+                    "reason=lens_failed waitedMs=$waitedMs mlkitBlocks=${fallbackResult.blocks.size} circuit=closed_or_probe"
+                )
+                OcrEngineStatus.noteNetworkFallback(failure, fallbackResult.blocks.size)
+                return fallbackResult
             }
             val blockCount = lens?.blocks?.size ?: 0
             val letterCount = lens?.blocks?.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } } ?: 0
@@ -450,7 +527,7 @@ internal class RoutingOcrEngine : OcrEngine {
 
     /** A user-triggered Extract bypasses the Google Lens result cache. */
     fun recognizeFresh(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult =
-        route(bitmap, script) {
+        route(bitmap, script, bypassNegativeCache = true) {
             when (it) {
                 is LensOcrEngine -> it.recognizeFresh(bitmap, script, fastMode)
                 else -> if (fastMode) it.recognizeFast(bitmap, script) else it.recognize(bitmap, script)
@@ -464,14 +541,17 @@ internal class RoutingOcrEngine : OcrEngine {
         route(bitmap, script) { it.recognizeFallback(bitmap, script) }
 
     override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult =
-        route(bitmap, script) { it.recognizeRegion(bitmap, script) }
+        route(bitmap, script, bypassNegativeCache = true) { it.recognizeRegion(bitmap, script) }
 
     /**
      * Local-only fast read, never routed: used as a pre-filter so a silent panel costs no network round trip.
      * The result is only ever used to decide "definitely no text"; nothing it returns is placed on the page.
      */
-    fun recognizeLocalFast(bitmap: Bitmap, script: OcrScript): OcrResult =
-        OcrGate.run { mlKit.recognizeFast(bitmap, script) }
+    fun recognizeLocalFast(bitmap: Bitmap, script: OcrScript): OcrResult {
+        // Chapter-wide local prefilter bypasses the main route(), so it must honour the same negative cache.
+        if (OcrNegativeCache.hit(bitmap)) return OcrResult(emptyList())
+        return OcrGate.run { mlKit.recognizeFast(bitmap, script) }
+    }
 
     /** Never frees an engine while it is reading: the release runs on its own thread, behind OcrGate. */
     override fun close() {

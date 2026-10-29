@@ -16,6 +16,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.security.MessageDigest
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -43,9 +44,69 @@ internal object WebModeInpainter {
     private val downloading = AtomicBoolean(false)
     private val warming = AtomicBoolean(false)
 
+    // Global MI-GAN inference budget: at most 20 attempted calls in a rolling 60-second window.
+    private const val GLOBAL_CALL_LIMIT = 20
+    private const val GLOBAL_CALL_WINDOW_MS = 60_000L
+    private val recentGlobalCalls = ArrayDeque<Long>()
+
+    @Synchronized
+    fun tryAcquireGlobalCallBudget(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        while (recentGlobalCalls.peekFirst()?.let { now - it >= GLOBAL_CALL_WINDOW_MS } == true) {
+            recentGlobalCalls.removeFirst()
+        }
+        if (recentGlobalCalls.size >= GLOBAL_CALL_LIMIT) return false
+        recentGlobalCalls.addLast(now)
+        return true
+    }
+
     @Volatile private var slowUntil = 0L
     private const val SLOW_PAUSE_MS = 180_000L
+    @Volatile private var inferenceCircuitUntilMs = 0L
+    @Volatile private var inferenceCircuitReason = ""
+    private const val INFERENCE_CIRCUIT_COOLDOWN_MS = 60_000L
     val tooSlow: Boolean get() = SystemClock.elapsedRealtime() < slowUntil
+    val inferenceCircuitOpen: Boolean get() = SystemClock.elapsedRealtime() < inferenceCircuitUntilMs
+
+    private fun openInferenceCircuit(reason: String) {
+        synchronized(this) {
+            inferenceCircuitReason = reason
+            inferenceCircuitUntilMs = SystemClock.elapsedRealtime() + INFERENCE_CIRCUIT_COOLDOWN_MS
+            // Recreate a possibly poisoned GPU interpreter only after the cooldown, not per bubble.
+            try { engine?.close() } catch (_: Throwable) {}
+            engine = null
+            try { gpuDelegate?.close() } catch (_: Throwable) {}
+            gpuDelegate = null
+            mappedModel = null
+            sessionFailed = false
+        }
+        OcrDiag.log("MIGAN_CIRCUIT_OPEN", "reason=inference_failed cooldownSec=60 detail=$reason")
+    }
+
+    private fun validateOutput(
+        bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray, result: IntArray
+    ): String? {
+        if (result.size != rw * rh || mask.size != result.size) return "invalid_shape"
+        val input = IntArray(result.size)
+        bitmap.getPixels(input, 0, rw, x0, y0, rw, rh)
+        var any = false
+        var allBlack = true
+        var unchanged = true
+        for (i in mask.indices) {
+            if (mask[i].toInt() == 0) continue
+            any = true
+            val value = result[i]
+            val r = (value ushr 16) and 255
+            val g = (value ushr 8) and 255
+            val b = value and 255
+            if (r > 5 || g > 5 || b > 5) allBlack = false
+            if (value != input[i]) unchanged = false
+        }
+        if (!any) return "empty_mask"
+        if (allBlack) return "all_black"
+        if (unchanged) return "unchanged"
+        return null
+    }
 
     @Volatile private var engine: Interpreter? = null
     @Volatile private var gpuDelegate: GpuDelegate? = null
@@ -97,18 +158,34 @@ internal object WebModeInpainter {
     private fun modelFile(ctx: Context): File =
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), MODEL_NAME)
 
-    private fun legacyModelFile(ctx: Context): File =
-        File(File(ctx.applicationContext.filesDir, "wm_inpaint"), "lama_int4_int8_r4.onnx")
-
+    /** The optional model lives in app-private storage only after the user downloads it. */
     fun isReady(ctx: Context): Boolean =
         modelFile(ctx).let { it.isFile && it.length() == EXPECTED_BYTES }
 
     fun isDownloading(): Boolean = downloading.get()
     fun isLoaded(): Boolean = engine != null
 
+    /** Close native interpreter/delegate buffers when heap headroom becomes critically low. */
+    fun releaseRuntimeForMemoryPressure() {
+        OnnxHeavyGate.lock.lock()
+        try {
+            synchronized(this) {
+                try { engine?.close() } catch (_: Throwable) {}
+                engine = null
+                try { gpuDelegate?.close() } catch (_: Throwable) {}
+                gpuDelegate = null
+                mappedModel = null
+                lastNote = "released for low heap"
+                OcrDiag.log("MEM_GUARD", "migan_runtime_released reason=low_heap")
+            }
+        } finally {
+            OnnxHeavyGate.lock.unlock()
+        }
+    }
+
     /** Load in the background so the first scanned image does not wait for GPU model compilation. */
     fun warmUpAsync(ctx: Context) {
-        if (engine != null || sessionFailed || !isReady(ctx) || !warming.compareAndSet(false, true)) return
+        if (engine != null || sessionFailed || inferenceCircuitOpen || !isReady(ctx) || !warming.compareAndSet(false, true)) return
         val app = ctx.applicationContext
         Thread {
             try {
@@ -140,16 +217,18 @@ internal object WebModeInpainter {
         Prefs.put(ctx.applicationContext, "wmAiInpaintCrashed", "")
         try { crashMarker(ctx).delete() } catch (_: Throwable) {}
         val file = modelFile(ctx)
-        val legacy = legacyModelFile(ctx)
         val partial = File(file.parentFile, file.name + ".part")
         try { partial.delete() } catch (_: Throwable) {}
-        val newRemoved = !file.exists() || file.delete()
-        val legacyRemoved = !legacy.exists() || legacy.delete()
-        return newRemoved && legacyRemoved
+        // The model is optional user-downloaded data; deleting it frees the storage it occupies.
+        return !file.exists() || file.delete()
     }
 
-    /** Download model on a background thread. onDone receives null on success. */
+    /** Download the optional model only when requested by the user. A pinned size + SHA-256 guard rejects partial or altered files. */
     fun download(ctx: Context, onProgress: (Long, Long) -> Unit, onDone: (String?) -> Unit) {
+        if (isReady(ctx)) {
+            onDone(null)
+            return
+        }
         if (!downloading.compareAndSet(false, true)) {
             onDone("ডাউনলোড ইতিমধ্যে চলছে")
             return
@@ -192,22 +271,29 @@ internal object WebModeInpainter {
                     }
                 }
                 if (total > 0 && readTotal != total) throw IllegalStateException("অসম্পূর্ণ ডাউনলোড")
-                if (readTotal != EXPECTED_BYTES || part.length() != EXPECTED_BYTES) throw IllegalStateException("ফাইল যাচাই ব্যর্থ: সাইজ মেলেনি")
+                if (readTotal != EXPECTED_BYTES || part.length() != EXPECTED_BYTES) {
+                    throw IllegalStateException("ফাইল যাচাই ব্যর্থ: সাইজ মেলেনি")
+                }
                 val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
                 if (actualSha256 != MODEL_SHA256) throw IllegalStateException("MI-GAN ফাইলের SHA-256 মেলেনি")
                 if (target.exists()) target.delete()
                 if (!part.renameTo(target)) throw IllegalStateException("ফাইল সংরক্ষণ ব্যর্থ")
 
-                // Validate that this device's TFLite GPU runtime can load the file and its I/O shapes.
+                // Validate that this device's GPU runtime can actually load the downloaded model before reporting success.
                 sessionFailed = false
+                inferenceCircuitUntilMs = 0L
+                inferenceCircuitReason = ""
                 Prefs.put(app, "wmAiInpaintCrashed", "")
-                if (interpreter(app) == null) {
-                    target.delete()
-                    sessionFailed = false
-                    throw IllegalStateException("MI-GAN মডেল লোড হয়নি — এই ফোনের GPU delegate বা মডেল runtime সমর্থিত নয়")
+                OnnxHeavyGate.lock.lock()
+                try {
+                    if (interpreter(app) == null) {
+                        target.delete()
+                        sessionFailed = false
+                        throw IllegalStateException("MI-GAN মডেল লোড হয়নি — এই ফোনের GPU delegate বা মডেল runtime সমর্থিত নয়")
+                    }
+                } finally {
+                    OnnxHeavyGate.lock.unlock()
                 }
-                // Free the previous 37 MB LaMa download only after MI-GAN has passed device-side load validation.
-                try { legacyModelFile(app).delete() } catch (_: Throwable) {}
             } catch (e: Throwable) {
                 error = e.message ?: "ডাউনলোড ব্যর্থ"
                 try { File(File(app.filesDir, "wm_inpaint"), MODEL_NAME + ".part").delete() } catch (_: Throwable) {}
@@ -227,7 +313,7 @@ internal object WebModeInpainter {
         var delegate: GpuDelegate? = null
         var candidate: Interpreter? = null
         try {
-            val file = modelFile(ctx)
+            val file = modelFile(ctx).takeIf { it.isFile && it.length() == EXPECTED_BYTES } ?: return null
             val mapped = RandomAccessFile(file, "r").use { raf ->
                 raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, file.length())
             }
@@ -266,21 +352,46 @@ internal object WebModeInpainter {
      * [mask] is region-local: non-zero means erase. Returns generated ARGB values at masked entries,
      * or null when MI-GAN is unavailable or the input cannot safely be processed.
      */
-    fun fill(ctx: Context, bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int, mask: ByteArray): IntArray? {
+    fun fill(
+        ctx: Context, bitmap: Bitmap, x0: Int, y0: Int, rw: Int, rh: Int,
+        mask: ByteArray, bubbleNo: Int = -1
+    ): IntArray? {
+        val queuedAt = SystemClock.elapsedRealtime()
         OnnxHeavyGate.lock.lock()
+        val waitMs = SystemClock.elapsedRealtime() - queuedAt
+        OcrDiag.log("MIGAN_QUEUE", "bubble=$bubbleNo waitMs=$waitMs")
         try {
+            if (inferenceCircuitOpen) {
+                OcrDiag.log("CLEAN", "migan_unavailable reason=inference_circuit_open tier3_skipped")
+                return null
+            }
             if (!aiSafe(ctx)) return null
             val marker = crashMarker(ctx)
             try { marker.parentFile?.mkdirs(); marker.writeText("1") } catch (_: Throwable) {}
             val t0 = SystemClock.elapsedRealtime()
             try {
                 val result = fillLocked(ctx, bitmap, x0, y0, rw, rh, mask)
-                if (result != null) {
-                    val elapsed = SystemClock.elapsedRealtime() - t0
-                    lastNote = "last region " + (elapsed / 100) / 10.0 + "s"
-                    if (elapsed > 9000L) slowUntil = SystemClock.elapsedRealtime() + SLOW_PAUSE_MS
+                if (result == null) {
+                    openInferenceCircuit("initialization_or_inference_failed")
+                    return null
                 }
+                val invalidReason = validateOutput(bitmap, x0, y0, rw, rh, mask, result)
+                if (invalidReason != null) {
+                    OcrDiag.log("MIGAN_BLANK_OUTPUT", "bubble=$bubbleNo reason=$invalidReason")
+                    openInferenceCircuit(invalidReason)
+                    return null
+                }
+                synchronized(this) {
+                    inferenceCircuitUntilMs = 0L
+                    inferenceCircuitReason = ""
+                }
+                val elapsed = SystemClock.elapsedRealtime() - t0
+                lastNote = "last region " + (elapsed / 100) / 10.0 + "s"
+                if (elapsed > 9000L) slowUntil = SystemClock.elapsedRealtime() + SLOW_PAUSE_MS
                 return result
+            } catch (t: Throwable) {
+                openInferenceCircuit(t.javaClass.simpleName + ":" + (t.message ?: ""))
+                return null
             } finally {
                 try { marker.delete() } catch (_: Throwable) {}
             }
@@ -302,12 +413,29 @@ internal object WebModeInpainter {
             val bw = bitmap.width
             val bh = bitmap.height
             // Use a square context window around the text; MI-GAN accepts a fixed 512x512 input.
-            val side = minOf(maxOf(160, (maxOf(rw, rh) * 1.6f).toInt()), bw, bh)
+            // Model tensors always stay [1,4,512,512]/[1,3,512,512]. Some text boxes are wider/taller
+            // than the source panel can hold as a square crop, so pad beyond the image edges by replicating
+            // edge pixels instead of failing early for inputs such as 272x154.
+            val side = minOf(SIZE, maxOf(160, (maxOf(rw, rh) * 1.6f).toInt()))
             if (rw > side || rh > side) return null
-            val cx0 = (x0 + rw / 2 - side / 2).coerceIn(0, bw - side)
-            val cy0 = (y0 + rh / 2 - side / 2).coerceIn(0, bh - side)
+            val cx0 = x0 + rw / 2 - side / 2
+            val cy0 = y0 + rh / 2 - side / 2
             val crop = IntArray(side * side)
-            bitmap.getPixels(crop, 0, side, cx0, cy0, side, side)
+            val validX0 = maxOf(0, cx0)
+            val validX1 = minOf(bw, cx0 + side)
+            val validWidth = validX1 - validX0
+            if (validWidth <= 0 || bw <= 0 || bh <= 0) return null
+            val leftOffset = validX0 - cx0
+            val rightOffset = leftOffset + validWidth
+            for (row in 0 until side) {
+                val sourceY = (cy0 + row).coerceIn(0, bh - 1)
+                val rowOffset = row * side
+                bitmap.getPixels(crop, rowOffset + leftOffset, side, validX0, sourceY, validWidth, 1)
+                val leftPixel = crop[rowOffset + leftOffset]
+                for (x in 0 until leftOffset) crop[rowOffset + x] = leftPixel
+                val rightPixel = crop[rowOffset + rightOffset - 1]
+                for (x in rightOffset until side) crop[rowOffset + x] = rightPixel
+            }
             srcBmp = Bitmap.createBitmap(crop, side, side, Bitmap.Config.ARGB_8888)
             scaledIn = Bitmap.createScaledBitmap(srcBmp, SIZE, SIZE, true)
             val px = IntArray(PLANE)

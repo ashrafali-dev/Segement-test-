@@ -133,6 +133,7 @@ class MainActivity : Activity() {
     private val realtimeBatchKeyByChapter = java.util.IdentityHashMap<Chapter, String>()
     private val realtimeBatchLayouts = LinkedHashMap<String, WebModeLayout>(16, 0.75f, true)
     private val realtimeBatchCanvasVersions = mutableMapOf<String, Map<String, Long>>()
+    private val realtimeBatchSignatureByKey = mutableMapOf<String, String>()
 
     // Scanning (Web Mode) chapters whose chatbot job failed: they are sent again automatically (twice at most).
     // The OCR text is still in memory, so nothing is scanned again.
@@ -1138,7 +1139,8 @@ class MainActivity : Activity() {
         var titleOffset: Int,
         val bubbles: MutableList<WmBubble> = ArrayList(),
         val hashes: LinkedHashSet<String> = LinkedHashSet(),
-        val seen: HashSet<String> = HashSet()
+        val seen: HashSet<String> = HashSet(),
+        var panelSignature: String = ""
     )
     private var rtVisibleOcrBatch: RtVisibleOcrBatch? = null
     private var rtVisibleOcrFlush: Runnable? = null
@@ -1155,6 +1157,174 @@ class MainActivity : Activity() {
     private val rtVisibleOcrIdleFlushMs: Long get() = if (lensRealtimeFastPath()) 350L else longArrayOf(800L, 1500L, 2500L, 3500L)[rtBatchLevel()]
     private val rtVisibleOcrMaxHoldMs: Long get() = if (lensRealtimeFastPath()) 500L else longArrayOf(1000L, 1800L, 3000L, 4500L)[rtBatchLevel()]
     private var rtVisibleOcrFirstAtMs = 0L
+
+    // Realtime is intentionally a strict state machine: visible read -> visible placement -> one-panel prefetch.
+    private enum class RealtimeReadState { IDLE, READING_VISIBLE, PLACING_VISIBLE, PREFETCH_NEXT }
+    private var realtimeReadState = RealtimeReadState.IDLE
+    private var realtimeVisibleJobActive = false
+    private var realtimeVisiblePlaced = false
+    private var realtimeCurrentSignature = ""
+    private var realtimePausedSignature = ""
+    // Only retain placement metadata for persistence/scroll logs; WebModeWriter owns the DOM renderer.
+    private var realtimeOverlayPlacedCount = 0
+    private var realtimeOverlayPanelTop = 0
+    private var realtimeOverlayPanelSignature = ""
+    private var translatingPillSignature = ""
+
+    private fun panelTopFromSignature(signature: String): Int =
+        (Regex("@\\d+x\\d+@-?\\d+,(-?\\d+)").find(signature)
+            ?: Regex("@-?\\d+,(-?\\d+)").find(signature))
+            ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+    private fun clearRealtimeOverlay(reason: String) {
+        // The existing DOM renderer is cleared on a real viewport change; state transitions do not clear it.
+        if (reason == "scroll") {
+            OcrDiag.log(
+                "OVERLAY_CLEAR",
+                "reason=scroll hadOverlay=${realtimeOverlayPlacedCount > 0} panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
+            )
+        }
+        try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
+        realtimeOverlayPlacedCount = 0
+        realtimeOverlayPanelTop = 0
+        realtimeOverlayPanelSignature = ""
+    }
+
+    private fun showRealtimeTranslatingPill(signature: String) {
+        if (signature.isBlank()) return
+        translatingPillSignature = signature
+        val panelTop = panelTopFromSignature(signature)
+        OcrDiag.log("TRANSLATING_UI", "show=true panelTop=$panelTop")
+        val script = """
+            (function(){
+              var id='__ns_rt_translating',e=document.getElementById(id);
+              if(!e){e=document.createElement('div');e.id=id;e.setAttribute('data-ns-ui','1');
+                e.style.cssText='position:fixed;top:8px;right:8px;z-index:2147483647;pointer-events:none;' +
+                  'padding:5px 9px;border-radius:14px;background:rgba(28,30,44,.82);color:#fff;' +
+                  'font:500 12px sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.25);opacity:.92;transition:opacity .15s;';
+                e.textContent='অনুবাদ হচ্ছে…';(document.body||document.documentElement).appendChild(e);
+              }
+              e.style.display='block';e.style.opacity='.92';return 'shown';
+            })()
+        """.trimIndent()
+        try { novelWv.evaluateJavascript(script, null) } catch (_: Throwable) {}
+    }
+
+    private fun hideRealtimeTranslatingPill(reason: String) {
+        if (translatingPillSignature.isBlank()) return
+        val signature = translatingPillSignature
+        translatingPillSignature = ""
+        OcrDiag.log("TRANSLATING_UI", "hide=true reason=$reason panelTop=${panelTopFromSignature(signature)}")
+        val script = "(function(){var e=document.getElementById('__ns_rt_translating');if(e){e.style.opacity='0';e.style.display='none';}return 'hidden';})()"
+        try { novelWv.evaluateJavascript(script, null) } catch (_: Throwable) {}
+    }
+
+    private fun clearRealtimePlacementQueue(nextSignature: String) {
+        var dropped = 0
+        val overlayInvalidated = if (
+            realtimeOverlayPlacedCount > 0 &&
+            realtimeOverlayPanelSignature.isNotBlank() &&
+            realtimeOverlayPanelSignature != nextSignature
+        ) realtimeOverlayPlacedCount else 0
+        val pending = rtVisibleOcrBatch
+        if (pending != null && pending.panelSignature != nextSignature) {
+            dropped += pending.bubbles.size
+            clearRealtimeVisibleOcrBatch()
+        }
+        val staleQueued = queue.filter { ch ->
+            isRealtimeBubbleBatch(ch) && realtimeBatchSignature(ch) != nextSignature
+        }
+        for (ch in staleQueued) {
+            val layout = realtimeBatchLayout(ch)
+            val oldSignature = realtimeBatchSignature(ch).orEmpty()
+            val oldTop = panelTopFromSignature(oldSignature)
+            layout?.bubbles?.forEachIndexed { index, bubble ->
+                OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
+            }
+            dropped += layout?.bubbles?.size ?: 1
+            queue.remove(ch)
+            releaseDeepSeekHashBatch(ch)
+        }
+        val active = running
+        if (active != null && isRealtimeBubbleBatch(active) &&
+            realtimeBatchSignature(active) != nextSignature) {
+            dropped += realtimeBatchLayout(active)?.bubbles?.size ?: 1
+            // Keep its identity until the reply returns; applyTranslation will reject it by the captured signature.
+        }
+        OcrDiag.log(
+            "PLACE_QUEUE_CLEAR",
+            "reason=visible_panel_changed dropped=$dropped overlayInvalidated=$overlayInvalidated " +
+                "previousPanel=$realtimeOverlayPanelSignature nextPanel=$nextSignature"
+        )
+    }
+
+    private fun transitionRealtimeReadState(next: RealtimeReadState, reason: String) {
+        val previous = realtimeReadState
+        if (previous == next) return
+        realtimeReadState = next
+        OcrDiag.log("REALTIME_STATE", "from=$previous to=$next reason=$reason")
+        if ((next == RealtimeReadState.PREFETCH_NEXT || next == RealtimeReadState.IDLE) && realtimeOverlayPlacedCount > 0) {
+            OcrDiag.log("OVERLAY_PERSIST", "state=$previous to=$next kept=true panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount")
+        }
+    }
+
+    private fun beginRealtimeVisibleRead(signature: String) {
+        val previousSignature = realtimeCurrentSignature
+        if (previousSignature.isNotBlank() && previousSignature != signature) {
+            clearRealtimePlacementQueue(signature)
+            clearRealtimeOverlay("scroll")
+            hideRealtimeTranslatingPill("cancelled")
+        }
+        realtimeCurrentSignature = signature
+        if (realtimePausedSignature.isNotBlank() && realtimePausedSignature != signature) realtimePausedSignature = ""
+        realtimeVisiblePlaced = false
+        realtimeVisibleJobActive = true
+        if (realtimeReadState != RealtimeReadState.IDLE && realtimeReadState != RealtimeReadState.READING_VISIBLE) {
+            transitionRealtimeReadState(RealtimeReadState.IDLE, "visible_read_restart")
+        }
+        transitionRealtimeReadState(RealtimeReadState.READING_VISIBLE, "visible_panel_changed")
+        showRealtimeTranslatingPill(signature)
+    }
+
+    private fun markRealtimeVisiblePlacing(reason: String) {
+        realtimeVisibleJobActive = false
+        if (realtimeReadState == RealtimeReadState.IDLE) {
+            transitionRealtimeReadState(RealtimeReadState.READING_VISIBLE, "visible_ocr_ready")
+        }
+        transitionRealtimeReadState(RealtimeReadState.PLACING_VISIBLE, reason)
+    }
+
+    private fun pauseRealtimeVisible(reason: String = "visible_empty") {
+        realtimeVisibleJobActive = false
+        realtimeVisiblePlaced = false
+        realtimePausedSignature = realtimeCurrentSignature
+        OcrDiag.log("REALTIME_PAUSE", "reason=$reason waitingFor=user_scroll")
+        hideRealtimeTranslatingPill("cancelled")
+        transitionRealtimeReadState(RealtimeReadState.IDLE, reason)
+    }
+
+    private fun completeRealtimeVisiblePlacement(placedCount: Int, success: Boolean, reason: String) {
+        // Ignore stale placement callbacks after a newer viewport has already taken ownership.
+        if (realtimeReadState != RealtimeReadState.PLACING_VISIBLE) return
+        realtimeVisibleJobActive = false
+        if (success && placedCount > 0) {
+            realtimeVisiblePlaced = true
+            realtimePausedSignature = ""
+            OcrDiag.log("REALTIME_PLACE_DONE", "placed=$placedCount reason=$reason")
+            hideRealtimeTranslatingPill("placement_done")
+            transitionRealtimeReadState(RealtimeReadState.PREFETCH_NEXT, "visible_placement_complete")
+        } else {
+            pauseRealtimeVisible("visible_empty")
+        }
+    }
+
+    private fun finishRealtimePrefetchIfIdle(reason: String) {
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) return
+        if (aheadOcrHandle != null || rtAheadTranslationQueue.isNotEmpty() || rtAheadWorkerBusy ||
+            rtAheadHold.isNotEmpty() || rtAheadHoldFlushRunnable != null) return
+        realtimeVisiblePlaced = false
+        transitionRealtimeReadState(RealtimeReadState.IDLE, reason)
+    }
 
     private val rtAheadTranslationQueue = ArrayList<RtAheadTranslationTask>()
     private val rtAheadTranslationQueuedIds = mutableSetOf<String>()
@@ -1192,8 +1362,18 @@ class MainActivity : Activity() {
     private var lastAheadBudgetLogAtMs = 0L
 
     private fun startAheadOcr() {
-        if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
-        val configuredN = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) {
+            OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
+            return
+        }
+        // Never overlap next-panel OCR with a visible reply/placement still being handled.
+        if (running != null || queue.isNotEmpty() || rtVisibleOcrBatch != null || activePlacementIds.isNotEmpty()) return
+        if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
+            finishRealtimePrefetchIfIdle("prefetch_disabled")
+            return
+        }
+        // The visible screen is the product; speculate on at most one next panel.
+        val configuredN = (Prefs.get(this, "rtAheadOcr", "1").toIntOrNull() ?: 1).coerceIn(0, 1)
         val runtime = Runtime.getRuntime()
         val maxHeapMb = runtime.maxMemory() / 1_048_576L
         val freeHeapMb = (runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())) / 1_048_576L
@@ -1206,9 +1386,7 @@ class MainActivity : Activity() {
         val n = when {
             configuredN == 0 -> 0
             memoryInfo.lowMemory || freeHeapMb < 72L -> 0
-            maxHeapMb <= 192L -> minOf(configuredN, 1)
-            maxHeapMb <= 256L -> minOf(configuredN, 2)
-            else -> configuredN
+            else -> minOf(configuredN, 1)
         }
         deepSeekAheadAtMs = System.currentTimeMillis()
         if (n != configuredN && System.currentTimeMillis() - lastAheadBudgetLogAtMs >= 5_000L) {
@@ -1219,7 +1397,10 @@ class MainActivity : Activity() {
                     " freeHeapMB=" + freeHeapMb + " systemLowMemory=" + memoryInfo.lowMemory
             )
         }
-        if (n == 0) return
+        if (n == 0) {
+            finishRealtimePrefetchIfIdle("prefetch_memory_or_disabled")
+            return
+        }
         val token = navToken
         val seq = ++aheadOcrSeq
         val collectedPanels = LinkedHashMap<String, WebModeAheadPanel>()
@@ -1233,10 +1414,16 @@ class MainActivity : Activity() {
         }
         fun flushCollected() {
             cancelCollectedFlush()
+            if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) {
+                collectedPanels.clear()
+                OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
+                return
+            }
             if (collectedPanels.isEmpty()) return
-            val ready = collectedPanels.values.sortedBy { it.top }
+            val ready = collectedPanels.values.sortedBy { it.top }.take(1)
             collectedPanels.clear()
-            queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready)
+            // A strict one-panel look-ahead cannot hold a small panel to combine it with another panel.
+            queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready, force = true)
         }
         fun scheduleCollectedFlush() {
             if (collectedPanels.isEmpty() || collectedFlushRunnable != null) return
@@ -1262,7 +1449,8 @@ class MainActivity : Activity() {
             ahead = n,
             fullChapterLinks = true,
             onAheadPanelsReady = { panels ->
-                if (seq == aheadOcrSeq && token == navToken) {
+                if (seq == aheadOcrSeq && token == navToken &&
+                    realtimeReadState == RealtimeReadState.PREFETCH_NEXT && realtimeVisiblePlaced) {
                     // The read-ahead OCR can be the first job to notice a canvas page swap.
                     // Clear stale visible text immediately, even while the chatbot is busy.
                     clearCanvasTransitionOverlay(novelWv.url.orEmpty())
@@ -1294,7 +1482,10 @@ class MainActivity : Activity() {
                     collectedPanels.clear()
                 }
                 deepSeekAheadAtMs = System.currentTimeMillis()
-                handler.postDelayed({ pumpRealtimeAheadTranslation() }, 80L)
+                handler.postDelayed({
+                    pumpRealtimeAheadTranslation()
+                    finishRealtimePrefetchIfIdle("prefetch_ocr_done")
+                }, 80L)
             }
         ))
     }
@@ -1304,7 +1495,8 @@ class MainActivity : Activity() {
         layout: WebModeLayout,
         hashes: Set<String>,
         token: Int,
-        force: Boolean = false
+        force: Boolean = false,
+        panelSignature: String = realtimeCurrentSignature
     ) {
         val page = cleanUrl(chapter.url)
         if (page.isBlank() || token != navToken ||
@@ -1314,13 +1506,24 @@ class MainActivity : Activity() {
             return
         }
 
+        if (panelSignature.isNotBlank() && panelSignature != realtimeCurrentSignature) {
+            layout.bubbles.forEachIndexed { index, bubble ->
+                OcrDiag.log("PLACE_REJECT", "panelTop=${panelTopFromSignature(panelSignature)} bubble=${index + 1} current=false reason=stale")
+            }
+            OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${layout.bubbles.size}")
+            synchronized(deepSeekInFlightTextHashes) { deepSeekInFlightTextHashes.removeAll(hashes) }
+            return
+        }
         var pending = rtVisibleOcrBatch
-        if (pending != null && (pending.pageUrl != page || pending.navToken != token)) {
+        if (pending != null && (pending.pageUrl != page || pending.navToken != token ||
+                pending.panelSignature != panelSignature)) {
+            val dropped = pending.bubbles.size
             clearRealtimeVisibleOcrBatch()
+            OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=$dropped")
             pending = null
         }
         if (pending == null) {
-            pending = RtVisibleOcrBatch(page, token, chapter, layout.titleOffset)
+            pending = RtVisibleOcrBatch(page, token, chapter, layout.titleOffset, panelSignature = panelSignature)
             rtVisibleOcrBatch = pending
             rtVisibleOcrFirstAtMs = android.os.SystemClock.elapsedRealtime()
         } else {
@@ -1368,6 +1571,12 @@ class MainActivity : Activity() {
         }
         val pending = rtVisibleOcrBatch ?: return
         if (expectedPage != null && expectedPage != pending.pageUrl) return
+        if (pending.panelSignature.isNotBlank() && pending.panelSignature != realtimeCurrentSignature) {
+            val dropped = pending.bubbles.size
+            clearRealtimeVisibleOcrBatch()
+            OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=$dropped")
+            return
+        }
 
         // Another viewport OCR job is still reading the same screen: let its bubbles join this request
         // (bounded, so real-time never waits long). This is what keeps three bubbles in ONE request.
@@ -1517,7 +1726,14 @@ class MainActivity : Activity() {
      * Put already-cached bubble translations straight onto the page overlay (no chatbot request)
      * and mark them as translated so they are not selected again.
      */
-    private fun placeCachedBubbles(pageUrl: String, bubbles: List<WmBubble>, values: List<String>, hashes: Set<String>) {
+    private fun placeCachedBubbles(
+        pageUrl: String,
+        bubbles: List<WmBubble>,
+        values: List<String>,
+        hashes: Set<String>,
+        completesVisiblePlacement: Boolean = false,
+        panelSignature: String = realtimeCurrentSignature
+    ) {
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(hashes)
             deepSeekTranslatedTextHashes.addAll(hashes)
@@ -1531,9 +1747,46 @@ class MainActivity : Activity() {
         val script = WebModeWriter.bubbleScript(
             cumulative,
             cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-            Prefs.fontFile(this), pageKey(pageUrl)
+            Prefs.fontFile(this), pageKey(pageUrl),
+            auditBubbleFingerprints = bubbles.map { WebModeLayout.fingerprint(it) }.toSet()
         )
-        novelWv.evaluateJavascript(script, null)
+        val panelTop = panelTopFromSignature(panelSignature)
+        bubbles.forEachIndexed { index, bubble ->
+            OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)}")
+        }
+        novelWv.evaluateJavascript(script) { raw ->
+            if (panelSignature != realtimeCurrentSignature) {
+                bubbles.forEachIndexed { index, bubble ->
+                    OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
+                }
+                if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "stale_cached_placement")
+                return@evaluateJavascript
+            }
+            val success = decode(raw).contains("ok")
+            if (success) {
+                val accepted = values.count { it.isNotBlank() }
+                if (accepted > 0) {
+                    realtimeOverlayPlacedCount = accepted
+                    realtimeOverlayPanelTop = panelTop
+                    realtimeOverlayPanelSignature = panelSignature
+                }
+                bubbles.forEachIndexed { index, bubble ->
+                    if (!values.getOrNull(index).isNullOrBlank()) {
+                        OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=true")
+                    }
+                }
+                if (completesVisiblePlacement) {
+                    completeRealtimeVisiblePlacement(accepted, accepted > 0, "cached_visible")
+                }
+            } else {
+                bubbles.forEachIndexed { index, bubble ->
+                    if (!values.getOrNull(index).isNullOrBlank()) {
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=overlay_script_failed")
+                    }
+                }
+                if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "overlay_script_failed")
+            }
+        }
         hasTr = true
         shownTranslated = true
         updatePill()
@@ -1596,8 +1849,15 @@ class MainActivity : Activity() {
     }
 
     private fun queueRealtimeAheadTranslations(pageUrl: String, panels: List<WebModeAheadPanel>, force: Boolean = false) {
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) {
+            OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
+            return
+        }
         refreshRtScroll()
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
+            finishRealtimePrefetchIfIdle("prefetch_disabled")
+            return
+        }
         val page = cleanUrl(pageUrl)
         if (page != rtAheadHoldPage) {
             rtAheadHold.clear()
@@ -1719,8 +1979,9 @@ class MainActivity : Activity() {
         // One WmBubble = one translation unit; OCR line grouping (BubbleGrouping) decides how many there are.
         OcrDiag.log(
             "AHEAD_QUEUE",
-            "bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize sizes=" +
-                chunks.joinToString(",") { it.size.toString() }
+            "bubbles=${batch.size} panels=${panelGroups.size.coerceAtMost(1)} requests=${chunks.size} cap=$chunkSize sizes=" +
+                chunks.joinToString(",") { it.size.toString() } +
+                " state=$realtimeReadState visiblePlaced=$realtimeVisiblePlaced"
         )
         Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize")
         val minChunk = minOf(4, chunkSize)
@@ -1953,7 +2214,11 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
     }
 
     private fun pumpRealtimeAheadTranslation() {
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this)) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this)) {
+            finishRealtimePrefetchIfIdle("prefetch_disabled")
+            return
+        }
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) return
         if (rtPausedForReOcr) { scheduleRealtimeAheadPump(400L); return }
         // Read-ahead uses its own WebView and can overlap with a foreground bubble batch. The shorter,
         // randomized real-time request gap still prevents rapid-fire submissions.
@@ -2109,6 +2374,7 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
             dispatchAheadSend(0)
             return
         }
+        finishRealtimePrefetchIfIdle("prefetch_queue_drained")
     }
 
     private fun awaitRealtimeAheadSend(
@@ -2253,7 +2519,10 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
         }
         if (webModeStage == "Pre-translating upcoming panel") clearWebModeProgress()
         updateProgressUi()
-        handler.postDelayed({ pumpRealtimeAheadTranslation() }, 180L)
+        handler.postDelayed({
+            pumpRealtimeAheadTranslation()
+            finishRealtimePrefetchIfIdle("prefetch_translation_failed")
+        }, 180L)
     }
 
     private fun cancelRealtimeAheadWorker(requeue: Boolean) {
@@ -2347,12 +2616,20 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
         deepSeekLastOcrAtMs = System.currentTimeMillis()
         if (webModeStage == "Pre-translating upcoming panel") clearWebModeProgress()
         updateProgressUi()
-        handler.postDelayed({ pumpRealtimeAheadTranslation() }, 100L)
+        handler.postDelayed({
+            pumpRealtimeAheadTranslation()
+            finishRealtimePrefetchIfIdle("prefetch_translation_done")
+        }, 100L)
     }
 
     private fun clearRealtimeAheadStateForNavigation() {
         clearRealtimeVisibleOcrBatch()
         cancelRealtimeAheadWorker(requeue = false)
+        realtimeVisibleJobActive = false
+        realtimeVisiblePlaced = false
+        realtimeCurrentSignature = ""
+        realtimePausedSignature = ""
+        transitionRealtimeReadState(RealtimeReadState.IDLE, "navigation")
         rtAheadTranslationQueue.clear()
         rtAheadTranslationQueuedIds.clear()
         rtAheadTranslationTasksByJobKey.clear()
@@ -2561,11 +2838,16 @@ bgSig=window.__nsRtBgSignature||'';
 if(!hasLargeImage&&bgSig)v.push(bgSig);
 // Keep deterministic order so polling doesn't re-run OCR because DOM order jittered.
 v.sort();
-if(v.length)return 'IMG:'+v.join('|');
+if(v.length){var sig='IMG:'+v.join('|');window.__nsRtVisibleSig=sig;return sig;}
 var rootEl=document.querySelector('[class*=chapter-content],[class*=chapter-body],[id*=chapter],article,main')||document.body;
-var t=String((rootEl&&(rootEl.innerText||rootEl.textContent))||'').replace(/\s+/g,' ').trim().slice(0,1200);
-return t.length>=40?'TXT:'+t:'';
-}catch(e){return '';}})();"""
+var textRoot=rootEl?rootEl.cloneNode(true):document.body.cloneNode(true);
+var nsUi=textRoot.querySelectorAll('#__ns_wm_overlay,#__ns_rt_translating,[data-ns-ui="1"]');
+for(var ui=0;ui<nsUi.length;ui++)if(nsUi[ui].parentNode)nsUi[ui].parentNode.removeChild(nsUi[ui]);
+var t=String((textRoot&&(textRoot.innerText||textRoot.textContent))||'').replace(/\s+/g,' ').trim().slice(0,1200);
+var textSig=t.length>=40?'TXT:'+t:'';
+window.__nsRtVisibleSig=textSig;
+return textSig;
+}catch(e){window.__nsRtVisibleSig='';return '';}})();"""
             val probeSeq = ++deepSeekPollEvalSeq
             deepSeekProbeInFlight = true
             deepSeekProbeStartedAtMs = android.os.SystemClock.elapsedRealtime()
@@ -2605,13 +2887,54 @@ return t.length>=40?'TXT:'+t:'';
                 // A fast flick through the page is not read: the panel is gone before OCR could finish. Slow
                 // reading and standing still are never held back (see ScrollGate).
                 val scrollHold = ScrollGate.holdOcr(android.os.SystemClock.elapsedRealtime(), novelWv.height)
-                val periodicRecheck = hasImages && !runningAhead && !scrollHold &&
+                val pausedSameVisible = signature.isNotBlank() && signature == realtimePausedSignature
+                val periodicRecheck = hasImages && !runningAhead && !scrollHold && !pausedSameVisible &&
                     signature != deepSeekStallBlockedSignature &&
                     now - deepSeekLastOcrAtMs >= 45000L
                 // Wait for scrolling to settle before starting network OCR. This ~300 ms debounce
                 // avoids competing with fast flick-scrolls and prevents repeated OCR on transient panels.
                 if (signature != deepSeekPendingSig) { deepSeekPendingSig = signature; deepSeekPendingSince = now }
                 val settled = now - deepSeekPendingSince >= 300L && !scrollHold
+                val viewportChangedAfterSettle = hasImages && changed && settled &&
+                    signature.isNotBlank() && signature != realtimeCurrentSignature
+                if (viewportChangedAfterSettle && realtimeReadState != RealtimeReadState.IDLE) {
+                    OcrDiag.log("REALTIME_CANCEL", "reason=user_scrolled newVisible=${signature.take(180)}")
+                    when (realtimeReadState) {
+                        RealtimeReadState.READING_VISIBLE -> {
+                            if (realtimeVisibleJobActive) {
+                                webModeJobSerial++
+                                webModeHandle?.cancel()
+                                webModeHandle = null
+                                webModeLastProgressAtMs = 0L
+                            }
+                            realtimeVisibleJobActive = false
+                            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+                        }
+                        RealtimeReadState.PREFETCH_NEXT -> {
+                            aheadOcrSeq++
+                            aheadOcrHandle?.cancel()
+                            aheadOcrHandle = null
+                            aheadOcrStage = ""
+                            aheadOcrPct = -1
+                            cancelRealtimeAheadWorker(requeue = false)
+                            rtAheadTranslationQueue.clear()
+                            rtAheadTranslationQueuedIds.clear()
+                            rtAheadHold.clear()
+                            rtAheadHoldFlushRunnable?.let { handler.removeCallbacks(it) }
+                            rtAheadHoldFlushRunnable = null
+                            rtAheadHoldSince = 0L
+                            realtimeVisiblePlaced = false
+                            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+                        }
+                        RealtimeReadState.PLACING_VISIBLE -> {
+                            // The prior overlay callback may finish for its own image, but it cannot
+                            // unlock a prefetch for this new viewport because completion checks the state.
+                            realtimeVisiblePlaced = false
+                            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+                        }
+                        RealtimeReadState.IDLE -> Unit
+                    }
+                }
                 // Foreground OCR may pre-empt only an ahead-translation job; it must never interrupt
                 // a visible-panel translation or a user-initiated extraction.
                 // Reading the screen (OCR) does not use the chatbot, so it must not wait for the chatbot to finish
@@ -2625,6 +2948,11 @@ return t.length>=40?'TXT:'+t:'';
                     ((hasImages && ((changed && settled) || periodicRecheck)) || textFallbackDue)) {
                     if (runningAhead && changed && settled) interruptRealtimeAheadForVisiblePanel()
                     deepSeekVisibleSignature = signature
+                    if (hasImages && ((changed && settled) || periodicRecheck)) {
+                        beginRealtimeVisibleRead(signature)
+                    } else if (textFallbackDue) {
+                        pauseRealtimeVisible("visible_empty")
+                    }
                     deepSeekLastOcrAtMs = now
                     if (!hasImages) deepSeekNoImageTriedUrl = pageKeyNow
                     val token = navToken
@@ -2636,10 +2964,9 @@ return t.length>=40?'TXT:'+t:'';
                 // Keep the DOM probe light enough that it does not compete with touch scrolling.
                 // Rule: the panel in front of the reader comes first. Look ahead only when the visible screen is
                 // already read (nothing new waiting) - never while a changed screen is still waiting for its turn.
-                if (hasImages && !scrollHold && webModeHandle == null && aheadOcrHandle == null && !changed &&
-                    // Keep a bounded OCR/translation pipeline: allow the next ten-panel batch
-                    // to be prepared while the previous batch is still being translated.
-                    rtAheadTranslationQueue.size < 4 &&
+                if (realtimeReadState == RealtimeReadState.PREFETCH_NEXT && realtimeVisiblePlaced &&
+                    hasImages && !scrollHold && webModeHandle == null && aheadOcrHandle == null && !changed &&
+                    rtAheadTranslationQueue.isEmpty() && !rtAheadWorkerBusy &&
                     System.currentTimeMillis() - deepSeekAheadAtMs >= 220L) {
                     startAheadOcr()
                 }
@@ -3028,6 +3355,22 @@ return t.length>=40?'TXT:'+t:'';
     private var running: Chapter? = null
     private var runToken = 0
     private var progress = 0
+
+    private data class ScanChapterTranslationState(
+        val context: WebModeChapterContext,
+        val windows: List<WebModeChapterWindow>,
+        val startedAtMs: Long,
+        var windowIndex: Int = 0,
+        val translations: LinkedHashMap<Int, String> = LinkedHashMap(),
+        val summaries: MutableList<String> = mutableListOf()
+    )
+    /** Active scanning jobs only; real-time batch translation deliberately never enters this map. */
+    private val scanChapterStates = HashMap<Int, ScanChapterTranslationState>()
+    /** Only full/non-viewport image extraction marks a chapter eligible for chapter-context translation. */
+    private val scanTranslationEligibleKeys = linkedSetOf<String>()
+
+    private fun scanTranslationKey(ch: Chapter): String =
+        "${cleanUrl(ch.url)}|${ch.text.length}|${ch.text.hashCode()}"
     // Randomized request spacing: normal chapter jobs keep the safer 3.0–4.5 s gap, while
     // real-time OCR uses 0.8–1.4 s so upcoming panels can be pre-translated before the reader reaches them.
     // The gap applies after sends and completed replies; no delay is added once the gate has expired.
@@ -5666,6 +6009,8 @@ return t.length>=40?'TXT:'+t:'';
 
     /** Same work the menu's "AI Real-time Translation" row did when turning it off. */
     private fun disableRealtimeMode() {
+        clearRealtimeOverlay("dismiss")
+        hideRealtimeTranslatingPill("cancelled")
         deepSeekPollEvalSeq++
         handler.removeCallbacks(deepSeekVisiblePoll)
         handler.removeCallbacks(overlayGuard)
@@ -5690,6 +6035,7 @@ return t.length>=40?'TXT:'+t:'';
         realtimeBatchKeyByChapter.clear()
         realtimeBatchLayouts.clear()
         realtimeBatchCanvasVersions.clear()
+        realtimeBatchSignatureByKey.clear()
         if (running != null) {
             runToken++
             running = null
@@ -7031,6 +7377,9 @@ return t.length>=40?'TXT:'+t:'';
         token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false,
         onHandled: (() -> Unit)? = null
     ) {
+        if (realtimeViewport && !(realtimeReadState == RealtimeReadState.READING_VISIBLE && realtimeVisibleJobActive)) {
+            beginRealtimeVisibleRead(realtimeCurrentSignature.ifBlank { novelWv.url.orEmpty() })
+        }
         // In real-time mode the ahead worker has its own low-priority executor and does not scroll
         // the page. Let it finish caching upcoming panels while the visible panel is scanned and
         // translated; cancelling it on every viewport change made the 9-panel read-ahead starve.
@@ -7057,6 +7406,12 @@ return t.length>=40?'TXT:'+t:'';
             forceFresh -> "manual"          // Auto Real-time OCR off: one tap, one crop
             else -> "scanning"
         })
+        OcrDiag.log(
+            "MODE_ENGAGED",
+            "mode=${if (realtimeViewport) "realtime" else "scan"} " +
+                "expectations=${if (realtimeViewport) "fast" else "premium"} reason=job_start"
+        )
+        val realtimeSignatureAtStart = if (realtimeViewport) realtimeCurrentSignature else ""
         val jobSeq = ++webModeJobSerial
         webModeHandle?.cancel()
         webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()
@@ -7081,10 +7436,23 @@ return t.length>=40?'TXT:'+t:'';
                 }
             },
             onDone = { out ->
+                // A viewport may change while OCR/Lens is running even when the URL/navigation token stays the same.
+                if (realtimeViewport && realtimeSignatureAtStart.isNotBlank() &&
+                    realtimeSignatureAtStart != realtimeCurrentSignature) {
+                    val staleLayout = (out as? WebModeOutcome.Success)?.let {
+                        WebModeLayoutStore.getScan(it.chapter.url)
+                    }
+                    val oldTop = panelTopFromSignature(realtimeSignatureAtStart)
+                    staleLayout?.bubbles?.forEachIndexed { index, bubble ->
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
+                    }
+                    OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${staleLayout?.bubbles?.size ?: 0}")
+                    if (translatingPillSignature == realtimeSignatureAtStart) hideRealtimeTranslatingPill("cancelled")
                 // A newer tap or a navigation owns the progress UI now; never touch it from a stale job.
-                if (token == navToken && jobSeq == webModeJobSerial) {
+                } else if (token == navToken && jobSeq == webModeJobSerial) {
                     webModeHandle = null
                     webModeLastProgressAtMs = 0L
+                    if (realtimeViewport) realtimeVisibleJobActive = false
                     clearWebModeProgress()
                     when (out) {
                         is WebModeOutcome.Success -> {
@@ -7133,6 +7501,7 @@ return t.length>=40?'TXT:'+t:'';
                                             else rtAheadTranslationCache[rtAheadBubbleCacheKey(it)]
                                         }
                                         val cachedCount = cachedTranslations.count { !it.isNullOrBlank() }
+                                        markRealtimeVisiblePlacing("visible_ocr_complete")
                                         if (cachedCount in 1 until selected.size) {
                                             // Partly cached: place the cached bubbles immediately and send ONLY the
                                             // missing ones to the chatbot (previously all were re-translated).
@@ -7152,7 +7521,8 @@ return t.length>=40?'TXT:'+t:'';
                                             val missLayout = WebModeLayout(scanLayout.titleOffset, missBubbles)
                                             queueRealtimeVisibleOcrBatch(
                                                 missChapter, missLayout, missHashes, token,
-                                                force = forcedHashes.isNotEmpty()
+                                                force = forcedHashes.isNotEmpty(),
+                                                panelSignature = realtimeSignatureAtStart
                                             )
                                         } else if (cachedCount == selected.size) {
                                             // The translation is already cached. Place it directly instead
@@ -7164,20 +7534,38 @@ return t.length>=40?'TXT:'+t:'';
                                             remember(stripInternalMarkers(cachedMarked))
                                             shownTrRaw = cachedMarked
                                             webModeStage = "Applying cached ahead translation"
-                                            placeCachedBubbles(liveChapter.url, selected, cachedValues, hashes)
-                                            handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
+                                            markRealtimeVisiblePlacing("cached_translation_ready")
+                                            placeCachedBubbles(
+                                                liveChapter.url, selected, cachedValues, hashes,
+                                                completesVisiblePlacement = true
+                                            )
                                         } else {
                                             // Hold visible OCR until 10 bubbles are collected, or flush
                                             // after a short idle pause so realtime never waits indefinitely.
                                             queueRealtimeVisibleOcrBatch(
                                                 liveChapter, liveLayout, hashes, token,
-                                                force = forcedHashes.isNotEmpty()
+                                                force = forcedHashes.isNotEmpty(),
+                                                panelSignature = realtimeSignatureAtStart
                                             )
+                                        }
+                                    } else {
+                                        val alreadyPlaced = sourceBubbles.count {
+                                            WebModeLayout.fingerprint(it) in deepSeekTranslatedTextHashes
+                                        }
+                                        if (alreadyPlaced > 0) {
+                                            markRealtimeVisiblePlacing("visible_already_translated")
+                                            completeRealtimeVisiblePlacement(alreadyPlaced, true, "visible_already_translated")
+                                        } else {
+                                            pauseRealtimeVisible("visible_empty")
                                         }
                                     }
                                 } else {
-                                    // Fallback for OCR pages where geometry metadata is unavailable.
+                                    // No OCR text means wait for user scroll. Geometry-less nonempty text may
+                                    // still use the text fallback, but never unlock speculative look-ahead.
                                     val normalized = WebModeLayout.normalizeOcrText(out.chapter.text)
+                                    pauseRealtimeVisible(
+                                        if (normalized.isBlank()) "visible_empty" else "visible_geometry_unavailable"
+                                    )
                                     if (normalized.isNotBlank()) {
                                         val hash = java.security.MessageDigest.getInstance("SHA-256")
                                             .digest((cleanUrl(out.chapter.url) + "|" + normalized).toByteArray(Charsets.UTF_8))
@@ -7195,12 +7583,22 @@ return t.length>=40?'TXT:'+t:'';
                             } else {
                                 if (out.failedPanels > 0)
                                     toast("⚠ ${out.failedPanels} panel(s) could not be read; the rest were kept")
+                                val scanBubbles = WebModeLayoutStore.getScan(out.chapter.url)?.bubbles.orEmpty()
+                                if (out.chapter.contentSel.isBlank() && scanBubbles.any { it.sourceText.isNotBlank() }) {
+                                    scanTranslationEligibleKeys.add(scanTranslationKey(out.chapter))
+                                    OcrDiag.log(
+                                        "MODE_ENGAGED",
+                                        "mode=scan expectations=premium panels=${scanBubbles.map { WebModeLogic.normalizeUrl(it.src) }.distinct().size} " +
+                                            "bubbles=${scanBubbles.size} contextEligible=true"
+                                    )
+                                }
                                 handleChapter(out.chapter, useSavedTranslation = useSaved)
                             }
                             // Only realtime viewport scans may resume the ahead-translation queue.
                             if (realtimeViewport) handler.postDelayed({ pumpRealtimeAheadTranslation() }, 350L)
                         }
                         is WebModeOutcome.Failure -> {
+                            if (realtimeViewport) pauseRealtimeVisible("visible_empty")
                             // Even when OCR/network fails, the clean screenshot fingerprint may already
                             // have proved that this canvas now shows a different manga page.
                             clearCanvasTransitionOverlay(novelWv.url.orEmpty())
@@ -8563,6 +8961,7 @@ return t.length>=40?'TXT:'+t:'';
         running = ch
         progress = 0
         val tok = ++runToken
+        scanChapterStates.keys.removeAll { it != tok }
         updateProgressUi()
         waitIdle(tok, ch, 0)
     }
@@ -8623,6 +9022,44 @@ merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
         val imageMode = webModeOn() && ch.contentSel.isBlank()
+        val structuredScanEligible = imageMode &&
+            scanTranslationEligibleKeys.contains(scanTranslationKey(ch)) &&
+            !isRealtimeBubbleBatch(ch)
+        val scanLayout = if (structuredScanEligible) WebModeLayoutStore.getScan(ch.url) else null
+        val chapterContext = if (structuredScanEligible &&
+            scanLayout != null && scanLayout.bubbles.isNotEmpty()) {
+            WebModeChapterContext.fromMarkedText(
+                chapterId = keyOf(ch),
+                mangaTitle = ch.novel.ifBlank { ch.title },
+                chapterNumber = ch.number,
+                targetLanguage = Langs.target(this),
+                markedText = marked,
+                layout = scanLayout
+            )
+        } else null
+        if (structuredScanEligible && chapterContext == null) {
+            scanTranslationEligibleKeys.remove(scanTranslationKey(ch))
+        }
+        if (chapterContext != null) {
+            val windows = chapterContext.windows()
+            if (windows.isNotEmpty()) {
+                val state = ScanChapterTranslationState(
+                    context = chapterContext,
+                    windows = windows,
+                    startedAtMs = android.os.SystemClock.elapsedRealtime()
+                )
+                scanChapterStates[tok] = state
+                if (windows.size > 1) {
+                    val reason = if (chapterContext.panelCount > 20) "panel_count" else "context_limit"
+                    OcrDiag.log(
+                        "CHAPTER_TRANSLATE_SPLIT",
+                        "windows=${windows.size} reason=$reason panels=${chapterContext.panelCount} overlapPanels=2"
+                    )
+                }
+                sendScanTranslationWindow(tok, ch, state, 0)
+                return
+            }
+        }
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
@@ -8652,6 +9089,32 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             promptWithGlossary(Prefs.activeTranslationPrompt(this), marked) +
                 markerInstruction + "\n\n" + imageRules + marked
         }
+        dispatchChatJobPrompt(tok, ch, full, jobMarkers)
+    }
+
+    /** Every structured chapter window uses the same editor/send/stream polling path as ordinary jobs. */
+    private fun sendScanTranslationWindow(
+        tok: Int,
+        ch: Chapter,
+        state: ScanChapterTranslationState,
+        windowIndex: Int
+    ) {
+        if (tok != runToken || windowIndex !in state.windows.indices) return
+        state.windowIndex = windowIndex
+        val window = state.windows[windowIndex]
+        val promptBody = state.context.promptForWindow(window, state.translations, state.summaries)
+        val full = promptWithGlossary(Prefs.activeTranslationPrompt(this), promptBody)
+        val expectedMarkers = window.outputEntries.size
+        OcrDiag.log(
+            "CHAPTER_TRANSLATE",
+            "request=${windowIndex + 1} bubbles=$expectedMarkers charsIn=${full.length} " +
+                "window=${windowIndex + 1}/${state.windows.size} panels=${window.firstPanel}-${window.lastPanelInclusive}"
+        )
+        dispatchChatJobPrompt(tok, ch, full, expectedMarkers)
+    }
+
+    private fun dispatchChatJobPrompt(tok: Int, ch: Chapter, full: String, expectedMarkers: Int) {
+        jobMarkers = expectedMarkers
         sendChatRequest(full, true, { tok == runToken }, allowDuringTranslation = true) { raw ->
             if (tok != runToken) return@sendChatRequest
             val r = decode(raw)
@@ -8659,7 +9122,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 val parts = r.substring(3).split(":")
                 val n0 = parts.getOrNull(0)?.toIntOrNull() ?: 0
                 val baseLen = parts.getOrNull(1)?.toIntOrNull() ?: 0
-                // Real-time mode starts checking almost immediately; normal jobs keep the old startup delay.
+                // Real-time batches remain latency-first; scanning windows still reuse the established sender.
                 awaitChatSend(tok, ch, n0, baseLen, 0, false)
             } else {
                 failJob(tok, ch, "Chat input not found — check that you are logged in to the chatbot")
@@ -8909,7 +9372,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             .trim()
     }
 
-    private fun finishJob(tok: Int, ch: Chapter) {
+    private fun finishJob(
+        tok: Int, ch: Chapter,
+        alignWaitStartedAtMs: Long = 0L,
+        alignRetryAfterTimeout: Boolean = false
+    ) {
         if (tok != runToken) return
         chatWv.evaluateJavascript(Js.readText()) { raw ->
             if (tok != runToken) return@evaluateJavascript
@@ -8930,12 +9397,120 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
                 return@evaluateJavascript
             }
-            val rawTranslation = cleanReply(decode(raw))
+            val cleanedResponse = cleanReply(decode(raw))
+            var rawTranslation = cleanedResponse
+            var chapterSummary = ""
+            var structuredScan = false
+            val scanState = scanChapterStates[tok]
+            if (scanState != null) {
+                structuredScan = true
+                val responseParts = WebModeChapterContext.parseResponse(cleanedResponse)
+                val returned = WebModeChapterContext.parseMarkedTranslations(responseParts.translation)
+                val currentWindow = scanState.windows.getOrNull(scanState.windowIndex)
+                if (currentWindow != null) {
+                    for (entry in currentWindow.outputEntries) {
+                        val translated = returned[entry.markerNumber]
+                        if (translated != null) scanState.translations[entry.markerNumber] = translated
+                    }
+                    val missing = currentWindow.outputEntries.count { !scanState.translations.containsKey(it.markerNumber) }
+                    OcrDiag.log(
+                        "CHAPTER_WINDOW_ALIGN",
+                        "window=${scanState.windowIndex + 1}/${scanState.windows.size} " +
+                            "expected=${currentWindow.outputEntries.size} returned=${currentWindow.outputEntries.size - missing} missing=$missing"
+                    )
+                }
+                if (responseParts.summary.isNotBlank()) scanState.summaries.add(responseParts.summary)
+                if (scanState.windowIndex + 1 < scanState.windows.size) {
+                    sendScanTranslationWindow(tok, ch, scanState, scanState.windowIndex + 1)
+                    return@evaluateJavascript
+                }
+                chapterSummary = responseParts.summary.ifBlank { scanState.summaries.lastOrNull().orEmpty() }
+                rawTranslation = scanState.context.assembleMarkedTranslation(scanState.translations)
+                val translatedCount = scanState.context.entries.count { !scanState.translations[it.markerNumber].isNullOrBlank() }
+                val outputChars = scanState.translations.values.sumOf { it.length }
+                OcrDiag.log(
+                    "CHAPTER_TRANSLATE_DONE",
+                    "ms=${android.os.SystemClock.elapsedRealtime() - scanState.startedAtMs} " +
+                        "bubblesTranslated=$translatedCount charsOut=$outputChars windows=${scanState.windows.size}"
+                )
+                if (chapterSummary.isNotBlank()) OcrDiag.log("CHAPTER_SUMMARY", "chars=${chapterSummary.length}")
+                scanChapterStates.remove(tok)
+            }
+            var partialLensFallback = false
+            // Marker output can lag the fully-completed ML Kit fallback after a Lens network failure.
+            // Wait at most 1500ms for that batch, then retry once after the 30s circuit cooldown.
+            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
+                val scanLayout = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
+                if (scanLayout != null && scanLayout.bubbles.size > 1) {
+                    val markerCount = Regex("\\[(\\d{3,})\\]").findAll(rawTranslation).count()
+                    if (markerCount == 0) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        val startedAt = if (alignWaitStartedAtMs > 0L) alignWaitStartedAtMs else now
+                        val waitedMs = (now - startedAt).coerceAtLeast(0L)
+                        val recentLensFailure = OcrEngineStatus.recentNetworkFallback(180_000L)
+                        val waitBudgetMs = if (recentLensFailure) 1_500L else 2_000L
+                        if (waitedMs < waitBudgetMs) {
+                            if (recentLensFailure) {
+                                OcrDiag.log(
+                                    "BATCH_WAIT_OCR",
+                                    "reason=lens_failed waitedMs=$waitedMs mlkitBlocks=${OcrEngineStatus.lastNetworkFallbackBlocks} markers=0"
+                                )
+                            }
+                            OcrDiag.log(
+                                "ALIGN_WAIT",
+                                "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=$waitedMs timeout=false budgetMs=$waitBudgetMs"
+                            )
+                            handler.postDelayed({
+                                if (tok == runToken) finishJob(tok, ch, startedAt, alignRetryAfterTimeout)
+                            }, minOf(250L, waitBudgetMs - waitedMs))
+                            return@evaluateJavascript
+                        }
+                        if (recentLensFailure) {
+                            val mlkitBlocks = OcrEngineStatus.lastNetworkFallbackBlocks
+                            OcrDiag.log(
+                                "ALIGN_FAIL",
+                                "reason=no_markers_after_lens_failure bubbles=${scanLayout.bubbles.size} mlkitBlocks=$mlkitBlocks waitedMs=$waitedMs"
+                            )
+                            if (!alignRetryAfterTimeout) {
+                                OcrDiag.log(
+                                    "ALIGN",
+                                    "bubbles=${scanLayout.bubbles.size} placed=0 missing=${scanLayout.bubbles.size} " +
+                                        "reason=lens_dns_failure -> RETRY_PENDING"
+                                )
+                                OcrDiag.log("ALIGN_RETRY", "bubbles=${scanLayout.bubbles.size} delayMs=30000 attempt=1 reason=network_circuit")
+                                handler.postDelayed({
+                                    if (tok == runToken) finishJob(tok, ch, startedAt, true)
+                                }, 30_000L)
+                                return@evaluateJavascript
+                            }
+                            partialLensFallback = true
+                            OcrDiag.log(
+                                "ALIGN",
+                                "bubbles=${scanLayout.bubbles.size} placed=0 missing=${scanLayout.bubbles.size} " +
+                                    "reason=lens_dns_failure -> PARTIAL"
+                            )
+                        } else {
+                            if (!alignRetryAfterTimeout) {
+                                OcrDiag.log("ALIGN_WAIT", "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=$waitedMs timeout=true")
+                                OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived bubbles=${scanLayout.bubbles.size}")
+                                OcrDiag.log("ALIGN_RETRY", "bubbles=${scanLayout.bubbles.size} delayMs=500 attempt=1")
+                                handler.postDelayed({
+                                    if (tok == runToken) finishJob(tok, ch, startedAt, true)
+                                }, 500L)
+                                return@evaluateJavascript
+                            }
+                            OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived_after_retry bubbles=${scanLayout.bubbles.size}")
+                            failJob(tok, ch, "The chatbot markers did not arrive after retry.", fallback = true)
+                            return@evaluateJavascript
+                        }
+                    }
+                }
+            }
             if (livePanelBatch && !hasMeaningfulRealtimeReply(rawTranslation)) {
                 failJob(tok, ch, "The chatbot did not send any text. Just wait — the app will try again by itself.", autoRetry = true)
                 return@evaluateJavascript
             }
-            if (rawTranslation.length < (if (livePanelBatch) 2 else 30)) {
+            if (rawTranslation.length < (if (livePanelBatch || structuredScan) 2 else 30)) {
                 failJob(tok, ch, "Could not read the answer")
                 return@evaluateJavascript
             }
@@ -8943,7 +9518,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // clipboard or saved chapter, but keep the raw marked response for DOM
             // insertion so paragraph alignment survives AI formatting changes.
             val t = stripInternalMarkers(rawTranslation)
-            if (t.isBlank() || (!livePanelBatch && t.length < 30)) {
+            if (t.isBlank() || (!livePanelBatch && !structuredScan && t.length < 30)) {
                 failJob(tok, ch, "Could not read the translation")
                 return@evaluateJavascript
             }
@@ -8961,13 +9536,28 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
                 val lay = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (lay != null) {
+                    val markerCount = Regex("\\[(\\d{3,})\\]").findAll(rawTranslation).count()
+                    OcrDiag.log("BATCH_ALIGN_START", "bubbles=${lay.bubbles.size} markers=$markerCount")
                     val placed = WebModeLayout.alignWithFallback(rawTranslation, lay)
-                    if (placed == null || placed.none { !it.isNullOrBlank() }) {
-                        failJob(tok, ch, "The chatbot answer could not be matched to the page.", fallback = true)
-                        return@evaluateJavascript
+                    val placedCount = placed?.count { !it.isNullOrBlank() } ?: 0
+                    val missingCount = (lay.bubbles.size - placedCount).coerceAtLeast(0)
+                    OcrDiag.log("BATCH_ALIGN_DONE", "placed=$placedCount missing=$missingCount")
+                    if (placed == null || placedCount * 100 < lay.bubbles.size * 90) {
+                        if (partialLensFallback) {
+                            OcrDiag.log(
+                                "ALIGN",
+                                "bubbles=${lay.bubbles.size} placed=$placedCount missing=$missingCount " +
+                                    "reason=lens_dns_failure -> PARTIAL"
+                            )
+                        } else {
+                            OcrDiag.log("ALIGN_FAIL", "reason=placement_below_90pct bubbles=${lay.bubbles.size} placed=$placedCount")
+                            failJob(tok, ch, "The chatbot answer could not be matched to at least 90% of page bubbles.", fallback = true)
+                            return@evaluateJavascript
+                        }
                     }
                 }
             }
+            if (structuredScan) scanTranslationEligibleKeys.remove(scanTranslationKey(ch))
             deferNextChatbotRequest()
             remember(t)
             // A live batch is only the newly visible bubbles; saving it against the whole chapter URL
@@ -9002,6 +9592,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 else shown != null && keyOf(shown) == keyOf(ch)
             if (shown != null && sameTarget) {
                 applyTranslation(shown, rawTranslation, true)
+                if (structuredScan && chapterSummary.isNotBlank()) showChapterSummaryDialog(shown, chapterSummary)
                 // Real-time page scans translate visible bubbles in sequence; don't prefetch a whole
                 // chapter into the same DeepSeek chat session.
                 if (!livePanelBatch) schedulePrefetch(shown)
@@ -9019,9 +9610,26 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         }
     }
 
+    /** Scanning-mode summary comes from the same chapter-context translation request; realtime never shows it. */
+    private fun showChapterSummaryDialog(ch: Chapter, summary: String) {
+        if (summary.isBlank() || isFinishing || isDestroyed) return
+        val chapterLabel = ch.number.takeIf { it.isNotBlank() }?.let { "Chapter $it" } ?: ch.title
+        AlertDialog.Builder(this)
+            .setTitle("Chapter summary")
+            .setMessage(
+                (ch.novel.ifBlank { ch.title }.takeIf { it.isNotBlank() }?.plus("\n") ?: "") +
+                    chapterLabel + "\n\n" + summary.trim()
+            )
+            .setPositiveButton("Got it", null)
+            .show()
+        OcrDiag.log("CHAPTER_SUMMARY", "chars=${summary.length} display=shown chapter=${ch.number.ifBlank { "-" }}")
+    }
+
     // on failure: stop the queue, keep the chapter on the clipboard so you can do it by hand
     private fun failJob(tok: Int, ch: Chapter, msg: String, fallback: Boolean = false, autoRetry: Boolean = false) {
         if (tok != runToken) return
+        scanChapterStates.remove(tok)
+        if (!fallback) scanTranslationEligibleKeys.remove(scanTranslationKey(ch))
         NovelStudioAnalytics.track(
             this, "translation_failed",
             mode = analyticsReadMode(),
@@ -9228,6 +9836,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // The app's own status pill (it was OCR'd and its text was translated onto the page).
             "reading this screen", "reading ahead", "reading the page", "sending to chatbot", "ai painter",
             "detector on", "detector off", "detector not installed", "mask only mode", "balloon masks",
+            "translating", "অনুবাদ হচ্ছে",
             "স্ক্রিন ক্যাপচার খালি",
             "প্রতিটি স্ক্রিন ক্যাপচার", "জোর করে বের করা হয়েছে",
             "বার্তা লিখুন", "শেয়ার করুন", "শেয়ার করুন"
@@ -9263,12 +9872,20 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             deepSeekTextHashByChapter.remove(oldKey)
             realtimeBatchLayouts.remove(oldKey)
             realtimeBatchCanvasVersions.remove(oldKey)
+            realtimeBatchSignatureByKey.remove(oldKey)
         }
         val key = "realtime-batch-" + (++realtimeBatchSerial)
         realtimeBatchKeyByChapter[ch] = key
         deepSeekTextHashByChapter[key] = hashes.toSet()
         realtimeBatchCanvasVersions[key] = WebModeLayoutStore.canvasVersions(ch.url, layout)
-        if (layout != null) realtimeBatchLayouts[key] = layout
+        realtimeBatchSignatureByKey[key] = realtimeCurrentSignature
+        if (layout != null) {
+            realtimeBatchLayouts[key] = layout
+            val panelTop = panelTopFromSignature(realtimeCurrentSignature)
+            layout.bubbles.forEachIndexed { index, bubble ->
+                OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)}")
+            }
+        }
         while (realtimeBatchLayouts.size > 64) {
             val iterator = realtimeBatchLayouts.entries.iterator()
             if (!iterator.hasNext()) break
@@ -9279,11 +9896,15 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             deepSeekTextHashByChapter.remove(staleKey)
             realtimeBatchCanvasVersions.remove(staleKey)
             realtimeBatchLayouts.remove(staleKey)
+            realtimeBatchSignatureByKey.remove(staleKey)
         }
     }
 
     private fun realtimeBatchLayout(ch: Chapter): WebModeLayout? =
         realtimeBatchKeyByChapter[ch]?.let { realtimeBatchLayouts[it] }
+
+    private fun realtimeBatchSignature(ch: Chapter): String? =
+        realtimeBatchKeyByChapter[ch]?.let { realtimeBatchSignatureByKey[it] }
 
     private fun realtimeBatchCanvasStillCurrent(ch: Chapter): Boolean {
         val key = realtimeBatchKeyByChapter[ch] ?: return false
@@ -9341,7 +9962,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (pending.bubbles.isEmpty()) clearRealtimeVisibleOcrBatch()
         }
 
-        novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null)
+        clearRealtimeOverlay("scroll")
         hasTr = false
         shownTranslated = false
         shownTrRaw = ""
@@ -9363,6 +9984,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         val reserved = deepSeekTextHashByChapter.remove(key) ?: emptySet()
         realtimeBatchLayouts.remove(key)
         realtimeBatchCanvasVersions.remove(key)
+        realtimeBatchSignatureByKey.remove(key)
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(reserved)
             val completed = if (matched == null) reserved else matched.intersect(reserved)
@@ -9378,6 +10000,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         val reserved = deepSeekTextHashByChapter.remove(key) ?: emptySet()
         realtimeBatchLayouts.remove(key)
         realtimeBatchCanvasVersions.remove(key)
+        realtimeBatchSignatureByKey.remove(key)
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(reserved)
         }
@@ -9389,9 +10012,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             shownTrRaw = text
             if (lastChapter !== ch) return
             injectBengaliFont()
-            // Real-time batches must align against the exact bubbles that produced this reply,
-            // then merge into the cumulative page overlay. Never replace the bubbles already translated.
+            // Real-time batches must match both their OCR layout and the exact visible panel signature.
             val livePanelBatch = isRealtimeBubbleBatch(ch)
+            val livePanelSignature = if (livePanelBatch) realtimeBatchSignature(ch).orEmpty() else ""
+            if (livePanelBatch && (livePanelSignature.isBlank() || livePanelSignature != realtimeCurrentSignature)) {
+                val staleLayout = realtimeBatchLayout(ch)
+                val oldTop = panelTopFromSignature(livePanelSignature)
+                staleLayout?.bubbles?.forEachIndexed { index, bubble ->
+                    OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
+                }
+                OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${staleLayout?.bubbles?.size ?: 0}")
+                releaseDeepSeekHashBatch(ch)
+                completeRealtimeVisiblePlacement(0, false, "stale_panel")
+                restoreChapterAfterBubbleJob(ch.url)
+                return
+            }
             // The URL's latest scan may already belong to another viewport. A live reply may only
             // use the layout captured with its own request; if absent, fail closed rather than guess.
             val wmLayout = if (livePanelBatch) realtimeBatchLayout(ch)
@@ -9399,10 +10034,35 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // Strict marker alignment first; a single-bubble layout falls back to its one box instead of
             // dropping the answer ("marker not found" used to leave the bubble untranslated).
             val wmPlaced = wmLayout?.let { WebModeLayout.alignWithFallback(text, it) }
+            if (!livePanelBatch && wmLayout != null && wmPlaced != null) {
+                val hostForApply = Uri.parse(ch.url).host?.lowercase().orEmpty()
+                val wtrForApply = hostForApply == "wtr-lab.com" || hostForApply.endsWith(".wtr-lab.com")
+                val applyContext = WebModeChapterContext.fromMarkedText(
+                    chapterId = keyOf(ch),
+                    mangaTitle = ch.novel.ifBlank { ch.title },
+                    chapterNumber = ch.number,
+                    targetLanguage = Langs.target(this),
+                    markedText = addInternalMarkers(ch.text, splitSingleLines = wtrForApply),
+                    layout = wmLayout
+                )
+                if (applyContext != null) {
+                    for ((panelIndex, entries) in applyContext.entries.groupBy { it.panelIndex }.toSortedMap()) {
+                        val translatedCount = entries.count { entry ->
+                            val idx = applyContext.entries.indexOfFirst { it.markerNumber == entry.markerNumber }
+                            !wmPlaced.getOrNull(idx).isNullOrBlank()
+                        }
+                        OcrDiag.log(
+                            "CHAPTER_APPLY",
+                            "panel=$panelIndex bubbles=${entries.size} translated=$translatedCount placed=$translatedCount"
+                        )
+                    }
+                }
+            }
             val wmScript: String
             if (livePanelBatch) {
                 if (wmLayout == null || wmPlaced == null) {
                     releaseDeepSeekHashBatch(ch)
+                    completeRealtimeVisiblePlacement(0, false, "alignment_failed")
                     toast("⚠️ This batch did not match the bubbles; nothing was placed in the wrong spot")
                     restoreChapterAfterBubbleJob(ch.url)
                     return
@@ -9411,7 +10071,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 wmScript = WebModeWriter.bubbleScript(
                     cumulative,
                     cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-                    Prefs.fontFile(this), pageKey(ch.url)
+                    Prefs.fontFile(this), pageKey(ch.url),
+                    auditBubbleFingerprints = wmLayout.bubbles.map { WebModeLayout.fingerprint(it) }.toSet()
                 )
             } else if (wmLayout != null && wmPlaced != null) {
                 val translatedLayout = WebModeLayout.translated(wmLayout, wmPlaced)
@@ -9425,22 +10086,70 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             val placementId = beginTranslationPlacement()
             novelWv.evaluateJavascript(wmScript) { r ->
                 finishTranslationPlacement(placementId)
+                if (livePanelBatch && livePanelSignature != realtimeCurrentSignature) {
+                    val oldTop = panelTopFromSignature(livePanelSignature)
+                    wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=false reason=stale")
+                    }
+                    releaseDeepSeekHashBatch(ch)
+                    completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
+                    restoreChapterAfterBubbleJob(ch.url)
+                    return@evaluateJavascript
+                }
                 if (lastChapter !== ch) {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
+                    completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
                     return@evaluateJavascript
                 }
                 if (r != null && r.contains("ok")) {
                     if (livePanelBatch) {
-                        val matched = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
-                            if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else WebModeLayout.fingerprint(bubble)
-                        }?.toSet().orEmpty()
-                        completeDeepSeekHashBatch(ch, matched)
+                        val matchedIndices = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
+                            if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else index
+                        }.orEmpty()
+                        val matched = matchedIndices.mapNotNull { index ->
+                            wmLayout?.bubbles?.getOrNull(index)?.let { WebModeLayout.fingerprint(it) }
+                        }.toSet()
+                        val panelTop = panelTopFromSignature(livePanelSignature)
+                        if (matched.isEmpty()) {
+                            wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                                OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=no_translation_text")
+                            }
+                            releaseDeepSeekHashBatch(ch)
+                            completeRealtimeVisiblePlacement(0, false, "no_translation_text")
+                        } else {
+                            matchedIndices.forEach { index ->
+                                wmLayout?.bubbles?.getOrNull(index)?.let { bubble ->
+                                    OcrDiag.log(
+                                        "PLACE_ACCEPT",
+                                        "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=true"
+                                    )
+                                }
+                            }
+                            realtimeOverlayPlacedCount = matched.size
+                            realtimeOverlayPanelTop = panelTop
+                            realtimeOverlayPanelSignature = livePanelSignature
+                            completeDeepSeekHashBatch(ch, matched)
+                            completeRealtimeVisiblePlacement(matched.size, true, "overlay_success")
+                            hasTr = true
+                            shownTranslated = true
+                            updatePill()
+                        }
+                    } else {
+                        hasTr = true
+                        shownTranslated = true
+                        updatePill()
                     }
-                    hasTr = true
-                    shownTranslated = true
-                    updatePill()
                 } else {
-                    if (livePanelBatch) releaseDeepSeekHashBatch(ch)
+                    if (livePanelBatch) {
+                        val panelTop = panelTopFromSignature(livePanelSignature)
+                        wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                            if (!wmPlaced?.getOrNull(index).isNullOrBlank()) {
+                                OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=overlay_script_failed")
+                            }
+                        }
+                        releaseDeepSeekHashBatch(ch)
+                        completeRealtimeVisiblePlacement(0, false, "overlay_script_failed")
+                    }
                     toast("⚠️ Could not show the translation on this page; it is saved in the library")
                 }
                 if (livePanelBatch) restoreChapterAfterBubbleJob(ch.url)
