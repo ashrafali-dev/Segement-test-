@@ -616,14 +616,14 @@ internal object WebModeTextRemover {
                     } else {
                     val realtimeTimeExpired = realtimeMode &&
                         (android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs >= 8_000L)
-                    val tier3Allowed = aiWanted && aiBudget > 0 &&
+                    val tier3Allowed = aiWanted && !WebModeInpainter.inferenceCircuitOpen && aiBudget > 0 &&
                         (!(realtimeMode || prefetchMode) || WebModeInpainter.isLoaded()) && !realtimeTimeExpired
                     if (!tier3Allowed) {
                         val reason = when {
                             !aiEnabledPref -> "disabled"
                             !allowAi -> "not_allowed"
                             !aiModelReady -> "file_missing"
-                            aiCircuitOpen -> "inference_circuit_open"
+                            WebModeInpainter.inferenceCircuitOpen || aiCircuitOpen -> "inference_circuit_open"
                             aiCoolingDown -> "cooldown"
                             aiBudget <= 0 -> if (prefetchMode) "panel_budget_exhausted" else "realtime_budget"
                             realtimeTimeExpired -> "realtime_time_budget"
