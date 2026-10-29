@@ -13,6 +13,19 @@ import org.json.JSONObject
  *    (same position, rotation and text size, over the cleaned bubble). The page stays scrollable.
  *  - [script]: fallback reader panel, used when the translation cannot be matched to the bubbles.
  */
+/**
+ * Normalized placement fields shared by the overlay serializer and its Japanese geometry regression test.
+ * Values are rounded exactly as the existing writer rounded them before JSON serialization.
+ */
+internal data class WebModeBubblePlacementContract(
+    val cx: Double,
+    val cy: Double,
+    val w: Double,
+    val h: Double,
+    val angle: Double,
+    val font: Double
+)
+
 internal object WebModeWriter {
     /** Height (CSS px) of the dock that floats over the page; the in-page OCR tools button sits above it. */
     @Volatile var bottomInsetPx: Int = 0
@@ -1215,6 +1228,19 @@ internal object WebModeWriter {
     private fun css(c: Int) = String.format("#%06X", c and 0xFFFFFF)
     private fun r5(x: Float): Double = Math.round(x * 100000.0) / 100000.0
 
+    /** Production geometry contract; returns null only when no translation should be placed. */
+    internal fun placementContract(bubble: WmBubble, translated: String): WebModeBubblePlacementContract? {
+        if (translated.isBlank()) return null
+        return WebModeBubblePlacementContract(
+            cx = r5(bubble.cx),
+            cy = r5(bubble.cy),
+            w = r5(bubble.w),
+            h = r5(bubble.h),
+            angle = r5(bubble.angle),
+            font = r5(bubble.font)
+        )
+    }
+
     /**
      * Draws each translated paragraph on the spot of its original text. [translated] is index-aligned
      * with [WebModeLayout.bubbles]; a null/blank entry leaves that bubble's original text untouched.
@@ -1290,6 +1316,7 @@ internal object WebModeWriter {
                 }
                 continue
             }
+            val placement = placementContract(b, t) ?: continue
             val sfx = WebModeChapterContext.classifyRole(b.sourceText, b) == WebModeTextRole.SFX
             if (sfx) {
                 val original = b.sourceText.replace('\n', ' ').replace('"', '\'').take(36)
@@ -1299,8 +1326,8 @@ internal object WebModeWriter {
             }
             arr.put(JSONObject()
                 .put("t", t).put("s", WebModeLogic.normalizeUrl(b.src))
-                .put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
-                .put("a", r5(b.angle)).put("f", r5(b.font))
+                .put("cx", placement.cx).put("cy", placement.cy).put("w", placement.w).put("h", placement.h)
+                .put("a", placement.angle).put("f", placement.font)
                 .apply {
                     if (b.tbw > 0f && b.tbh > 0f && b.w > 0f && b.h > 0f) {
                         val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
