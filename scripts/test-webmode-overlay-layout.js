@@ -137,13 +137,14 @@ assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = 
   "realtime scans must not eagerly download panels before checking ahead OCR cache");
 assert.ok(extractor.includes("hasAheadResult || alreadyReadingAhead || recentlyBlank"),
   "prefetch slots must skip panels already cached, being read ahead, or recently known blank");
-assert.ok(extractor.includes("val realtimePriority = fastMode || req.ahead > 0") &&
+assert.ok(extractor.includes("val realtimePriority = !scanMode") &&
+  extractor.includes("val scanMode = !req.visibleOnly && req.ahead <= 0") &&
   extractor.includes("allowAi = true") &&
   extractor.includes("prefetchMode = req.ahead > 0"),
-  "prefetch OCR may use residual-driven MI-GAN with the cleaner's per-panel and global budgets");
+  "scanning mode must be independent of fast Lens dispatch while realtime/read-ahead stay latency-limited");
 assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
-  extractor.includes("else if (!realtimePriority && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
-  "realtime and read-ahead OCR must not start RT-DETR or mask segmentation");
+  extractor.includes("else if (scanMode && scanDetect && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
+  "heavy RT-DETR must run only when scan detection is explicitly enabled; the pixel bbox fallback always remains");
 assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
   mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0"),
   "ahead OCR must be reduced to one panel on low-heap devices and paused under memory pressure");
