@@ -196,6 +196,33 @@ internal object WebModeTextRemover {
                 )
                 val innerW = ox1 - ox0
                 val innerH = oy1 - oy0
+                if (innerW < 4 || innerH < 4 || innerW.toLong() * innerH.toLong() > 1_250_000L) continue
+
+                val soft = bubble.soft
+                val bg = opaque(bubble.bg)
+                val fg1 = opaque(bubble.fg)
+                val fg2 = opaque(bubble.fg2)
+                // Outline colour of fill+stroke lettering is ink too (otherwise a white edge would stay behind).
+                val fg3 = if (bubble.stroke != 0) opaque(bubble.stroke) else fg2
+                if (distance(bg, fg1) < 52 && distance(bg, fg2) < 52 && distance(bg, fg3) < 52) continue
+
+                val fontPx = (bubble.font * width).takeIf { it.isFinite() && it > 0f }
+                    ?.coerceIn(3f, 400f) ?: max(3f, min(innerW, innerH).toFloat() * 0.65f)
+
+                // Keep context around the box for OCR geometry and neighboring-pixel inpainting.
+                val pad = (fontPx * 0.5f).toInt().coerceIn(2, 24)
+                val x0 = max(0, ox0 - pad)
+                val y0 = max(0, oy0 - pad)
+                val x1 = min(width, ox1 + pad)
+                val y1 = min(height, oy1 + pad)
+                val rw = x1 - x0
+                val rh = y1 - y0
+                val regionSize = rw.toLong() * rh.toLong()
+                if (regionSize > 2_000_000L) continue
+                val regionCount = regionSize.toInt()
+                // Coordinates of the already-dilated OCR box inside the padded region.
+                val ix0 = ox0 - x0; val iy0 = oy0 - y0
+                val ix1 = ox1 - x0; val iy1 = oy1 - y0
                 val innerArea = innerW.toLong() * innerH.toLong()
 
                 // Only this small region is copied out of the bitmap (not the whole page), so tall
