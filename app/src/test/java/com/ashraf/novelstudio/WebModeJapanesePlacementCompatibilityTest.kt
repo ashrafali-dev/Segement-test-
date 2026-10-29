@@ -30,21 +30,15 @@ class WebModeJapanesePlacementCompatibilityTest {
             sourceText = "あはは!"
         )
         val translation = "হাহা!"
-        val script = WebModeWriter.bubbleScript(
-            WebModeLayout(0, listOf(bubble)),
-            listOf(translation),
-            font = "",
-            pageId = "jp-placement-regression"
-        )
-
-        // Geometry is the unchanged contract passed to the existing JS placement engine.
-        assertTrue(script.contains("\"t\":\"$translation\""))
-        assertTrue(script.contains("\"cx\":0.5"))
-        assertTrue(script.contains("\"cy\":0.25"))
-        assertTrue(script.contains("\"w\":0.2"))
-        assertTrue(script.contains("\"h\":0.08"))
-        assertTrue(script.contains("\"a\":0.0"))
-        assertTrue(script.contains("\"f\":0.02"))
+        // This is the exact normalized geometry contract consumed by bubbleScript before JSON encoding.
+        // It avoids the Android org.json stub in local JVM tests while exercising the production serializer input.
+        val placement = requireNotNull(WebModeWriter.placementContract(bubble, translation))
+        assertEquals(0.5, placement.cx, 0.00001)
+        assertEquals(0.25, placement.cy, 0.00001)
+        assertEquals(0.2, placement.w, 0.00001)
+        assertEquals(0.08, placement.h, 0.00001)
+        assertEquals(0.0, placement.angle, 0.00001)
+        assertEquals(0.02, placement.font, 0.00001)
         assertEquals("JAPANESE",
             WebModeTextRemover.scriptLabelForBubble(bubble.sourceText, bubble.src, bubble.src))
 
@@ -52,15 +46,15 @@ class WebModeJapanesePlacementCompatibilityTest {
         val expectedTop = 252f
         val expectedRight = 480f
         val expectedBottom = 348f
-        val left = (bubble.cx - bubble.w / 2f) * panelWidth
-        val top = (bubble.cy - bubble.h / 2f) * panelHeight
-        val right = (bubble.cx + bubble.w / 2f) * panelWidth
-        val bottom = (bubble.cy + bubble.h / 2f) * panelHeight
+        val left = (placement.cx - placement.w / 2.0) * panelWidth
+        val top = (placement.cy - placement.h / 2.0) * panelHeight
+        val right = (placement.cx + placement.w / 2.0) * panelWidth
+        val bottom = (placement.cy + placement.h / 2.0) * panelHeight
 
         assertTrue("left bbox changed by more than 2 px", abs(left - expectedLeft) <= 2f)
         assertTrue("top bbox changed by more than 2 px", abs(top - expectedTop) <= 2f)
         assertTrue("right bbox changed by more than 2 px", abs(right - expectedRight) <= 2f)
         assertTrue("bottom bbox changed by more than 2 px", abs(bottom - expectedBottom) <= 2f)
-        assertEquals("font cap changed", 16f, bubble.font * panelWidth, 0.01f)
+        assertEquals("font cap changed", 16f, (placement.font * panelWidth).toFloat(), 0.01f)
     }
 }
