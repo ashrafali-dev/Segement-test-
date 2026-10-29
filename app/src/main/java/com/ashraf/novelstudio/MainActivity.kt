@@ -8651,7 +8651,7 @@ markers preserved.
         val imageMode = webModeOn() && ch.contentSel.isBlank()
         val structuredScanEligible = imageMode &&
             scanTranslationEligibleKeys.contains(scanTranslationKey(ch)) &&
-            !isRealtimeBubbleBatch(ch) && !isDeepSeekLivePanel(ch)
+            !isRealtimeBubbleBatch(ch)
         val scanLayout = if (structuredScanEligible) {
             WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
         } else null
