@@ -1178,12 +1178,13 @@ class MainActivity : Activity() {
             ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
 
     private fun clearRealtimeOverlay(reason: String) {
-        // Always consult/remove the DOM through the overlay manager, even if the previous
-        // visibility probe failed; the manager's flag must not let an untracked overlay go stale.
-        OcrDiag.log(
-            "OVERLAY_CLEAR",
-            "reason=$reason hadOverlay=$realtimeOverlayActive panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
-        )
+        // The existing DOM renderer is cleared on a real viewport change; state transitions do not clear it.
+        if (reason == "scroll") {
+            OcrDiag.log(
+                "OVERLAY_CLEAR",
+                "reason=scroll hadOverlay=$realtimeOverlayActive panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
+            )
+        }
         try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
         realtimeOverlayActive = false
         realtimeOverlaySignature = ""
