@@ -2498,7 +2498,10 @@ internal class WebModeExtractor(
                         // Where the translation goes: the largest rectangle inside THIS balloon around the old lettering.
                         val seedBox = refinedSeed[i] ?: rects[i]
                         val fit = BubbleSegCore.fitRect(seg, seedBox)
-                        val placed = if (fit == null) nb0 else nb0.copy(
+                        val placed = if (fit == null) {
+                            OcrDiag.log("BUBBLE_MASK_FALLBACK", "marker=${out.size + 1} reason=no_bubble text_bbox_fallback=true textPresent=${text.isNotBlank()}")
+                            nb0
+                        } else nb0.copy(
                             tcx = (x0 + (fit[0] + fit[2]) / 2f * k) / fullW, tcy = (y0 + (fit[1] + fit[3]) / 2f * k) / fullH,
                             tbw = (fit[2] - fit[0]) * k / fullW, tbh = (fit[3] - fit[1]) * k / fullH
                         )

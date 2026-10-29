@@ -49,7 +49,7 @@ jobs:
           test -s "$KEYSTORE_PATH"
           keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
           echo "Release key validated."
-      - name: Run unit tests and debug build (Kotlin compile and Android packaging)
+      - name: Run unit tests and debug build (tiered cleaner performance path)
         env:
           KEYSTORE_FILE: ${{ runner.temp }}/novelstudio-release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}

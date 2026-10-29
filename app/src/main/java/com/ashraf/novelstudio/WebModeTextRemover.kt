@@ -38,23 +38,33 @@ internal object WebModeTextRemover {
         allowAi: Boolean = true
     ): Boolean {
         lastResidualMax = 0f
-        if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
-        if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
-        if (isAnimatedOrUnsupported(encoded)) return false
+        val callStartedMs = android.os.SystemClock.elapsedRealtime()
+        fun earlySkip(reason: String): Boolean {
+            OcrDiag.log(
+                "AI_PANEL",
+                "allowAi=true policy=tiered tier1=0 tier2=0 tier3=0 aiExecutionAllowed=$allowAi " +
+                    "calls=0 ok=0 aiMs=0 elapsedMs=${android.os.SystemClock.elapsedRealtime() - callStartedMs} " +
+                    "removedPixels=0 residual_max=0 skip=$reason"
+            )
+            return false
+        }
+        if (!Prefs.bool(context, "wmTextRemoval2", true)) return earlySkip("text_removal_disabled")
+        if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return earlySkip("invalid_panel_or_no_bubbles")
+        if (isAnimatedOrUnsupported(encoded)) return earlySkip("unsupported_image")
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
         val width = bounds.outWidth
         val height = bounds.outHeight
         if (width !in 1..MAX_WIDTH || height !in 1..MAX_HEIGHT ||
-            width.toLong() * height.toLong() > MAX_PIXELS) return false
+            width.toLong() * height.toLong() > MAX_PIXELS) return earlySkip("image_dimensions_out_of_bounds")
 
         val decoded = BitmapFactory.decodeByteArray(encoded, 0, encoded.size,
             BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
-            ?: return false
+            ?: return earlySkip("decode_failed")
         val bitmap = if (decoded.config == Bitmap.Config.ARGB_8888 && decoded.isMutable) decoded
             else decoded.copy(Bitmap.Config.ARGB_8888, true).also { decoded.recycle() }
-                ?: run { decoded.recycle(); return false }
+                ?: run { decoded.recycle(); return earlySkip("bitmap_copy_failed") }
 
         val panelStartedMs = android.os.SystemClock.elapsedRealtime()
         var aiCallsAttempted = 0
@@ -326,8 +336,8 @@ internal object WebModeTextRemover {
                 }
                 val cvConfidence = if (!soft) 0.82f
                     else if (estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1) != null) 0.78f else 0.42f
-                val out = region.copyOf()
                 val cvOut = openCvInpaint(region, rw, rh, mask)
+                val out = cvOut ?: region.copyOf()
                 val tele = if (cvOut == null && soft) onionFill(
                     region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
                 ) else null
@@ -455,7 +465,7 @@ internal object WebModeTextRemover {
             lastResidualMax = panelResidualMax
             OcrDiag.log(
                 "AI_PANEL",
-                "allowAi=true policy=tiered aiExecutionAllowed=$allowAi tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count " +
+                "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count aiExecutionAllowed=$allowAi " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
                     "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)}"
@@ -466,15 +476,21 @@ internal object WebModeTextRemover {
 
     /** Median channel colour from the ring around the text box. */
     private fun medianRingColor(region: IntArray, rw: Int, rh: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int): Int? {
-        val samples = ArrayList<Int>(min(2048, rw * rh))
+        val inner = (ix1 - ix0).toLong() * (iy1 - iy0).toLong()
+        val ring = rw.toLong() * rh.toLong() - inner
+        if (ring < 24L) return null
+        // Keep the median estimate bounded so big speech bubbles do not allocate hundreds of thousands of boxed pixels.
+        val stride = max(1, kotlin.math.sqrt(ring.toDouble() / 1600.0).toInt())
+        val capacity = min(1800, (ring / (stride * stride)).toInt() + 8).coerceAtLeast(8)
+        val samples = ArrayList<Int>(capacity)
         var y = 0
         while (y < rh) {
             var x = 0
             while (x < rw) {
                 if (x < ix0 || x >= ix1 || y < iy0 || y >= iy1) samples.add(region[y * rw + x])
-                x += 2
+                x += stride
             }
-            y += 2
+            y += stride
         }
         if (samples.size < 8) return null
         val rs = IntArray(samples.size) { red(samples[it]) }.also { it.sort() }
