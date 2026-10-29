@@ -303,6 +303,14 @@ internal class WebModeExtractor(
             if (req.visibleOnly) BubbleDetector.noteActivity() else BubbleDetector.scanStart()
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
                 "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
+            val adReason = adOrRedirectSkipReason(startUrl)
+            if (adReason != null) {
+                OcrDiag.log("JOB_SKIP", "host=${diag.host} reason=ad_domain detail=$adReason")
+                diag.error = WebModeError.OCR_EMPTY
+                OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "JOB_SKIP reason=ad_domain")
+                onMain { req.onDone(WebModeOutcome.Failure(WebModeError.OCR_EMPTY, "Skipped ad/redirect URL", diag)) }
+                return
+            }
             progress("Discovering chapter panels", 1)
             if (req.visibleOnly && req.forceScreenOcr) {
                 val knownLayout = WebModeLayoutStore.getScan(startUrl) ?: WebModeLayoutStore.get(wv.context, startUrl)
@@ -339,6 +347,15 @@ internal class WebModeExtractor(
         // ---- read-ahead (real-time): OCR the next images below the screen, without scrolling anything
         fun beginAhead() {
             try {
+                val adReason = adOrRedirectSkipReason(startUrl)
+                if (adReason != null) {
+                    OcrDiag.log("JOB_SKIP", "host=${diag.host} reason=ad_domain detail=$adReason mode=prefetch")
+                    diag.error = WebModeError.OCR_EMPTY
+                    OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "JOB_SKIP reason=ad_domain")
+                    onMain { req.onDone(WebModeOutcome.Failure(WebModeError.OCR_EMPTY, "Skipped ad/redirect URL", diag)) }
+                    aheadFinished()
+                    return
+                }
                 if (SiteLearner.screenPreferred(wv.context, hostOf(wv.url.orEmpty()))) { aheadFinished(); return }
                 ensureBridge(wv)
                 val aheadN = req.ahead.coerceIn(1, 12)
@@ -3323,6 +3340,30 @@ internal class WebModeExtractor(
         // If a live Lens panel's URL is not immediately readable, stop waiting and OCR the pixels already onscreen.
         private const val LENS_IMAGE_FETCH_WAIT_MS = 900L
         private const val VISIBLE_FETCH_WAIT_MS = 7_000L
+        private val AD_REDIRECT_DOMAINS = setOf(
+            "ng88b.com", "doubleclick.net", "amazon-adsystem.com", "adsrvr.org", "criteo.com",
+            "t.co", "analytics.twitter.com", "googlesyndication.com", "googleadservices.com",
+            "adservice.google.com", "taboola.com", "outbrain.com", "adroll.com", "serving-sys.com",
+            "rubiconproject.com", "pubmatic.com", "openx.net", "casalemedia.com", "sharethrough.com"
+        )
+
+        /** Returns a reason only for known ad hosts or explicitly redirect-like URL shapes. */
+        private fun adOrRedirectSkipReason(rawUrl: String): String? {
+            val uri = try { java.net.URI(rawUrl) } catch (_: Throwable) { return null }
+            val host = (uri.host ?: "").lowercase(java.util.Locale.US).removePrefix("www.")
+            if (host.isNotBlank() && AD_REDIRECT_DOMAINS.any { host == it || host.endsWith(".$it") }) {
+                return "blocked_host:$host"
+            }
+            val path = (uri.rawPath ?: "").lowercase(java.util.Locale.US)
+            val query = (uri.rawQuery ?: "").lowercase(java.util.Locale.US)
+            if (path.contains("/click/") || path.contains("/redirect/") || path.endsWith("/redirect")) {
+                return "redirect_path"
+            }
+            if (Regex("(?:^|&)(?:af|utm_[a-z0-9_]*|ref)=[^&]*", RegexOption.IGNORE_CASE).containsMatchIn(query)) {
+                return "tracking_query"
+            }
+            return null
+        }
         private const val SCREEN_LENS_DEADLINE_MS = 12_000L
         /**
          * Full-chapter scans queue many panels behind the Lens slot semaphore, so one panel can legitimately
