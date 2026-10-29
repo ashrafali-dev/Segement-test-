@@ -14,6 +14,7 @@ const painter = read('app/src/main/java/com/ashraf/novelstudio/WebModeInpainter.
 const assetScript = read('scripts/prepare-migan-asset.sh');
 const mainActivity = read('app/src/main/java/com/ashraf/novelstudio/MainActivity.kt');
 const timing = read('app/src/main/java/com/ashraf/novelstudio/OcrPanelTiming.kt');
+const diag = read('app/src/main/java/com/ashraf/novelstudio/OcrDiag.kt');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
 const localFastStart = routing.indexOf('fun recognizeLocalFast(');
@@ -64,8 +65,13 @@ assert.ok(extractor.includes('BATCH_START') && extractor.includes('BATCH_OCR_DON
           extractor.includes('edgeDensity=') && extractor.includes('OcrPanelTiming.logNoLens'),
   'batch completion, low-edge prefilter skip and per-panel timing must be logged');
 assert.ok(timing.includes('TIMING_BUCKET') && timing.includes('lensCalls=') &&
-          timing.includes('avgCold=') && timing.includes('avgHot='),
-  'timing buckets must measure cold/hot Lens panels and actual Lens call count');
+          timing.includes('avgCold=') && timing.includes('avgHot=') &&
+          timing.includes('hostBucketCounts') && timing.includes('hostBuckets.getOrPut(frame.host)'),
+  'timing buckets must measure cold/hot Lens panels by host and actual Lens call count');
+assert.ok(diag.includes('PERF_SNAPSHOT') && diag.includes('s.jobs % 10 == 0') &&
+          diag.includes('avgMs=$snapshotAvgMs cold=$cold hot=$hot') &&
+          diag.includes('OcrPanelTiming.hostBucketCounts(hostForLog)'),
+  'OCR diagnostics must log per-host average latency and cold/hot counts every 10 jobs');
 assert.ok(mainActivity.includes('ALIGN_WAIT') && mainActivity.includes('markers_never_arrived') &&
           mainActivity.includes('ALIGN_RETRY') && mainActivity.includes('BATCH_ALIGN_START') &&
           mainActivity.includes('BATCH_ALIGN_DONE') && mainActivity.includes('placedCount * 100 < lay.bubbles.size * 90'),
