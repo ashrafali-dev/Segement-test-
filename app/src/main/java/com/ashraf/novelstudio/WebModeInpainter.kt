@@ -10,6 +10,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
@@ -31,6 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * CPU fallback is deliberately not used: a slow/high-memory CPU run should not block manga reading.
  */
 internal object WebModeInpainter {
+    const val MODEL_URL =
+        "https://huggingface.co/litert-community/MI-GAN-512-Places2-LiteRT/resolve/179a35d8e8a518f6253f9c42fc9b412c6438cf7c/migan_fp16.tflite"
     private const val MODEL_NAME = "migan_fp16.tflite"
     private const val EXPECTED_BYTES = 16_312_640L
     private const val MODEL_SHA256 = "ef53f8dca69e5ce29629441128322c4d9a0a527b2a043703e0ab497f2463c25f"
@@ -154,42 +158,9 @@ internal object WebModeInpainter {
     private fun modelFile(ctx: Context): File =
         File(File(ctx.applicationContext.filesDir, "wm_inpaint"), MODEL_NAME)
 
-    private fun ensureBundledModel(ctx: Context): File? {
-        val app = ctx.applicationContext
-        val target = modelFile(app)
-        if (target.isFile && target.length() == EXPECTED_BYTES) return target
-        try {
-            target.parentFile?.let { if (!it.exists() && !it.mkdirs()) return null }
-            val part = File(target.parentFile, target.name + ".part")
-            part.delete()
-            val digest = MessageDigest.getInstance("SHA-256")
-            app.assets.open(MODEL_NAME).use { input ->
-                FileOutputStream(part).use { output ->
-                    val buffer = ByteArray(65536)
-                    var count = 0L
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        count += n
-                        if (count > EXPECTED_BYTES) throw IllegalStateException("bundled MI-GAN asset is oversized")
-                        output.write(buffer, 0, n)
-                        digest.update(buffer, 0, n)
-                    }
-                    if (count != EXPECTED_BYTES) throw IllegalStateException("bundled MI-GAN asset size mismatch")
-                }
-            }
-            val sha = digest.digest().joinToString("") { "%02x".format(it) }
-            if (sha != MODEL_SHA256) throw IllegalStateException("bundled MI-GAN SHA-256 mismatch")
-            if (target.exists()) target.delete()
-            if (!part.renameTo(target)) throw IllegalStateException("could not stage bundled MI-GAN model")
-            return target
-        } catch (_: Throwable) {
-            try { File(target.parentFile, target.name + ".part").delete() } catch (_: Throwable) {}
-            return null
-        }
-    }
-
-    fun isReady(ctx: Context): Boolean = ensureBundledModel(ctx) != null
+    /** The optional model lives in app-private storage only after the user downloads it. */
+    fun isReady(ctx: Context): Boolean =
+        modelFile(ctx).let { it.isFile && it.length() == EXPECTED_BYTES }
 
     fun isDownloading(): Boolean = downloading.get()
     fun isLoaded(): Boolean = engine != null
@@ -248,17 +219,90 @@ internal object WebModeInpainter {
         val file = modelFile(ctx)
         val partial = File(file.parentFile, file.name + ".part")
         try { partial.delete() } catch (_: Throwable) {}
-        // The authoritative model is in the APK; only delete its staged private copy.
+        // The model is optional user-downloaded data; deleting it frees the storage it occupies.
         return !file.exists() || file.delete()
     }
 
-    /** Runtime downloads are disabled: MI-GAN must be bundled in assets/migan_fp16.tflite. */
+    /** Download the optional model only when requested by the user. A pinned size + SHA-256 guard rejects partial or altered files. */
     fun download(ctx: Context, onProgress: (Long, Long) -> Unit, onDone: (String?) -> Unit) {
-        val app = ctx.applicationContext
-        if (isReady(app)) onDone(null) else {
-            OcrDiag.log("CLEAN", "migan_unavailable reason=file_missing falling_back_to_tier2")
-            onDone("MI-GAN is missing from this APK. Rebuild with the bundled asset and reinstall.")
+        if (isReady(ctx)) {
+            onDone(null)
+            return
         }
+        if (!downloading.compareAndSet(false, true)) {
+            onDone("ডাউনলোড ইতিমধ্যে চলছে")
+            return
+        }
+        val app = ctx.applicationContext
+        Thread {
+            var error: String? = null
+            var conn: HttpURLConnection? = null
+            try {
+                val target = modelFile(app)
+                target.parentFile?.let {
+                    if (!it.exists() && !it.mkdirs()) throw IllegalStateException("ফোল্ডার তৈরি করা যায়নি")
+                }
+                val part = File(target.parentFile, target.name + ".part")
+                part.delete()
+                conn = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 20000
+                    readTimeout = 45000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "NovelStudio-MI-GAN/1")
+                }
+                val code = conn.responseCode
+                if (code !in 200..299) throw IllegalStateException("HTTP " + code)
+                val total = conn.contentLengthLong
+                if (total > 0 && total != EXPECTED_BYTES) throw IllegalStateException("অপ্রত্যাশিত ফাইল সাইজ")
+                var readTotal = 0L
+                val digest = MessageDigest.getInstance("SHA-256")
+                BufferedInputStream(conn.inputStream).use { input ->
+                    FileOutputStream(part).use { output ->
+                        val buffer = ByteArray(65536)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            readTotal += n
+                            if (readTotal > EXPECTED_BYTES) throw IllegalStateException("ফাইলের সাইজ বেশি")
+                            output.write(buffer, 0, n)
+                            digest.update(buffer, 0, n)
+                            onProgress(readTotal, total)
+                        }
+                    }
+                }
+                if (total > 0 && readTotal != total) throw IllegalStateException("অসম্পূর্ণ ডাউনলোড")
+                if (readTotal != EXPECTED_BYTES || part.length() != EXPECTED_BYTES) {
+                    throw IllegalStateException("ফাইল যাচাই ব্যর্থ: সাইজ মেলেনি")
+                }
+                val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                if (actualSha256 != MODEL_SHA256) throw IllegalStateException("MI-GAN ফাইলের SHA-256 মেলেনি")
+                if (target.exists()) target.delete()
+                if (!part.renameTo(target)) throw IllegalStateException("ফাইল সংরক্ষণ ব্যর্থ")
+
+                // Validate that this device's GPU runtime can actually load the downloaded model before reporting success.
+                sessionFailed = false
+                inferenceCircuitUntilMs = 0L
+                inferenceCircuitReason = ""
+                Prefs.put(app, "wmAiInpaintCrashed", "")
+                OnnxHeavyGate.lock.lock()
+                try {
+                    if (interpreter(app) == null) {
+                        target.delete()
+                        sessionFailed = false
+                        throw IllegalStateException("MI-GAN মডেল লোড হয়নি — এই ফোনের GPU delegate বা মডেল runtime সমর্থিত নয়")
+                    }
+                } finally {
+                    OnnxHeavyGate.lock.unlock()
+                }
+            } catch (e: Throwable) {
+                error = e.message ?: "ডাউনলোড ব্যর্থ"
+                try { File(File(app.filesDir, "wm_inpaint"), MODEL_NAME + ".part").delete() } catch (_: Throwable) {}
+            } finally {
+                try { conn?.disconnect() } catch (_: Throwable) {}
+                downloading.set(false)
+                onDone(error)
+            }
+        }.apply { isDaemon = true; name = "wm-migan-download" }.start()
     }
 
     @Synchronized
@@ -269,7 +313,7 @@ internal object WebModeInpainter {
         var delegate: GpuDelegate? = null
         var candidate: Interpreter? = null
         try {
-            val file = ensureBundledModel(ctx) ?: return null
+            val file = modelFile(ctx).takeIf { it.isFile && it.length() == EXPECTED_BYTES } ?: return null
             val mapped = RandomAccessFile(file, "r").use { raf ->
                 raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, file.length())
             }

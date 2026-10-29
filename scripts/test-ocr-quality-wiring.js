@@ -11,7 +11,6 @@ const layout = read('app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt')
 const cleaner = read('app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt');
 const extractor = read('app/src/main/java/com/ashraf/novelstudio/WebModeExtractor.kt');
 const painter = read('app/src/main/java/com/ashraf/novelstudio/WebModeInpainter.kt');
-const assetScript = read('scripts/prepare-migan-asset.sh');
 const mainActivity = read('app/src/main/java/com/ashraf/novelstudio/MainActivity.kt');
 const timing = read('app/src/main/java/com/ashraf/novelstudio/OcrPanelTiming.kt');
 const diag = read('app/src/main/java/com/ashraf/novelstudio/OcrDiag.kt');
@@ -74,12 +73,14 @@ assert.ok(extractor.includes('allowAi = true') &&
           extractor.includes('residual_max=') &&
           extractor.includes('BUBBLE_MASK_FALLBACK'),
   'realtime and prefetch cleanup must pass panel context and permit residual-driven MI-GAN');
-assert.ok(!painter.includes('MODEL_URL') &&
-          painter.includes('app.assets.open(MODEL_NAME)') &&
-          painter.includes('EXPECTED_BYTES'),
-  'installed app must load a verified bundled MI-GAN asset rather than download it');
-assert.ok(assetScript.includes('EXPECTED_SHA256=') && assetScript.includes('EXPECTED_BYTES='),
-  'build-time asset preparation must verify the pinned model');
+assert.ok(painter.includes('MODEL_URL') &&
+          painter.includes('URL(MODEL_URL)') &&
+          painter.includes('onProgress(readTotal, total)') &&
+          painter.includes('MODEL_SHA256') &&
+          painter.includes('EXPECTED_BYTES') &&
+          !painter.includes('ensureBundledModel') &&
+          !painter.includes('app.assets.open(MODEL_NAME)'),
+  'MI-GAN must be downloaded on demand to private storage and verified by exact size and SHA-256, not bundled');
 
 assert.ok(filter.includes('FILTER_PASS') && filter.includes('"뭐"') && filter.includes('"왜"'),
   'short Korean/Japanese dialogue must have a pass diagnostic and allowlist');
