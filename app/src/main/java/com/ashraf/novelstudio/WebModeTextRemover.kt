@@ -56,7 +56,8 @@ internal object WebModeTextRemover {
         realtimeMode: Boolean = false,
         prefetchMode: Boolean = false,
         panelNo: Int = -1,
-        scanMode: Boolean = !realtimeMode && !prefetchMode
+        scanMode: Boolean = !realtimeMode && !prefetchMode,
+        pageUrl: String = ""
     ): Boolean {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         var acquired = false
@@ -67,7 +68,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log("MEM_GUARD", "clean_skipped_concurrency activeLimit=2 waitMs=1000")
                 return false
             }
-            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode)
+            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode, pageUrl)
         } finally {
             if (acquired) cleanSemaphore.release()
             cleanDurationMs.set(android.os.SystemClock.elapsedRealtime() - startedAt)
@@ -83,7 +84,8 @@ internal object WebModeTextRemover {
         realtimeMode: Boolean,
         prefetchMode: Boolean,
         panelNo: Int,
-        scanMode: Boolean
+        scanMode: Boolean,
+        pageUrl: String
     ): Boolean {
         lastResidualMax = 0f
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
@@ -525,8 +527,33 @@ internal object WebModeTextRemover {
                     }
                 }
 
-                // Large sound effects/text regions need a wider *sampling* ring, but the actual mask stays unchanged.
+                // Script-gate the bbox-cover ghost repair. Japanese is deliberately excluded so its current
+                // mask, fill geometry, and placement-related behavior remain byte-for-byte on the existing path.
                 val maskArea = mask.count { it.toInt() != 0 }
+                val bboxArea = innerArea.coerceAtLeast(1L)
+                val scriptLabel = scriptLabelForBubble(bubble.sourceText, sourceUrl, pageUrl)
+                val maskPct = maskArea.toDouble() * 100.0 / bboxArea.toDouble()
+                val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0 && !soft && !bubble.free
+                OcrDiag.log(
+                    "CLEAN_BRANCH",
+                    "bubble=$bubbleNo script=$scriptLabel fix=${if (scriptLabel == "JAPANESE") "skipped (preserve current)" else "ghost"}"
+                )
+                if (ghostFixCandidate) {
+                    OcrDiag.log(
+                        "CLEAN_FILL_FALLBACK",
+                        "bubble=$bubbleNo maskArea=$maskArea bboxArea=$bboxArea " +
+                            "maskPct=${String.format(java.util.Locale.US, "%.1f", maskPct)}% " +
+                            "decision=fill_bbox script=$scriptLabel"
+                    )
+                    OcrDiag.log("FILL_EDGE_PAD", "bubble=$bubbleNo padApplied=3")
+                } else if (scriptLabel != "JAPANESE" && maskPct < 25.0 && (soft || bubble.free)) {
+                    OcrDiag.log(
+                        "CLEAN_FILL_FALLBACK",
+                        "bubble=$bubbleNo maskArea=$maskArea bboxArea=$bboxArea " +
+                            "maskPct=${String.format(java.util.Locale.US, "%.1f", maskPct)}% " +
+                            "decision=preserve_art script=$scriptLabel"
+                    )
+                }
                 val largeMask = maskArea > LARGE_MASK_THRESHOLD
                 if (maskArea > MIGAN_MAX_MASK_AREA) {
                     OcrDiag.log("CLEAN", "migan_skipped reason=mask_too_large area=$maskArea")
@@ -537,24 +564,37 @@ internal object WebModeTextRemover {
                     (ix0 - ringSamplePad).coerceAtLeast(0), (iy0 - ringSamplePad).coerceAtLeast(0),
                     (ix1 + ringSamplePad).coerceAtMost(rw), (iy1 + ringSamplePad).coerceAtMost(rh)
                 ) ?: bg
-                val tier1Alpha = if (largeMask) LARGE_MASK_ALPHA else TIER1_FILL_ALPHA
+                val tier1Alpha = if (largeMask || ghostFixCandidate) LARGE_MASK_ALPHA else TIER1_FILL_ALPHA
                 val tier1Start = android.os.SystemClock.elapsedRealtime()
                 val tier1Region = region.copyOf()
                 val fillPad = grow.coerceIn(1, 8)
                 var fillArea = 0
                 if (!soft && !bubble.free) {
-                    fillRoundedRect(
-                        tier1Region, rw, rh,
-                        (ix0 - fillPad).coerceAtLeast(0), (iy0 - fillPad).coerceAtLeast(0),
-                        (ix1 + fillPad).coerceAtMost(rw), (iy1 + fillPad).coerceAtMost(rh),
-                        paper, tier1Alpha, (fontPx * 0.18f).toInt().coerceIn(1, 12)
-                    )
+                    val coverPad = if (ghostFixCandidate) 3 else fillPad
+                    val coverL = (ix0 - coverPad).coerceAtLeast(0)
+                    val coverT = (iy0 - coverPad).coerceAtLeast(0)
+                    val coverR = (ix1 + coverPad).coerceAtMost(rw)
+                    val coverB = (iy1 + coverPad).coerceAtMost(rh)
+                    if (ghostFixCandidate) {
+                        // For Korean/Chinese/Latin text whose detected ink mask is tiny relative to its
+                        // OCR box, cover that dilated bbox. Japanese deliberately retains its old mask-only path.
+                        fillRoundedRect(
+                            tier1Region, rw, rh, coverL, coverT, coverR, coverB,
+                            paper, 1.0f, (fontPx * 0.18f).toInt().coerceIn(1, 12)
+                        )
+                        fillArea = (coverR - coverL).coerceAtLeast(0) * (coverB - coverT).coerceAtLeast(0)
+                    } else {
+                        fillRoundedRect(
+                            tier1Region, rw, rh, coverL, coverT, coverR, coverB,
+                            paper, tier1Alpha, (fontPx * 0.18f).toInt().coerceIn(1, 12)
+                        )
+                    }
                     // The rounded rectangle can clip glyph pixels at its corners. Explicitly cover every
                     // binary-mask pixel with the same alpha so no selected text edge remains untouched.
                     for (at in mask.indices) {
                         if (mask[at].toInt() == 0) continue
                         tier1Region[at] = blendPixel(region[at], paper, tier1Alpha)
-                        fillArea++
+                        if (!ghostFixCandidate) fillArea++
                     }
                 } else {
                     // On artwork/free lettering use the nearest unmasked ring as a lightweight local fill.
@@ -1039,6 +1079,31 @@ internal object WebModeTextRemover {
         val g = (green(original) * inv + green(fill) * a).toInt().coerceIn(0, 255)
         val b = (blue(original) * inv + blue(fill) * a).toInt().coerceIn(0, 255)
         return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+    }
+
+    /**
+     * Script classifier used only by the non-Japanese ghost-fill fallback and diagnostic labels.
+     * A Japanese URL or kana/kanji-only ambiguous text defaults to JAPANESE conservatively.
+     */
+    internal fun scriptLabelForBubble(text: String, sourceUrl: String, pageUrl: String = ""): String {
+        val page = pageUrl.ifBlank { sourceUrl }
+        val normalizedPage = page.lowercase(java.util.Locale.US)
+        val knownJapanesePage = normalizedPage.contains(".jp/") || normalizedPage.endsWith(".jp") ||
+            normalizedPage.contains("webtoons.com/ja") || normalizedPage.contains("comic-walker") ||
+            normalizedPage.contains("toparinouj") || normalizedPage.contains("shonenjump") ||
+            normalizedPage.contains("piccoma") || normalizedPage.contains("pixiv")
+        if (knownJapanesePage) return "JAPANESE"
+        val hasKana = text.any { it.code in 0x3040..0x30FF }
+        if (hasKana) return "JAPANESE"
+        val firstGuess = WebModeLogic.pickScript("auto", page)
+        if (firstGuess == OcrScript.JAPANESE) return "JAPANESE"
+        val hasHangul = text.any { it.code in 0x1100..0x11FF || it.code in 0x3130..0x318F || it.code in 0xAC00..0xD7AF }
+        if (hasHangul || firstGuess == OcrScript.KOREAN) return "KOREAN"
+        if (firstGuess == OcrScript.CHINESE) return "CHINESE"
+        val hasHan = text.any { it.code in 0x3400..0x9FFF }
+        // Han-only text is ambiguous; avoid applying a broad rectangle to a potentially Japanese panel.
+        if (hasHan) return "JAPANESE"
+        return "LATIN"
     }
 
     private fun neighbourMean(region: IntArray, mask: ByteArray, at: Int, width: Int): Int? {
