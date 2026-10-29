@@ -24,7 +24,14 @@ import kotlin.math.min
  * bounded for phones and returns false when the image is too large or the mask is unsafe.
  */
 internal object WebModeTextRemover {
-    private const val RESIDUAL_THRESHOLD = 24f
+    // Residual is normalized to a 0..100 percentage of full RGB contrast across the text mask.
+    private const val TIER2_RESIDUAL_THRESHOLD = 5f
+    private const val TIER3_RESIDUAL_THRESHOLD = 8f
+    private const val CLEAN_FAILED_RESIDUAL_THRESHOLD = 15f
+    private const val BBOX_DILATION_PX = 3
+    private const val TIER1_FILL_ALPHA = 0.98f
+    private const val TIER2_FILL_ALPHA = 0.98f
+    private const val TIER3_FILL_ALPHA = 1.00f
     @Volatile var lastResidualMax: Float = 0f
         private set
     private val cleanSemaphore = Semaphore(2, true)
@@ -41,7 +48,8 @@ internal object WebModeTextRemover {
         sourceUrl: String,
         encoded: ByteArray,
         bubbles: List<WmBubble>,
-        allowAi: Boolean = true
+        allowAi: Boolean = true,
+        realtimeMode: Boolean = false
     ): Boolean {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         var acquired = false
@@ -52,7 +60,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log("MEM_GUARD", "clean_skipped_concurrency activeLimit=2 waitMs=1000")
                 return false
             }
-            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi)
+            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode)
         } finally {
             if (acquired) cleanSemaphore.release()
             cleanDurationMs.set(android.os.SystemClock.elapsedRealtime() - startedAt)
@@ -64,7 +72,8 @@ internal object WebModeTextRemover {
         sourceUrl: String,
         encoded: ByteArray,
         bubbles: List<WmBubble>,
-        allowAi: Boolean
+        allowAi: Boolean,
+        realtimeMode: Boolean
     ): Boolean {
         lastResidualMax = 0f
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
@@ -114,21 +123,32 @@ internal object WebModeTextRemover {
         var panelResidualMax = 0f
         try {
             var totalRemoved = 0
-            // Policy stays tiered on every panel. Fast-path panels still run Tiers 1 and 2;
-            // MI-GAN is conditional on residual ink and low CV confidence, with at most three calls.
-            var aiBudget = 3
+            // Full scans may run MI-GAN on each hard bubble; realtime keeps a strict three-call budget.
+            var aiBudget = if (realtimeMode) 3 else Int.MAX_VALUE
             val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
             val aiModelReady = WebModeInpainter.isReady(context)
             val aiCoolingDown = WebModeInpainter.tooSlow
-            var aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown
-            if (!aiModelReady) {
-                OcrDiag.log("CLEAN", "migan_unavailable reason=file_missing falling_back_to_tier2")
+            val aiLoadedAtStart = WebModeInpainter.isLoaded()
+            val miganStatusReason = when {
+                !aiEnabledPref -> "disabled"
+                !allowAi -> "not_allowed"
+                !aiModelReady -> "file_missing"
+                aiCoolingDown -> "cooldown"
+                aiLoadedAtStart -> "ready"
+                realtimeMode -> "not_loaded_realtime"
+                else -> "not_loaded_scan_can_lazy_load"
             }
-            if (aiWanted && !WebModeInpainter.isLoaded()) {
+            OcrDiag.log(
+                "MIGAN_STATUS",
+                "loaded=$aiLoadedAtStart reason=$miganStatusReason mode=${if (realtimeMode) "realtime" else "scan"}"
+            )
+            // Scan mode may load lazily if a hard bubble needs Tier 3. Realtime only warms in background.
+            val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown &&
+                (!realtimeMode || aiLoadedAtStart)
+            if (allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown && !aiLoadedAtStart) {
                 WebModeInpainter.warmUpAsync(context)
-                // Never block the current panel for interpreter/GPU compilation.
-                aiWanted = false
             }
+            val aiStartMs = android.os.SystemClock.elapsedRealtime()
             val aiStartMs = android.os.SystemClock.elapsedRealtime()
             var aiLastMs = 0L
             // Every bubble whose lettering was really erased (flat AND artwork). The writer only drops its
@@ -143,49 +163,37 @@ internal object WebModeTextRemover {
             // can turn the bubble into a visibly boxy patch. cv is contour/placement guidance, not a text mask.
             // The loop below edits only pixels selected as lettering inside the OCR box plus a small safety margin.
             // If the local glyph mask is not confident, leave this bubble for the writer's conservative fallback.
-            for (bubble in boundedBubbles) {
+            for ((bubbleIndex, bubble) in boundedBubbles.withIndex()) {
+                val bubbleNo = bubbleIndex + 1
                 val cx = bubble.cx * width
                 val cy = bubble.cy * height
                 val bw = bubble.w * width
                 val bh = bubble.h * height
-                if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite()) continue
-                // ox/oy = the exact OCR box (where the old lettering is).
-                val ox0 = (cx - bw / 2f).toInt().coerceIn(0, width - 1)
-                val oy0 = (cy - bh / 2f).toInt().coerceIn(0, height - 1)
-                val ox1 = ceil(cx + bw / 2f).toInt().coerceIn(ox0 + 1, width)
-                val oy1 = ceil(cy + bh / 2f).toInt().coerceIn(oy0 + 1, height)
+                if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite()) {
+                    OcrDiag.log("MASK_DILATE", "bubble=$bubbleNo origArea=0 dilatedArea=0 increasePct=0.0 scope=bbox pad=$BBOX_DILATION_PX reason=invalid_bbox")
+                    continue
+                }
+                // Widen the OCR box before mask creation: OCR geometry often cuts antialiased letter edges.
+                val origOx0 = (cx - bw / 2f).toInt().coerceIn(0, width - 1)
+                val origOy0 = (cy - bh / 2f).toInt().coerceIn(0, height - 1)
+                val origOx1 = ceil(cx + bw / 2f).toInt().coerceIn(origOx0 + 1, width)
+                val origOy1 = ceil(cy + bh / 2f).toInt().coerceIn(origOy0 + 1, height)
+                val origBoxArea = (origOx1 - origOx0).toLong() * (origOy1 - origOy0).toLong()
+                val ox0 = (origOx0 - BBOX_DILATION_PX).coerceAtLeast(0)
+                val oy0 = (origOy0 - BBOX_DILATION_PX).coerceAtLeast(0)
+                val ox1 = (origOx1 + BBOX_DILATION_PX).coerceAtMost(width)
+                val oy1 = (origOy1 + BBOX_DILATION_PX).coerceAtMost(height)
+                val dilatedBoxArea = (ox1 - ox0).toLong() * (oy1 - oy0).toLong()
+                val boxIncreasePct = if (origBoxArea <= 0L) 0.0 else
+                    ((dilatedBoxArea - origBoxArea).toDouble() * 100.0 / origBoxArea.toDouble())
+                OcrDiag.log(
+                    "MASK_DILATE",
+                    "bubble=$bubbleNo origArea=$origBoxArea dilatedArea=$dilatedBoxArea " +
+                        "increasePct=${String.format(java.util.Locale.US, "%.1f", boxIncreasePct)} " +
+                        "scope=bbox pad=$BBOX_DILATION_PX"
+                )
                 val innerW = ox1 - ox0
                 val innerH = oy1 - oy0
-                if (innerW < 4 || innerH < 4 || innerW.toLong() * innerH.toLong() > 1_250_000L) continue
-
-                val soft = bubble.soft
-                val bg = opaque(bubble.bg)
-                val fg1 = opaque(bubble.fg)
-                val fg2 = opaque(bubble.fg2)
-                // Outline colour of fill+stroke lettering is ink too (otherwise a white edge would stay behind).
-                val fg3 = if (bubble.stroke != 0) opaque(bubble.stroke) else fg2
-                if (distance(bg, fg1) < 52 && distance(bg, fg2) < 52 && distance(bg, fg3) < 52) continue
-
-                val fontPx = (bubble.font * width).takeIf { it.isFinite() && it > 0f }
-                    ?.coerceIn(3f, 400f) ?: max(3f, min(innerW, innerH).toFloat() * 0.65f)
-
-                // Analyse a region a little LARGER than the OCR box. OCR boxes are tight, so a vertical
-                // Japanese column (or any dense line) used to touch the region edge and was thrown away as
-                // if it were the bubble outline. With padding, real lettering sits inside, while outlines
-                // still cross the edge and are rejected by the border rule below.
-                val pad = (fontPx * 0.5f).toInt().coerceIn(2, 24)
-                val x0 = max(0, ox0 - pad)
-                val y0 = max(0, oy0 - pad)
-                val x1 = min(width, ox1 + pad)
-                val y1 = min(height, oy1 + pad)
-                val rw = x1 - x0
-                val rh = y1 - y0
-                val regionSize = rw.toLong() * rh.toLong()
-                if (regionSize > 2_000_000L) continue
-                val regionCount = regionSize.toInt()
-                // OCR box in region coordinates.
-                val ix0 = ox0 - x0; val iy0 = oy0 - y0
-                val ix1 = ox1 - x0; val iy1 = oy1 - y0
                 val innerArea = innerW.toLong() * innerH.toLong()
 
                 // Only this small region is copied out of the bitmap (not the whole page), so tall
@@ -321,6 +329,27 @@ internal object WebModeTextRemover {
                 // the core pixels and used to stay as a ghost of the old text behind the translation.
                 val grow = if (soft) (fontPx * 0.14f).toInt().coerceIn(2, 6) else (fontPx * 0.07f).toInt().coerceIn(1, 3) + 1
                 val mask = selected.copyOf()
+                val maskAreaOriginal = selected.count { it.toInt() != 0 }
+                // Morphological dilation: binary 3x3 kernel, one iteration, excluding protected art.
+                for (ry in 0 until rh) for (rx in 0 until rw) {
+                    if (selected[ry * rw + rx].toInt() == 0) continue
+                    for (dy in -1..1) for (dx in -1..1) {
+                        val nx = rx + dx
+                        val ny = ry + dy
+                        if (nx !in 0 until rw || ny !in 0 until rh) continue
+                        val ni = ny * rw + nx
+                        if (mask[ni].toInt() == 0 && protect[ni].toInt() == 0) mask[ni] = 1
+                    }
+                }
+                val maskAreaDilated = mask.count { it.toInt() != 0 }
+                val maskIncreasePct = if (maskAreaOriginal == 0) 0.0 else
+                    ((maskAreaDilated - maskAreaOriginal).toDouble() * 100.0 / maskAreaOriginal.toDouble())
+                OcrDiag.log(
+                    "MASK_DILATE",
+                    "bubble=$bubbleNo origArea=$maskAreaOriginal dilatedArea=$maskAreaDilated " +
+                        "increasePct=${String.format(java.util.Locale.US, "%.1f", maskIncreasePct)} " +
+                        "scope=mask kernel=3x3 iterations=1 bboxPad=$BBOX_DILATION_PX"
+                )
                 for (ry in 0 until rh) {
                     for (rx in 0 until rw) {
                         if (selected[ry * rw + rx].toInt() == 0) continue
@@ -338,9 +367,8 @@ internal object WebModeTextRemover {
                     }
                 }
 
-                // Tier 1: median-ring paper fill at alpha 0.92, bounded to a rounded text box.
+                // Tier 1: near-opaque median-ring paper fill, bounded to a rounded text box.
                 // Textured/free lettering skips the solid fill and advances to inpainting.
-                val bubbleNo = bubbles.indexOf(bubble) + 1
                 val paper = medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1) ?: bg
                 val tier1Start = android.os.SystemClock.elapsedRealtime()
                 val tier1Region = region.copyOf()
@@ -350,25 +378,56 @@ internal object WebModeTextRemover {
                         tier1Region, rw, rh,
                         (ix0 - fillPad).coerceAtLeast(0), (iy0 - fillPad).coerceAtLeast(0),
                         (ix1 + fillPad).coerceAtMost(rw), (iy1 + fillPad).coerceAtMost(rh),
-                        paper, 0.92f, (fontPx * 0.18f).toInt().coerceIn(1, 12)
+                        paper, TIER1_FILL_ALPHA, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                     )
                 }
-                val residual1 = residualEnergy(tier1Region, mask, paper, soft = false, width = rw)
-                if (!soft && !bubble.free && residual1 <= RESIDUAL_THRESHOLD) {
+                val residual1 = residualEnergy(tier1Region, mask, paper, soft, rw)
+                OcrDiag.log(
+                    "CLEAN_RESIDUAL",
+                    "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
+                )
+                if (!soft && !bubble.free && residual1 <= TIER2_RESIDUAL_THRESHOLD) {
                     bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
                     totalRemoved += selectedCount
                     tier1Count++
                     panelResidualMax = max(panelResidualMax, residual1)
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
-                    OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start}")
+                    OcrDiag.log(
+                        "CLEAN_TIER",
+                        "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$TIER1_FILL_ALPHA"
+                    )
                     continue
                 }
-
-                // Tier 2: OpenCV Telea inpaint on the mask. A bounded local fill remains as a fallback when
-                // native OpenCV is unavailable or the crop is too large for safe native temporary buffers.
+                OcrDiag.log(
+                    "CLEAN_ESCALATE",
+                    "bubble=$bubbleNo tierFrom=1 tierTo=2 residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)}"
+                )
+                // Tier 2: OpenCV Telea inpaint; apply a 0.98 fill alpha before measuring residual.
                 val tier2Start = android.os.SystemClock.elapsedRealtime()
-                if (bubble.free && !smoothSurround(region, mask, rw, rh) && (!aiWanted || !WebModeInpainter.isLoaded())) {
+                if (bubble.free && !smoothSurround(region, mask, rw, rh) &&
+                    (!aiWanted || (realtimeMode && !WebModeInpainter.isLoaded()))) {
                     panelResidualMax = max(panelResidualMax, residual1)
+                    OcrDiag.log(
+                        "CLEAN_RESIDUAL",
+                        "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} skipped=true"
+                    )
+                    if (residual1 > TIER2_RESIDUAL_THRESHOLD) {
+                        OcrDiag.log(
+                            "CLEAN_WARN",
+                            "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} reason=ghost_likely"
+                        )
+                    }
+                    if (residual1 > TIER3_RESIDUAL_THRESHOLD && !aiWanted) {
+                        val reason = when {
+                            !aiModelReady -> "file_missing"
+                            !aiEnabledPref -> "disabled"
+                            !allowAi -> "not_allowed"
+                            else -> miganStatusReason
+                        }
+                        OcrDiag.log("CLEAN", "migan_unavailable reason=$reason tier3_skipped")
+                    }
                     continue
                 }
                 val cvConfidence = if (!soft) 0.82f
@@ -413,47 +472,111 @@ internal object WebModeTextRemover {
                         out[at] = 0xFF000000.toInt() or fill
                     }
                 }
+                for (at in mask.indices) {
+                    if (mask[at].toInt() != 0) out[at] = blendPixel(region[at], out[at], TIER2_FILL_ALPHA)
+                }
                 tier2Count++
                 val tier2Ms = android.os.SystemClock.elapsedRealtime() - tier2Start
                 var residualFinal = residualEnergy(out, mask, paper, soft, rw)
-                OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=2 ms=$tier2Ms reason=tier1_incomplete")
+                OcrDiag.log(
+                    "CLEAN_TIER",
+                    "bubble=$bubbleNo tier=2 ms=$tier2Ms reason=tier1_incomplete alpha=$TIER2_FILL_ALPHA"
+                )
+                OcrDiag.log(
+                    "CLEAN_RESIDUAL",
+                    "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
+                )
 
-                // Tier 3: MI-GAN only after Tier 2 still leaves residual ink and CV confidence is below 0.5.
-                if (residualFinal > RESIDUAL_THRESHOLD && cvConfidence < 0.5f && aiWanted &&
-                    aiBudget > 0 && WebModeInpainter.isLoaded() &&
-                    android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs < 8_000L) {
-                    val heap = Runtime.getRuntime()
-                    val freeHeapMb = (heap.maxMemory() - (heap.totalMemory() - heap.freeMemory())) / 1_048_576L
-                    if (freeHeapMb < 30L) {
-                        OcrDiag.log("MEM_GUARD", "migan_skipped_oom bubble=$bubbleNo freeHeapMB=$freeHeapMb")
-                        WebModeInpainter.releaseRuntimeForMemoryPressure()
-                    } else {
-                        val t3Start = android.os.SystemClock.elapsedRealtime()
-                        aiCallsAttempted++
-                        val aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
-                        aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
-                        aiTotalMs += aiLastMs
-                        if (aiFill != null) {
-                            aiBudget--
-                            aiCallsSucceeded++
-                            tier3Count++
-                            for (at in mask.indices) if (mask[at].toInt() != 0 && aiFill[at] != 0) out[at] = aiFill[at]
-                            residualFinal = residualEnergy(out, mask, paper, soft, rw)
-                            OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=3 ms=$aiLastMs reason=tier2_failed conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}")
-                        } else {
-                            OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x$rh result=skipped/failed ms=$aiLastMs")
+                // Tier 3 uses residual only (not CV confidence). Scans have no bubble cap; realtime keeps three calls.
+                if (residualFinal > TIER3_RESIDUAL_THRESHOLD) {
+                    OcrDiag.log(
+                        "CLEAN_ESCALATE",
+                        "bubble=$bubbleNo tierFrom=2 tierTo=3 residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                            "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)}"
+                    )
+                    val realtimeTimeExpired = realtimeMode &&
+                        (android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs >= 8_000L)
+                    val tier3Allowed = aiWanted && aiBudget > 0 &&
+                        (!realtimeMode || WebModeInpainter.isLoaded()) && !realtimeTimeExpired
+                    if (!tier3Allowed) {
+                        val reason = when {
+                            !aiEnabledPref -> "disabled"
+                            !allowAi -> "not_allowed"
+                            !aiModelReady -> "file_missing"
+                            aiCoolingDown -> "cooldown"
+                            realtimeMode && aiBudget <= 0 -> "realtime_budget"
+                            realtimeTimeExpired -> "realtime_time_budget"
+                            realtimeMode && !WebModeInpainter.isLoaded() -> "not_loaded_realtime"
+                            else -> miganStatusReason
                         }
-                        val afterHeap = Runtime.getRuntime()
-                        val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
-                        if (afterFreeMb < 30L) {
-                            OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
+                        OcrDiag.log("CLEAN", "migan_unavailable reason=$reason tier3_skipped")
+                    } else {
+                        val heap = Runtime.getRuntime()
+                        val freeHeapMb = (heap.maxMemory() - (heap.totalMemory() - heap.freeMemory())) / 1_048_576L
+                        if (freeHeapMb < 30L) {
+                            OcrDiag.log("MEM_GUARD", "migan_skipped_oom bubble=$bubbleNo freeHeapMB=$freeHeapMb")
+                            OcrDiag.log("CLEAN", "migan_unavailable reason=low_heap tier3_skipped")
                             WebModeInpainter.releaseRuntimeForMemoryPressure()
+                        } else {
+                            val t3Start = android.os.SystemClock.elapsedRealtime()
+                            aiBudget--
+                            aiCallsAttempted++
+                            tier3Count++
+                            val aiFill = try {
+                                WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask)
+                            } catch (_: Throwable) { null }
+                            aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
+                            aiTotalMs += aiLastMs
+                            if (aiFill != null) {
+                                aiCallsSucceeded++
+                                for (at in mask.indices) {
+                                    if (mask[at].toInt() != 0 && aiFill[at] != 0) {
+                                        out[at] = blendPixel(region[at], aiFill[at], TIER3_FILL_ALPHA)
+                                    }
+                                }
+                                residualFinal = residualEnergy(out, mask, paper, soft, rw)
+                                OcrDiag.log(
+                                    "CLEAN_TIER",
+                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
+                                        "reason=tier2_residual conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}"
+                                )
+                            } else {
+                                OcrDiag.log(
+                                    "CLEAN_TIER",
+                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
+                                )
+                                OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
+                            }
+                            val afterHeap = Runtime.getRuntime()
+                            val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
+                            if (afterFreeMb < 30L) {
+                                OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
+                                WebModeInpainter.releaseRuntimeForMemoryPressure()
+                            }
                         }
                     }
+                    OcrDiag.log(
+                        "CLEAN_RESIDUAL",
+                        "bubble=$bubbleNo tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} metric=normalized_0_100"
+                    )
                 }
                 panelResidualMax = max(panelResidualMax, residualFinal)
+                OcrDiag.log(
+                    "CLEAN_RESIDUAL",
+                    "bubble=$bubbleNo tier=final residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
+                )
+                if (residualFinal > TIER2_RESIDUAL_THRESHOLD) {
+                    OcrDiag.log(
+                        "CLEAN_WARN",
+                        "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                            "reason=ghost_likely failed=${residualFinal > CLEAN_FAILED_RESIDUAL_THRESHOLD}"
+                    )
+                }
                 bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                if (residualFinal <= RESIDUAL_THRESHOLD) {
+                // Only <5% residual suppresses the opaque bubble-cover fallback.
+                if (residualFinal <= TIER2_RESIDUAL_THRESHOLD) {
                     totalRemoved += selectedCount
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
                 }
@@ -479,7 +602,7 @@ internal object WebModeTextRemover {
                         "soft=${japaneseBubbles.count { it.soft }} allowAi=true policy=tiered"
                 )
             }
-            if (totalRemoved < 8 || panelResidualMax > RESIDUAL_THRESHOLD) return false
+            if (totalRemoved < 8 || panelResidualMax > CLEAN_FAILED_RESIDUAL_THRESHOLD) return false
 
             val bytesOut = ByteArrayOutputStream()
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
@@ -518,7 +641,7 @@ internal object WebModeTextRemover {
                 "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count aiExecutionAllowed=$allowAi " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
-                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)}"
+                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} residual_metric=normalized_0_100 failedThreshold=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
             )
             val releasedKb = bitmap.byteCount / 1024L
             bitmap.recycle()
@@ -596,7 +719,16 @@ internal object WebModeTextRemover {
                 kotlin.math.abs(blue(p) - blue(reference))) / 3.0
             count++
         }
-        return if (count == 0) 0f else (sum / count).toFloat()
+        return if (count == 0) 0f else (sum / count / 255.0 * 100.0).toFloat()
+    }
+
+    private fun blendPixel(original: Int, fill: Int, alpha: Float): Int {
+        val a = alpha.coerceIn(0f, 1f)
+        val inv = 1f - a
+        val r = (red(original) * inv + red(fill) * a).toInt().coerceIn(0, 255)
+        val g = (green(original) * inv + green(fill) * a).toInt().coerceIn(0, 255)
+        val b = (blue(original) * inv + blue(fill) * a).toInt().coerceIn(0, 255)
+        return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
     }
 
     private fun neighbourMean(region: IntArray, mask: ByteArray, at: Int, width: Int): Int? {
