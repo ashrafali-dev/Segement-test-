@@ -96,10 +96,13 @@ assert.ok(writer.includes('var cleanSources=__CLEAN_SOURCES__') &&
   "a cleaned image URL must be sent once per source, not repeated for every bubble");
 assert.ok(writer.includes("b.setAttribute('data-cl',it.cl?'1':'')"),
   "bubble JSON should carry only a small cleaned-image flag");
-assert.ok(!writer.includes('put("cv", ja)'),
-  "the overlay fallback must not paint the full bubble interior as cv rectangles");
-assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl"),
-  "local OCR-box cover must stay visible until the cleaned replacement image loads");
+assert.ok(writer.includes('put("cv", ja)'),
+  "detector speech-bubble mask rectangles must be passed to the overlay");
+assert.ok(writer.includes("var hasCv=!!(it.cv&&it.cv.length>=4)") &&
+  writer.includes("className='__ns_cv'") && writer.includes("cover.appendChild(cd)"),
+  "the overlay must reconstruct the detected speech-bubble silhouette from cv rectangles");
+assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl&&!hasCv"),
+  "the small OCR-box fallback should wait for cleaned image only when no bubble mask exists");
 const layoutSource = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 assert.ok(layoutSource.includes("fun canvasBubbleCachePrefix(sourceUrl: String)"),
   "canvas cache keys need a source prefix that can be invalidated after a page transition");
