@@ -8935,8 +8935,9 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 return@evaluateJavascript
             }
             val rawTranslation = cleanReply(decode(raw))
-            // A scanning reply may become visible before marker IDs are exposed in the chatbot DOM.
-            // Re-read up to 2s, then perform one final retry after 500ms before using the fallback.
+            var partialLensFallback = false
+            // Marker output can lag the fully-completed ML Kit fallback after a Lens network failure.
+            // Wait at most 1500ms for that batch, then retry once after the 30s circuit cooldown.
             if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
                 val scanLayout = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (scanLayout != null && scanLayout.bubbles.size > 1) {
@@ -8945,25 +8946,62 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                         val now = android.os.SystemClock.elapsedRealtime()
                         val startedAt = if (alignWaitStartedAtMs > 0L) alignWaitStartedAtMs else now
                         val waitedMs = (now - startedAt).coerceAtLeast(0L)
-                        if (waitedMs < 2_000L) {
-                            OcrDiag.log("ALIGN_WAIT", "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=$waitedMs timeout=false")
+                        val recentLensFailure = OcrEngineStatus.recentNetworkFallback(180_000L)
+                        val waitBudgetMs = if (recentLensFailure) 1_500L else 2_000L
+                        if (waitedMs < waitBudgetMs) {
+                            if (recentLensFailure) {
+                                OcrDiag.log(
+                                    "BATCH_WAIT_OCR",
+                                    "reason=lens_failed waitedMs=$waitedMs mlkitBlocks=${OcrEngineStatus.lastNetworkFallbackBlocks} markers=0"
+                                )
+                            }
+                            OcrDiag.log(
+                                "ALIGN_WAIT",
+                                "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=$waitedMs timeout=false budgetMs=$waitBudgetMs"
+                            )
                             handler.postDelayed({
                                 if (tok == runToken) finishJob(tok, ch, startedAt, alignRetryAfterTimeout)
-                            }, minOf(500L, 2_000L - waitedMs))
+                            }, minOf(250L, waitBudgetMs - waitedMs))
                             return@evaluateJavascript
                         }
-                        if (!alignRetryAfterTimeout) {
-                            OcrDiag.log("ALIGN_WAIT", "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=2000 timeout=true")
-                            OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived bubbles=${scanLayout.bubbles.size}")
-                            OcrDiag.log("ALIGN_RETRY", "bubbles=${scanLayout.bubbles.size} delayMs=500 attempt=1")
-                            handler.postDelayed({
-                                if (tok == runToken) finishJob(tok, ch, startedAt, true)
-                            }, 500L)
+                        if (recentLensFailure) {
+                            val mlkitBlocks = OcrEngineStatus.lastNetworkFallbackBlocks
+                            OcrDiag.log(
+                                "ALIGN_FAIL",
+                                "reason=no_markers_after_lens_failure bubbles=${scanLayout.bubbles.size} mlkitBlocks=$mlkitBlocks waitedMs=$waitedMs"
+                            )
+                            if (!alignRetryAfterTimeout) {
+                                OcrDiag.log(
+                                    "ALIGN",
+                                    "bubbles=${scanLayout.bubbles.size} placed=0 missing=${scanLayout.bubbles.size} " +
+                                        "reason=lens_dns_failure -> RETRY_PENDING"
+                                )
+                                OcrDiag.log("ALIGN_RETRY", "bubbles=${scanLayout.bubbles.size} delayMs=30000 attempt=1 reason=network_circuit")
+                                handler.postDelayed({
+                                    if (tok == runToken) finishJob(tok, ch, startedAt, true)
+                                }, 30_000L)
+                                return@evaluateJavascript
+                            }
+                            partialLensFallback = true
+                            OcrDiag.log(
+                                "ALIGN",
+                                "bubbles=${scanLayout.bubbles.size} placed=0 missing=${scanLayout.bubbles.size} " +
+                                    "reason=lens_dns_failure -> PARTIAL"
+                            )
+                        } else {
+                            if (!alignRetryAfterTimeout) {
+                                OcrDiag.log("ALIGN_WAIT", "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=$waitedMs timeout=true")
+                                OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived bubbles=${scanLayout.bubbles.size}")
+                                OcrDiag.log("ALIGN_RETRY", "bubbles=${scanLayout.bubbles.size} delayMs=500 attempt=1")
+                                handler.postDelayed({
+                                    if (tok == runToken) finishJob(tok, ch, startedAt, true)
+                                }, 500L)
+                                return@evaluateJavascript
+                            }
+                            OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived_after_retry bubbles=${scanLayout.bubbles.size}")
+                            failJob(tok, ch, "The chatbot markers did not arrive after retry.", fallback = true)
                             return@evaluateJavascript
                         }
-                        OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived_after_retry bubbles=${scanLayout.bubbles.size}")
-                        failJob(tok, ch, "The chatbot markers did not arrive after retry.", fallback = true)
-                        return@evaluateJavascript
                     }
                 }
             }
@@ -9004,9 +9042,17 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     val missingCount = (lay.bubbles.size - placedCount).coerceAtLeast(0)
                     OcrDiag.log("BATCH_ALIGN_DONE", "placed=$placedCount missing=$missingCount")
                     if (placed == null || placedCount * 100 < lay.bubbles.size * 90) {
-                        OcrDiag.log("ALIGN_FAIL", "reason=placement_below_90pct bubbles=${lay.bubbles.size} placed=$placedCount")
-                        failJob(tok, ch, "The chatbot answer could not be matched to at least 90% of page bubbles.", fallback = true)
-                        return@evaluateJavascript
+                        if (partialLensFallback) {
+                            OcrDiag.log(
+                                "ALIGN",
+                                "bubbles=${lay.bubbles.size} placed=$placedCount missing=$missingCount " +
+                                    "reason=lens_dns_failure -> PARTIAL"
+                            )
+                        } else {
+                            OcrDiag.log("ALIGN_FAIL", "reason=placement_below_90pct bubbles=${lay.bubbles.size} placed=$placedCount")
+                            failJob(tok, ch, "The chatbot answer could not be matched to at least 90% of page bubbles.", fallback = true)
+                            return@evaluateJavascript
+                        }
                     }
                 }
             }
