@@ -41,9 +41,10 @@ internal object WebModeTextRemover {
     private val cleanDurationMs = ThreadLocal<Long>()
     fun lastCleanMsForThread(): Long = cleanDurationMs.get() ?: 0L
 
-    private const val MAX_WIDTH = 4096
-    private const val MAX_HEIGHT = 20000
-    private const val MAX_PIXELS = 14_000_000L
+    // Decode down to these limits instead of refusing otherwise-readable 900x2000+ panels.
+    private const val MAX_CLEAN_W = 1200
+    private const val MAX_CLEAN_H = 2400
+    private const val MAX_PIXELS = 2_880_000L
     private const val MAX_BYTES = 18 * 1024 * 1024
 
     fun cleanAndCache(
@@ -99,25 +100,91 @@ internal object WebModeTextRemover {
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
-        val width = bounds.outWidth
-        val height = bounds.outHeight
-        if (width !in 1..MAX_WIDTH || height !in 1..MAX_HEIGHT ||
-            width.toLong() * height.toLong() > MAX_PIXELS) return earlySkip("image_dimensions_out_of_bounds")
+        val origWidth = bounds.outWidth
+        val origHeight = bounds.outHeight
+        if (origWidth <= 0 || origHeight <= 0) {
+            OcrDiag.log("CLEAN_GUARD", "w=$origWidth h=$origHeight limitW=$MAX_CLEAN_W limitH=$MAX_CLEAN_H passed=false reason=invalid_bounds")
+            return earlySkip("invalid_image_dimensions")
+        }
         val runtime = Runtime.getRuntime()
         val usedBytes = runtime.totalMemory() - runtime.freeMemory()
         val freeHeapMb = (runtime.maxMemory() - usedBytes) / 1_048_576L
-        val estimatedBitmapMb = ((width.toLong() * height.toLong() * 4L) + 1_048_575L) / 1_048_576L
-        if (freeHeapMb < 30L || freeHeapMb < estimatedBitmapMb + 12L) {
-            OcrDiag.log("MEM_GUARD", "clean_skipped_oom freeHeapMB=$freeHeapMb estimateMB=$estimatedBitmapMb")
+        if (freeHeapMb < 12L) {
+            OcrDiag.log("MEM_GUARD", "clean_skipped_absolute_floor freeHeapMB=$freeHeapMb reason=below_12MB")
             return earlySkip("memory_headroom")
         }
 
-        val decoded = BitmapFactory.decodeByteArray(encoded, 0, encoded.size,
-            BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
-            ?: return earlySkip("decode_failed")
-        val bitmap = if (decoded.config == Bitmap.Config.ARGB_8888 && decoded.isMutable) decoded
-            else decoded.copy(Bitmap.Config.ARGB_8888, true).also { decoded.recycle() }
-                ?: run { decoded.recycle(); return earlySkip("bitmap_copy_failed") }
+        // Pick the smallest Android power-of-two sample that fits both the safe processing envelope
+        // and current heap headroom. This keeps a large/stiched panel readable without abandoning cleanup.
+        var decodeSample = 1
+        var decodeFits = false
+        var expectedW = origWidth
+        var expectedH = origHeight
+        var expectedMb = 0L
+        while (decodeSample <= 256) {
+            expectedW = ((origWidth.toLong() + decodeSample - 1L) / decodeSample).toInt().coerceAtLeast(1)
+            expectedH = ((origHeight.toLong() + decodeSample - 1L) / decodeSample).toInt().coerceAtLeast(1)
+            val expectedPixels = expectedW.toLong() * expectedH.toLong()
+            expectedMb = (expectedPixels * 4L + 1_048_575L) / 1_048_576L
+            decodeFits = expectedW <= MAX_CLEAN_W && expectedH <= MAX_CLEAN_H &&
+                expectedPixels <= MAX_PIXELS && expectedMb + 12L <= freeHeapMb
+            if (decodeFits) break
+            decodeSample *= 2
+        }
+        if (!decodeFits) {
+            OcrDiag.log(
+                "CLEAN_GUARD",
+                "w=$origWidth h=$origHeight limitW=$MAX_CLEAN_W limitH=$MAX_CLEAN_H passed=false " +
+                    "reason=memory_floor freeHeapMB=$freeHeapMb estimateMB=$expectedMb"
+            )
+            OcrDiag.log("MEM_GUARD", "clean_skipped_oom freeHeapMB=$freeHeapMb estimateMB=$expectedMb")
+            return earlySkip("memory_headroom")
+        }
+
+        val decodedBase = BitmapFactory.decodeByteArray(
+            encoded, 0, encoded.size,
+            BitmapFactory.Options().apply {
+                inSampleSize = decodeSample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+        ) ?: return earlySkip("decode_failed")
+        val exactScale = minOf(
+            1f,
+            MAX_CLEAN_W.toFloat() / decodedBase.width.coerceAtLeast(1),
+            MAX_CLEAN_H.toFloat() / decodedBase.height.coerceAtLeast(1)
+        )
+        val targetW = (decodedBase.width * exactScale).toInt().coerceIn(1, MAX_CLEAN_W)
+        val targetH = (decodedBase.height * exactScale).toInt().coerceIn(1, MAX_CLEAN_H)
+        val scaled = if (targetW != decodedBase.width || targetH != decodedBase.height) {
+            Bitmap.createScaledBitmap(decodedBase, targetW, targetH, true).also {
+                if (it !== decodedBase && !decodedBase.isRecycled) decodedBase.recycle()
+            }
+        } else decodedBase
+        val bitmap = if (scaled.config == Bitmap.Config.ARGB_8888 && scaled.isMutable) scaled
+            else scaled.copy(Bitmap.Config.ARGB_8888, true).also { scaled.recycle() }
+                ?: run { scaled.recycle(); return earlySkip("bitmap_copy_failed") }
+        val width = bitmap.width
+        val height = bitmap.height
+        val actualPixels = width.toLong() * height.toLong()
+        val guardPassed = width in 1..MAX_CLEAN_W && height in 1..MAX_CLEAN_H &&
+            actualPixels <= MAX_PIXELS
+        OcrDiag.log(
+            "CLEAN_GUARD",
+            "w=$width h=$height origW=$origWidth origH=$origHeight limitW=$MAX_CLEAN_W limitH=$MAX_CLEAN_H " +
+                "passed=$guardPassed sample=$decodeSample"
+        )
+        if (!guardPassed) {
+            bitmap.recycle()
+            return earlySkip("post_decode_guard")
+        }
+        if (width != origWidth || height != origHeight) {
+            val factor = minOf(width.toFloat() / origWidth, height.toFloat() / origHeight)
+            OcrDiag.log(
+                "CLEAN_DOWNSCALE",
+                "origW=$origWidth origH=$origHeight scaledW=$width scaledH=$height factor=" +
+                    String.format(java.util.Locale.US, "%.4f", factor)
+            )
+        }
 
         val panelStartedMs = android.os.SystemClock.elapsedRealtime()
         var aiCallsAttempted = 0
