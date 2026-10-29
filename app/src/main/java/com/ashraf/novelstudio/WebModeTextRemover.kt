@@ -144,7 +144,8 @@ internal object WebModeTextRemover {
                 aiCoolingDown -> "cooldown"
                 aiLoadedAtStart -> "ready"
                 realtimeMode -> "not_loaded_realtime"
-                else -> "not_loaded_scan_can_lazy_load"
+                prefetchMode -> "not_loaded_prefetch_warming"
+                else -> "not_loaded_scan_warming"
             }
             OcrDiag.log(
                 "MIGAN_STATUS",
@@ -152,7 +153,7 @@ internal object WebModeTextRemover {
             )
             // Scan and prefetch may load lazily for a hard bubble. Realtime remains non-blocking if not loaded.
             val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown &&
-                (!realtimeMode || aiLoadedAtStart)
+                (!realtimeMode || aiLoadedAtStart) && (prefetchMode || aiLoadedAtStart)
             if (!aiWanted) {
                 OcrDiag.log("CLEAN", "migan_unavailable reason=$miganStatusReason tier3_skipped")
             }
@@ -592,7 +593,7 @@ internal object WebModeTextRemover {
                     val realtimeTimeExpired = realtimeMode &&
                         (android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs >= 8_000L)
                     val tier3Allowed = aiWanted && aiBudget > 0 &&
-                        (!realtimeMode || WebModeInpainter.isLoaded()) && !realtimeTimeExpired
+                        (!(realtimeMode || prefetchMode) || WebModeInpainter.isLoaded()) && !realtimeTimeExpired
                     if (!tier3Allowed) {
                         val reason = when {
                             !aiEnabledPref -> "disabled"
@@ -601,6 +602,7 @@ internal object WebModeTextRemover {
                             aiCoolingDown -> "cooldown"
                             aiBudget <= 0 -> if (prefetchMode) "panel_budget_exhausted" else "realtime_budget"
                             realtimeTimeExpired -> "realtime_time_budget"
+                            prefetchMode && !WebModeInpainter.isLoaded() -> "not_loaded_prefetch"
                             realtimeMode && !WebModeInpainter.isLoaded() -> "not_loaded_realtime"
                             else -> miganStatusReason
                         }
