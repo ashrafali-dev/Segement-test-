@@ -466,7 +466,7 @@ internal object WebModeTextRemover {
                     // binary-mask pixel with the same alpha so no selected text edge remains untouched.
                     for (at in mask.indices) {
                         if (mask[at].toInt() == 0) continue
-                        tier1Region[at] = blendPixel(region[at], paper, TIER1_FILL_ALPHA)
+                        tier1Region[at] = blendPixel(region[at], paper, tier1Alpha)
                         fillArea++
                     }
                 } else {
@@ -504,7 +504,7 @@ internal object WebModeTextRemover {
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
                     OcrDiag.log(
                         "CLEAN_TIER",
-                        "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$TIER1_FILL_ALPHA"
+                        "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$tier1Alpha"
                     )
                     continue
                 }
