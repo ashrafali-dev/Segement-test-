@@ -28,6 +28,9 @@ internal object WebModeTextRemover {
     private const val TIER2_RESIDUAL_THRESHOLD = 5f
     private const val TIER3_RESIDUAL_THRESHOLD = 8f
     private const val CLEAN_FAILED_RESIDUAL_THRESHOLD = 15f
+    private const val LARGE_MASK_THRESHOLD = 15_000
+    private const val MIGAN_MAX_MASK_AREA = 40_000
+    private const val LARGE_MASK_ALPHA = 1.00f
     private const val BBOX_DILATION_PX = 3
     private const val TIER1_FILL_ALPHA = 0.98f
     private const val TIER2_FILL_ALPHA = 0.98f
@@ -125,6 +128,8 @@ internal object WebModeTextRemover {
         var tier2Count = 0
         var tier3Count = 0
         var panelResidualMax = 0f
+        var panelHardFailure = false
+        var acceptedLargeMask = false
         try {
             var totalRemoved = 0
             // Prefetch has a per-panel limit of two calls; realtime keeps three; thorough scan is capped globally.
@@ -434,20 +439,26 @@ internal object WebModeTextRemover {
                     }
                 }
 
-                // Tier 1: near-opaque median-ring fill on flat bubbles; textured/free lettering gets
-                // a local gradient prediction per mask pixel so Tier 1 is never silently a no-op.
-                val paper = medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1) ?: bg
+                // Large sound effects/text regions need a wider *sampling* ring, but the actual mask stays unchanged.
+                val maskArea = mask.count { it.toInt() != 0 }
+                val largeMask = maskArea > LARGE_MASK_THRESHOLD
+                val ringSamplePad = if (largeMask) (5 - BBOX_DILATION_PX).coerceAtLeast(0) else 0
+                val paper = medianRingColor(
+                    region, rw, rh,
+                    (ix0 - ringSamplePad).coerceAtLeast(0), (iy0 - ringSamplePad).coerceAtLeast(0),
+                    (ix1 + ringSamplePad).coerceAtMost(rw), (iy1 + ringSamplePad).coerceAtMost(rh)
+                ) ?: bg
+                val tier1Alpha = if (largeMask) LARGE_MASK_ALPHA else TIER1_FILL_ALPHA
                 val tier1Start = android.os.SystemClock.elapsedRealtime()
                 val tier1Region = region.copyOf()
                 val fillPad = grow.coerceIn(1, 8)
-                val maskArea = mask.count { it.toInt() != 0 }
                 var fillArea = 0
                 if (!soft && !bubble.free) {
                     fillRoundedRect(
                         tier1Region, rw, rh,
                         (ix0 - fillPad).coerceAtLeast(0), (iy0 - fillPad).coerceAtLeast(0),
                         (ix1 + fillPad).coerceAtMost(rw), (iy1 + fillPad).coerceAtMost(rh),
-                        paper, TIER1_FILL_ALPHA, (fontPx * 0.18f).toInt().coerceIn(1, 12)
+                        paper, tier1Alpha, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                     )
                     // The rounded rectangle can clip glyph pixels at its corners. Explicitly cover every
                     // binary-mask pixel with the same alpha so no selected text edge remains untouched.
@@ -463,14 +474,15 @@ internal object WebModeTextRemover {
                         if (mask[at].toInt() == 0) continue
                         var predicted = neighbourMean(region, mask, at, rw) ?: paper
                         if (distance(region[at], predicted) < 12f) predicted = paper
-                        tier1Region[at] = blendPixel(region[at], predicted, TIER1_FILL_ALPHA)
+                        tier1Region[at] = blendPixel(region[at], predicted, tier1Alpha)
                         fillArea++
                     }
                 }
                 val tier1CoversMask = maskArea > 0 && fillArea >= maskArea
                 OcrDiag.log(
                     "CLEAN_FILL",
-                    "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea appliedAlpha=$TIER1_FILL_ALPHA"
+                    "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea appliedAlpha=$tier1Alpha " +
+                        "largeMask=$largeMask alpha=$tier1Alpha ringSamplePad=$ringSamplePad"
                 )
                 OcrDiag.log(
                     "CLEAN_ASSERT",
@@ -499,14 +511,23 @@ internal object WebModeTextRemover {
                     "bubble=$bubbleNo tierFrom=1 tierTo=2 residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)}"
                 )
-                // Tier 2: OpenCV Telea inpaint; apply a 0.98 fill alpha before measuring residual.
-                // Always give Tier 2 its chance even when MI-GAN is unavailable; the final
-                // residual warning keeps uncertain artwork from being reported as fully erased.
+                // Tier 2 starts from Tier 1 output. Large masks use 200px tiles with 20px overlap
+                // so OpenCV is bounded and neighbouring art/text cannot bleed across the whole region.
                 val tier2Start = android.os.SystemClock.elapsedRealtime()
                 val cvConfidence = if (!soft) 0.82f
                     else if (estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1) != null) 0.78f else 0.42f
-                // IMPORTANT: Tier 2 must receive Tier 1's edited pixels, never the original text bitmap.
-                val cvOut = openCvInpaint(tier1Region, rw, rh, mask)
+                val cvOut: IntArray?
+                if (largeMask) {
+                    val tiled = openCvInpaintTiled(tier1Region, rw, rh, mask)
+                    cvOut = tiled.pixels
+                    OcrDiag.log(
+                        "CLEAN_TIER2_TILE",
+                        "bubble=$bubbleNo tiles=${tiled.tiles} ms=${android.os.SystemClock.elapsedRealtime() - tier2Start} " +
+                            "success=${cvOut != null} tileSize=200 overlap=20 maskArea=$maskArea"
+                    )
+                } else {
+                    cvOut = openCvInpaint(tier1Region, rw, rh, mask)
+                }
                 var out = cvOut ?: tier1Region.copyOf()
                 val tele = if (cvOut == null && soft) onionFill(
                     tier1Region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
@@ -576,13 +597,16 @@ internal object WebModeTextRemover {
                 // Snapshot the best accepted result at the end of Tier 2; Tier 3 can only replace it if better.
                 val tier2BestOut = out.copyOf()
 
-                // Tier 3 uses residual only (not CV confidence). Scans have no bubble cap; realtime keeps three calls.
+                // A 512x512 MI-GAN context cannot safely repair the largest text masks; tiled Tier 2 is the fallback.
                 if (residualFinal > TIER3_RESIDUAL_THRESHOLD) {
                     OcrDiag.log(
                         "CLEAN_ESCALATE",
                         "bubble=$bubbleNo tierFrom=2 tierTo=3 residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
                             "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)}"
                     )
+                    if (largeMask && maskArea > MIGAN_MAX_MASK_AREA) {
+                        OcrDiag.log("CLEAN", "migan_skipped reason=mask_too_large area=$maskArea")
+                    } else {
                     val realtimeTimeExpired = realtimeMode &&
                         (android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs >= 8_000L)
                     val tier3Allowed = aiWanted && aiBudget > 0 &&
@@ -678,6 +702,7 @@ internal object WebModeTextRemover {
                             }
                         }
                     }
+                    }
                     OcrDiag.log(
                         "CLEAN_RESIDUAL",
                         "bubble=$bubbleNo tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} metric=normalized_0_100"
@@ -689,16 +714,22 @@ internal object WebModeTextRemover {
                     "bubble=$bubbleNo tier=final residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
                 )
+                val largeMaskAccepted = largeMask && residualFinal < 20f
+                val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= 20f
+                if (largeMaskAccepted) acceptedLargeMask = true
+                if (bubbleHardFailure) panelHardFailure = true
                 if (residualFinal > TIER2_RESIDUAL_THRESHOLD) {
                     OcrDiag.log(
                         "CLEAN_WARN",
                         "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
-                            "reason=ghost_likely failed=${residualFinal > CLEAN_FAILED_RESIDUAL_THRESHOLD}"
+                            "reason=ghost_likely failed=$bubbleHardFailure maskArea=$maskArea " +
+                            "note=${if (largeMaskAccepted) "best_effort_large_mask" else if (largeMask) "large_mask_residual_high" else "normal_mask"}"
                     )
                 }
                 bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                // Only <5% residual suppresses the opaque bubble-cover fallback.
-                if (residualFinal <= TIER2_RESIDUAL_THRESHOLD) {
+                // A large mask below residual 20 is accepted as best-effort; do not restore the original text
+                // merely because realistic artwork residuals cannot reach the flat-bubble <5% target.
+                if (residualFinal <= TIER2_RESIDUAL_THRESHOLD || largeMaskAccepted) {
                     totalRemoved += selectedCount
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
                 }
@@ -724,7 +755,7 @@ internal object WebModeTextRemover {
                         "soft=${japaneseBubbles.count { it.soft }} allowAi=true policy=tiered"
                 )
             }
-            if (totalRemoved < 8 || panelResidualMax > CLEAN_FAILED_RESIDUAL_THRESHOLD) return false
+            if ((totalRemoved < 8 && !acceptedLargeMask) || panelHardFailure) return false
 
             val bytesOut = ByteArrayOutputStream()
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
