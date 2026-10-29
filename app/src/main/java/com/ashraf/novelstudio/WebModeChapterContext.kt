@@ -140,14 +140,11 @@ internal data class WebModeChapterContext(
         }
     }
 
-    fun assembleMarkedTranslation(translations: Map<Int, String>, summary: String): String {
-        val marked = entries.sortedBy { it.markerNumber }.joinToString("\n\n") { entry ->
+    /** Build the marker-bearing text used for placement. Summary is displayed separately, never placed on a bubble. */
+    fun assembleMarkedTranslation(translations: Map<Int, String>): String =
+        entries.sortedBy { it.markerNumber }.joinToString("\n\n") { entry ->
             "[${entry.markerNumber.toString().padStart(3, '0')}] ${translations[entry.markerNumber].orEmpty().trim()}"
         }
-        val safeSummary = summary.trim()
-        return if (safeSummary.isBlank()) marked else
-            "$marked\n\n[CHAPTER_SUMMARY]\n$safeSummary\n[/CHAPTER_SUMMARY]"
-    }
 
     companion object {
         private val MARKED_BLOCK = Regex("(?ms)^\\[(\\d{3,})\\]\\s*(.*?)(?=^\\[\\d{3,}\\]\\s*|\\z)")
