@@ -961,22 +961,26 @@ internal object WebModeTextRemover {
                     System.arraycopy(source, globalStart, tilePixels, localStart, tileW)
                     System.arraycopy(mask, globalStart, tileMask, localStart, tileW)
                 }
-                val tileOutput = openCvInpaint(tilePixels, tileW, tileH, tileMask)
                 tiles++
-                if (tileOutput == null) {
-                    failed = true
-                } else {
-                    // Split overlap at its midpoint; every output mask pixel is owned by exactly one tile.
-                    val coreX0 = if (tileX == 0) 0 else tileX + overlap / 2
-                    val coreX1 = if (tileX + tileW >= rw) rw else tileX + tileW - overlap / 2
-                    val coreY0 = if (tileY == 0) 0 else tileY + overlap / 2
-                    val coreY1 = if (tileY + tileH >= rh) rh else tileY + tileH - overlap / 2
-                    for (globalY in coreY0 until coreY1) {
-                        val localY = globalY - tileY
-                        for (globalX in coreX0 until coreX1) {
-                            val globalAt = globalY * rw + globalX
-                            if (mask[globalAt].toInt() == 0) continue
-                            output[globalAt] = tileOutput[localY * tileW + (globalX - tileX)]
+                // Most of a large sound-effect bbox may be whitespace between glyphs. Empty-mask tiles
+                // need no OpenCV call and must not turn an otherwise good tiled pass into a failure.
+                if (tileMask.any { it.toInt() != 0 }) {
+                    val tileOutput = openCvInpaint(tilePixels, tileW, tileH, tileMask)
+                    if (tileOutput == null) {
+                        failed = true
+                    } else {
+                        // Split overlap at its midpoint; every output mask pixel is owned by exactly one tile.
+                        val coreX0 = if (tileX == 0) 0 else tileX + overlap / 2
+                        val coreX1 = if (tileX + tileW >= rw) rw else tileX + tileW - overlap / 2
+                        val coreY0 = if (tileY == 0) 0 else tileY + overlap / 2
+                        val coreY1 = if (tileY + tileH >= rh) rh else tileY + tileH - overlap / 2
+                        for (globalY in coreY0 until coreY1) {
+                            val localY = globalY - tileY
+                            for (globalX in coreX0 until coreX1) {
+                                val globalAt = globalY * rw + globalX
+                                if (mask[globalAt].toInt() == 0) continue
+                                output[globalAt] = tileOutput[localY * tileW + (globalX - tileX)]
+                            }
                         }
                     }
                 }
