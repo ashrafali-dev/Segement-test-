@@ -7211,6 +7211,15 @@ return t.length>=40?'TXT:'+t:'';
                             } else {
                                 if (out.failedPanels > 0)
                                     toast("⚠ ${out.failedPanels} panel(s) could not be read; the rest were kept")
+                                val scanBubbles = WebModeLayoutStore.getScan(out.chapter.url)?.bubbles.orEmpty()
+                                if (out.chapter.contentSel.isBlank() && scanBubbles.any { it.sourceText.isNotBlank() }) {
+                                    scanTranslationEligibleKeys.add(scanTranslationKey(out.chapter))
+                                    OcrDiag.log(
+                                        "MODE_ENGAGED",
+                                        "mode=scan expectations=premium panels=${scanBubbles.map { WebModeLogic.normalizeUrl(it.src) }.distinct().size} " +
+                                            "bubbles=${scanBubbles.size} contextEligible=true"
+                                    )
+                                }
                                 handleChapter(out.chapter, useSavedTranslation = useSaved)
                             }
                             // Only realtime viewport scans may resume the ahead-translation queue.
