@@ -570,18 +570,13 @@ internal object WebModeTextRemover {
                             !allowAi -> "not_allowed"
                             !aiModelReady -> "file_missing"
                             aiCoolingDown -> "cooldown"
-                            realtimeMode && aiBudget <= 0 -> "realtime_budget"
+                            aiBudget <= 0 -> if (prefetchMode) "panel_budget_exhausted" else "realtime_budget"
                             realtimeTimeExpired -> "realtime_time_budget"
                             realtimeMode && !WebModeInpainter.isLoaded() -> "not_loaded_realtime"
                             else -> miganStatusReason
                         }
                         if (prefetchMode) {
-                            val prefetchReason = when {
-                                !aiWanted -> reason
-                                aiBudget <= 0 -> "panel_budget_exhausted"
-                                else -> reason
-                            }
-                            OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=$prefetchReason")
+                            OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=$reason")
                         }
                         OcrDiag.log("CLEAN", "migan_unavailable reason=$reason tier3_skipped")
                     } else {
@@ -590,80 +585,72 @@ internal object WebModeTextRemover {
                         if (freeHeapMb < 30L) {
                             OcrDiag.log("MEM_GUARD", "migan_skipped_oom bubble=$bubbleNo freeHeapMB=$freeHeapMb")
                             OcrDiag.log("CLEAN", "migan_unavailable reason=low_heap tier3_skipped")
+                            if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=low_heap")
                             WebModeInpainter.releaseRuntimeForMemoryPressure()
+                        } else if (!WebModeInpainter.tryAcquireGlobalCallBudget()) {
+                            OcrDiag.log("CLEAN", "migan_unavailable reason=global_budget_exhausted tier3_skipped")
+                            if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=budget_exhausted")
                         } else {
-                            val heap = Runtime.getRuntime()
-                            val freeHeapMb = (heap.maxMemory() - (heap.totalMemory() - heap.freeMemory())) / 1_048_576L
-                            if (freeHeapMb < 30L) {
-                                OcrDiag.log("MEM_GUARD", "migan_skipped_oom bubble=$bubbleNo freeHeapMB=$freeHeapMb")
-                                OcrDiag.log("CLEAN", "migan_unavailable reason=low_heap tier3_skipped")
-                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=low_heap")
-                                WebModeInpainter.releaseRuntimeForMemoryPressure()
-                            } else if (!WebModeInpainter.tryAcquireGlobalCallBudget()) {
-                                OcrDiag.log("CLEAN", "migan_unavailable reason=global_budget_exhausted tier3_skipped")
-                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=budget_exhausted")
-                            } else {
-                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=true reason=residual>8")
-                                val t3Start = android.os.SystemClock.elapsedRealtime()
-                                aiBudget--
-                                aiCallsAttempted++
-                                tier3Count++
-                                // Make MI-GAN's context include the accepted Tier-2 output, not original lettering.
-                                bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                                val aiFill = try {
-                                    WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask)
-                                } catch (_: Throwable) { null }
-                                aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
-                                aiTotalMs += aiLastMs
-                                if (aiFill != null) {
-                                    aiCallsSucceeded++
-                                    val tier3Candidate = out.copyOf()
-                                    for (at in mask.indices) {
-                                        if (mask[at].toInt() != 0 && aiFill[at] != 0) {
-                                            tier3Candidate[at] = blendPixel(out[at], aiFill[at], TIER3_FILL_ALPHA)
-                                        }
+                            if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=true reason=residual>8")
+                            val t3Start = android.os.SystemClock.elapsedRealtime()
+                            aiBudget--
+                            aiCallsAttempted++
+                            tier3Count++
+                            // MI-GAN's context must include accepted Tier-2 pixels, never resurrect original text.
+                            bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
+                            val aiFill = try {
+                                WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask)
+                            } catch (_: Throwable) { null }
+                            aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
+                            aiTotalMs += aiLastMs
+                            if (aiFill != null) {
+                                aiCallsSucceeded++
+                                val tier3Candidate = out.copyOf()
+                                for (at in mask.indices) {
+                                    if (mask[at].toInt() != 0 && aiFill[at] != 0) {
+                                        tier3Candidate[at] = blendPixel(out[at], aiFill[at], TIER3_FILL_ALPHA)
                                     }
-                                    val tier3CandidateResidual = residualEnergy(
-                                        tier3Candidate, mask, paper, soft, rw, baseline = region
-                                    )
+                                }
+                                val tier3CandidateResidual = residualEnergy(
+                                    tier3Candidate, mask, paper, soft, rw, baseline = region
+                                )
+                                OcrDiag.log(
+                                    "CLEAN_TIER",
+                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
+                                        "reason=tier2_residual conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}"
+                                )
+                                OcrDiag.log(
+                                    "CLEAN_RESIDUAL",
+                                    "bubble=$bubbleNo tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)} " +
+                                        "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} metric=normalized_0_100"
+                                )
+                                if (tier3CandidateResidual > tier2Residual) {
                                     OcrDiag.log(
-                                        "CLEAN_TIER",
-                                        "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
-                                            "reason=tier2_residual conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}"
+                                        "CLEAN_ROLLBACK",
+                                        "bubble=$bubbleNo tier=3 keptTier2=true " +
+                                            "residualBefore=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} " +
+                                            "residualAfter=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)}"
                                     )
-                                    OcrDiag.log(
-                                        "CLEAN_RESIDUAL",
-                                        "bubble=$bubbleNo tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)} " +
-                                            "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} metric=normalized_0_100"
-                                    )
-                                    if (tier3CandidateResidual > tier2Residual) {
-                                        OcrDiag.log(
-                                            "CLEAN_ROLLBACK",
-                                            "bubble=$bubbleNo tier=3 keptTier2=true " +
-                                                "residualBefore=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} " +
-                                                "residualAfter=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)}"
-                                        )
-                                        out = tier2BestOut.copyOf()
-                                        residualFinal = tier2Residual
-                                    } else {
-                                        out = tier3Candidate
-                                        residualFinal = tier3CandidateResidual
-                                    }
+                                    out = tier2BestOut.copyOf()
+                                    residualFinal = tier2Residual
                                 } else {
-                                    OcrDiag.log(
-                                        "CLEAN_TIER",
-                                        "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
-                                    )
-                                    OcrDiag.log("CLEAN", "migan_unavailable reason=initialization_or_inference_failed tier3_skipped")
-                                    OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
-                                    if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=inference_failed")
+                                    out = tier3Candidate
+                                    residualFinal = tier3CandidateResidual
                                 }
-                                val afterHeap = Runtime.getRuntime()
-                                val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
-                                if (afterFreeMb < 30L) {
-                                    OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
-                                    WebModeInpainter.releaseRuntimeForMemoryPressure()
-                                }
+                            } else {
+                                OcrDiag.log(
+                                    "CLEAN_TIER",
+                                    "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
+                                )
+                                OcrDiag.log("CLEAN", "migan_unavailable reason=initialization_or_inference_failed tier3_skipped")
+                                OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
+                                if (prefetchMode) OcrDiag.log("MIGAN_PREFETCH", "panel=$panelNo allowed=false reason=inference_failed")
+                            }
+                            val afterHeap = Runtime.getRuntime()
+                            val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
+                            if (afterFreeMb < 30L) {
+                                OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
+                                WebModeInpainter.releaseRuntimeForMemoryPressure()
                             }
                         }
                     }
