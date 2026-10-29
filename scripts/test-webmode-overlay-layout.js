@@ -60,7 +60,9 @@ assert.ok(visibleHitSource.includes("var outerHit=document.elementFromPoint(x,y)
   "a same-origin iframe image must also be visible at the outer page stacking layer, not just inside its own document");
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
-assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
+assert.ok(extractor.includes("forceFresh = freshOcrRequired()") &&
+  extractor.includes("foregroundVisibleOcr()"),
+  "manual and foreground visible viewport OCR must bypass the negative cache while preserving their fast/thorough mode");
 const forceInfoAt = extractor.indexOf("val forceInfoScript = if (req.visibleOnly)");
 const forceInfoEnd = extractor.indexOf("else JS_FORCE_INFO", forceInfoAt);
 assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canvas-crop path");
