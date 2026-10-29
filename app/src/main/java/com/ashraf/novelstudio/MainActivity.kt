@@ -1173,7 +1173,8 @@ class MainActivity : Activity() {
     private var translatingPillSignature = ""
 
     private fun panelTopFromSignature(signature: String): Int =
-        Regex("@\\d+x\\d+@-?\\d+,(-?\\d+)").find(signature)
+        (Regex("@\\d+x\\d+@-?\\d+,(-?\\d+)").find(signature)
+            ?: Regex("@-?\\d+,(-?\\d+)").find(signature))
             ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
 
     private fun guardedRealtimePlacementScript(script: String, signature: String): String =
