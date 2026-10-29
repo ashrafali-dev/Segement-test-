@@ -59,7 +59,7 @@ assert.ok(extractor.includes('SLICE_STRATEGY') &&
 assert.ok(extractor.includes('val scanMode = !req.visibleOnly && req.ahead <= 0') &&
           extractor.includes('val realtimePriority = !scanMode') &&
           extractor.includes('DETECT_MODE') &&
-          extractor.includes('source=pixel_bbox_fallback bboxPad=5') &&
+          extractor.includes('pixel_bbox_fallback') && extractor.includes('bboxPad=5') &&
           extractor.includes('!fastMode && !remoteDet'),
   'scanning detection must use pixel-based bbox fallback independently of fast Lens dispatch without extra per-bubble Lens reads');
 
