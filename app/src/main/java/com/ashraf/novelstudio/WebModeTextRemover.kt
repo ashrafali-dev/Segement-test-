@@ -453,8 +453,7 @@ internal object WebModeTextRemover {
                     // Trusted scanning must not silently leave ordinary speech text over the translation.
                     // On flat dialogue bubbles only, fall back to the OCR text bbox already expanded by 5 px.
                     // Free/stylized on-art lettering keeps the conservative pixel mask to protect the illustration.
-                    if (scanMode && !soft && !bubble.free &&
-                        selectedCount < 4) {
+                    if (scanMode && !soft && !bubble.free) {
                         for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
                             val at = ry * rw + rx
                             if (protect[at].toInt() == 0) selected[at] = 1
