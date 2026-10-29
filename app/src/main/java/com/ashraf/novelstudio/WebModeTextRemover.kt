@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -39,6 +40,8 @@ internal object WebModeTextRemover {
         private set
     @Volatile var lastTier1Count: Int = 0
         private set
+    private val residualBySource = ConcurrentHashMap<String, Float>()
+    fun residualForSource(sourceUrl: String): Float? = residualBySource[WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }]
     private val cleanSemaphore = Semaphore(2, true)
     private val cleanDurationMs = ThreadLocal<Long>()
     fun lastCleanMsForThread(): Long = cleanDurationMs.get() ?: 0L
@@ -91,6 +94,8 @@ internal object WebModeTextRemover {
     ): Boolean {
         lastResidualMax = 0f
         lastTier1Count = 0
+        val sourceKey = WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }
+        residualBySource.remove(sourceKey)
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
         fun earlySkip(reason: String): Boolean {
             if (realtimeMode) {
@@ -948,6 +953,11 @@ internal object WebModeTextRemover {
             panelRemovedForLog = totalRemoved
             lastResidualMax = panelResidualMax
             lastTier1Count = tier1Count
+            residualBySource[sourceKey] = panelResidualMax
+            if (residualBySource.size > 512) {
+                val staleKey = residualBySource.keys.firstOrNull { it != sourceKey }
+                if (staleKey != null) residualBySource.remove(staleKey)
+            }
             // Compact Japanese-script audit: show whether Lens/OCR found a bubble but the local cleaner
             // skipped it. This distinguishes OCR geometry/color-mask misses from MI-GAN timing without
             // logging the dialogue itself or emitting a separate line for every bubble.
