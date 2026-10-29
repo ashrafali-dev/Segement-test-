@@ -66,7 +66,7 @@ internal object OcrDiag {
     /** Called once when a Web Mode job finishes (success or failure). */
     fun jobDone(host: String, summary: String, ok: Boolean, how: String, ms: Long, error: String) {
         val hostKey = host.ifBlank { "?" }
-        val hostForLog = hostKey.lowercase(Locale.US)
+        val hostForLog = OcrPanelTiming.normalizeHost(hostKey)
         var snapshotJobs = 0
         var snapshotAvgMs = 0L
         var takeSnapshot = false
