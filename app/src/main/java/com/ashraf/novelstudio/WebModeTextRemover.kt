@@ -457,18 +457,11 @@ internal object WebModeTextRemover {
                         fillArea++
                     }
                 } else {
-                    // On artwork/free lettering preserve local texture: predict a fill for each mask pixel,
-                    // then blend it fully and uniformly instead of leaving Tier 1 as a no-op.
-                    for (ry in 0 until rh) for (rx in 0 until rw) {
-                        val at = ry * rw + rx
+                    // On artwork/free lettering use the nearest unmasked ring as a lightweight local fill.
+                    // This preserves texture and avoids running the expensive directional interpolator twice.
+                    for (at in mask.indices) {
                         if (mask[at].toInt() == 0) continue
-                        var predicted = gradientFill(
-                            region, mask, rw, rh, rx, ry,
-                            (fontPx * 1.6f).toInt().coerceIn(8, 60), bg
-                        )
-                        if (distance(region[at], predicted) < 18f) {
-                            predicted = neighbourMean(region, mask, at, rw) ?: paper
-                        }
+                        var predicted = neighbourMean(region, mask, at, rw) ?: paper
                         if (distance(region[at], predicted) < 12f) predicted = paper
                         tier1Region[at] = blendPixel(region[at], predicted, TIER1_FILL_ALPHA)
                         fillArea++
