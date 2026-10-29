@@ -444,6 +444,9 @@ internal object WebModeTextRemover {
                 // Large sound effects/text regions need a wider *sampling* ring, but the actual mask stays unchanged.
                 val maskArea = mask.count { it.toInt() != 0 }
                 val largeMask = maskArea > LARGE_MASK_THRESHOLD
+                if (maskArea > MIGAN_MAX_MASK_AREA) {
+                    OcrDiag.log("CLEAN", "migan_skipped reason=mask_too_large area=$maskArea")
+                }
                 val ringSamplePad = if (largeMask) (5 - BBOX_DILATION_PX).coerceAtLeast(0) else 0
                 val paper = medianRingColor(
                     region, rw, rh,
@@ -607,7 +610,7 @@ internal object WebModeTextRemover {
                             "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)}"
                     )
                     if (largeMask && maskArea > MIGAN_MAX_MASK_AREA) {
-                        OcrDiag.log("CLEAN", "migan_skipped reason=mask_too_large area=$maskArea")
+                        // Skip already logged beside the mask-area measurement, even when Tier 3 was not needed.
                     } else if (rw > 512 || rh > 512) {
                         OcrDiag.log("CLEAN", "migan_skipped reason=input_dim_too_large dims=${rw}x${rh} area=$maskArea")
                     } else {
