@@ -261,4 +261,36 @@ assert.ok(mainActivity.includes('completeRealtimeVisiblePlacement(matched.size, 
           mainActivity.includes('coerceIn(0, 1)'),
   'realtime advances to one-panel prefetch only after a nonempty visible overlay has been confirmed');
 
+assert.ok(mainActivity.includes('window.__nsRtVisibleSig=sig') &&
+          mainActivity.includes('window.__nsRtVisibleSig=textSig') &&
+          mainActivity.includes('guardedRealtimePlacementScript') &&
+          mainActivity.includes('OVERLAY_SHOW') && mainActivity.includes('OVERLAY_KEEP') &&
+          mainActivity.includes('OVERLAY_CLEAR') && mainActivity.includes('OVERLAY_ATTACHED') &&
+          mainActivity.includes('OVERLAY_VISIBLE'),
+  'realtime overlay must be guarded by the latest viewport signature, persist across state transitions and verify attachment');
+assert.ok(mainActivity.includes('PLACE_QUEUE_CLEAR') && mainActivity.includes('PLACE_REQUEST') &&
+          mainActivity.includes('PLACE_ACCEPT') && mainActivity.includes('PLACE_REJECT') &&
+          mainActivity.includes('panelSignature != realtimeCurrentSignature') &&
+          mainActivity.includes('realtimeBatchSignatureByKey'),
+  'placement queues and callbacks must be isolated by the current visible panel signature');
+assert.ok(cleaner.includes('realtimeMode) {') && cleaner.includes('realtime_tier1_only') &&
+          cleaner.includes('lastTier1Count') && extractor.includes('CLEAN_REALTIME') &&
+          extractor.includes('CLEAN_SKIP'),
+  'every visible OCR panel must log fast Tier-1 cleaning or a specific CLEAN_SKIP');
+assert.ok(extractor.includes('DETECT_REALTIME') &&
+          extractor.includes('source=\${if (realtimePixelBubbleTargets > 0) "pixel" else "text_bbox"}') &&
+          extractor.includes('pixel_bubble_fit'),
+  'realtime OCR must log pixel-derived bubble-fit placement targets or the text-bbox fallback');
+assert.ok(extractor.includes('adOrRedirectSkipReason(startUrl)') &&
+          extractor.includes('JOB_SKIP') && extractor.includes('ng88b.com') &&
+          extractor.includes('doubleclick.net') && extractor.includes('amazon-adsystem.com') &&
+          extractor.includes('redirect_path') && extractor.includes('tracking_query'),
+  'known ad and redirect hosts/URL patterns must be skipped before OCR work');
+assert.ok(mainActivity.includes('TRANSLATING_UI') && mainActivity.includes('অনুবাদ হচ্ছে') &&
+          layout.includes('"translating"'),
+  'visible translation delay must show a pill that cannot itself be translated by OCR');
+assert.ok(writer.includes('auditBubbleFingerprints') && writer.includes('residualForSource(b.src)') &&
+          writer.includes('cleanStatusForSource(b.src)') && cleaner.includes('cleanStatusForSource'),
+  'PLACE_UNCLEANED must use the current request bubble set and its own source residual/clean status');
+
 console.log('PASS: OCR quality wiring (script-gated ghost fill, Japanese-preserving placement, current-screen-first state machine, uncleaned placement cover, readable realtime sampling, chapter-context pipeline)');
