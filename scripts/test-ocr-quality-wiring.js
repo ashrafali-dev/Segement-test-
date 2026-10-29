@@ -90,9 +90,9 @@ assert.ok(cleaner.includes('TIER1_FILL_ALPHA = 0.98f') &&
   'all cleaner tiers must use the requested fill alpha');
 assert.ok(cleaner.includes('TIER2_RESIDUAL_THRESHOLD = 5f') &&
           cleaner.includes('TIER3_RESIDUAL_THRESHOLD = 8f') &&
-          cleaner.includes('CLEAN_FAILED_RESIDUAL_THRESHOLD = 15f') &&
+          cleaner.includes('CLEAN_FAILED_RESIDUAL_THRESHOLD = 20f') &&
           cleaner.includes('metric=normalized_0_100'),
-  'all stages must use normalized residual thresholds and the 15% failure rule');
+  'all stages must use normalized residual thresholds and the large-mask 20% failure rule');
 assert.ok(cleaner.includes('MIGAN_STATUS') && cleaner.includes('migan_unavailable reason=') &&
           cleaner.includes('CLEAN_ESCALATE') && cleaner.includes('CLEAN_WARN') &&
           cleaner.includes('scope=bbox pad=$BBOX_DILATION_PX') &&
