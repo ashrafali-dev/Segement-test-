@@ -1165,9 +1165,7 @@ class MainActivity : Activity() {
     private var realtimeVisiblePlaced = false
     private var realtimeCurrentSignature = ""
     private var realtimePausedSignature = ""
-    // Overlay DOM lives independently from the realtime state machine; state changes never clear it.
-    private var realtimeOverlayActive = false
-    private var realtimeOverlaySignature = ""
+    // Only retain placement metadata for persistence/scroll logs; WebModeWriter owns the DOM renderer.
     private var realtimeOverlayPlacedCount = 0
     private var realtimeOverlayPanelTop = 0
     private var translatingPillSignature = ""
@@ -1182,12 +1180,10 @@ class MainActivity : Activity() {
         if (reason == "scroll") {
             OcrDiag.log(
                 "OVERLAY_CLEAR",
-                "reason=scroll hadOverlay=$realtimeOverlayActive panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
+                "reason=scroll hadOverlay=$realtimeOverlayPlacedCount > 0 panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
             )
         }
         try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
-        realtimeOverlayActive = false
-        realtimeOverlaySignature = ""
         realtimeOverlayPlacedCount = 0
         realtimeOverlayPanelTop = 0
     }
@@ -1256,7 +1252,7 @@ class MainActivity : Activity() {
         if (previous == next) return
         realtimeReadState = next
         OcrDiag.log("REALTIME_STATE", "from=$previous to=$next reason=$reason")
-        if ((next == RealtimeReadState.PREFETCH_NEXT || next == RealtimeReadState.IDLE) && realtimeOverlayActive) {
+        if ((next == RealtimeReadState.PREFETCH_NEXT || next == RealtimeReadState.IDLE) && realtimeOverlayPlacedCount > 0) {
             OcrDiag.log("OVERLAY_PERSIST", "state=$previous to=$next kept=true panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount")
         }
     }
@@ -1759,8 +1755,6 @@ class MainActivity : Activity() {
             if (success) {
                 val accepted = values.count { it.isNotBlank() }
                 if (accepted > 0) {
-                    realtimeOverlayActive = true
-                    realtimeOverlaySignature = panelSignature
                     realtimeOverlayPlacedCount = accepted
                     realtimeOverlayPanelTop = panelTop
                 }
@@ -10114,8 +10108,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                             matchedIndices.forEach { index ->
                                 OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
                             }
-                            realtimeOverlayActive = true
-                            realtimeOverlaySignature = livePanelSignature
                             realtimeOverlayPlacedCount = matched.size
                             realtimeOverlayPanelTop = panelTop
                             completeDeepSeekHashBatch(ch, matched)
