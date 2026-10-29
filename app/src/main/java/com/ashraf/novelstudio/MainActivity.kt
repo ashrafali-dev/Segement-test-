@@ -1176,6 +1176,13 @@ class MainActivity : Activity() {
             ?: Regex("@-?\\d+,(-?\\d+)").find(signature))
             ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
 
+    /** Same long reader image, but the user has moved into a different coarse visual slice. */
+    private fun isSameTallImageSlice(previous: String, next: String): Boolean {
+        if (!previous.contains("@slice=") || !next.contains("@slice=")) return false
+        val marker = Regex("@slice=-?\\d+")
+        return marker.replace(previous, "@slice=*") == marker.replace(next, "@slice=*")
+    }
+
     private fun clearRealtimeOverlay(reason: String) {
         // The existing DOM renderer is cleared on a real viewport change; state transitions do not clear it.
         if (reason == "scroll") {
@@ -1270,9 +1277,12 @@ class MainActivity : Activity() {
 
     private fun beginRealtimeVisibleRead(signature: String) {
         val previousSignature = realtimeCurrentSignature
+        val sameTallImageSlice = previousSignature.isNotBlank() &&
+            isSameTallImageSlice(previousSignature, signature)
         if (previousSignature.isNotBlank() && previousSignature != signature) {
             clearRealtimePlacementQueue(signature)
-            clearRealtimeOverlay("scroll")
+            if (!sameTallImageSlice) clearRealtimeOverlay("scroll")
+            else OcrDiag.log("OVERLAY_KEEP", "reason=same_tall_image_new_slice")
             hideRealtimeTranslatingPill("cancelled")
         }
         realtimeCurrentSignature = signature
@@ -2759,10 +2769,14 @@ function imageSrc(e){
  if(!good(primary))primary=set||lazy;
  return absolute(primary);
 }
-function add(kind,s,r,extra){
- s=absolute(s);if(!s||seen[kind+':'+s])return;
- seen[kind+':'+s]=1;
+function add(kind,s,r,extra,identity){
+ s=absolute(s);var key=identity||kind+':'+s;if(!s||seen[key])return;
+ seen[key]=1;
  v.push(kind+':'+s+'@'+Math.round(r.width)+'x'+Math.round(r.height)+(extra||''));
+}
+function sliceTag(r,iw,ih){
+ if(!(r.height>vh*1.15&&ih>iw*1.25))return '';
+ return '@slice='+Math.floor(Math.max(0,-r.top)/Math.max(1,vh*.55));
 }
 var imgs=document.images||[];
 for(var i=0;i<imgs.length;i++){
@@ -2770,20 +2784,42 @@ for(var i=0;i<imgs.length;i++){
  if(!s||r.width<60||r.height<45||r.right<=0||r.bottom<=0||r.left>=vw||r.top>=vh)continue;
  if(r.width*r.height<3500)continue;
  if(r.width*r.height>=Math.max(18000,vw*vh*0.12))hasLargeImage=true;
- add('IMG',s,r,'#'+(e.naturalWidth||0)+'x'+(e.naturalHeight||0));
+ var iw=e.naturalWidth||0,ih=e.naturalHeight||0,tag=sliceTag(r,iw,ih);
+  add('IMG',s,r,'#'+iw+'x'+ih+tag,tag?'IMG:'+s+tag:undefined);
 }
 // Readers inside a same-origin <iframe> are invisible to document.images.
-var frs=document.querySelectorAll('iframe');
+var frs=document.querySelectorAll('iframe'),readerFrame=null,readerFrameArea=0;
 for(var fi=0;fi<frs.length&&fi<8;fi++){try{
- var fd=frs[fi].contentDocument,fb=frs[fi].getBoundingClientRect();if(!fd||!fd.images)continue;
+ var fe=frs[fi],fb=fe.getBoundingClientRect(),fs=absolute(fe.getAttribute('src')||''),fd=fe.contentDocument,crossFrame=false;
+ try{crossFrame=!fd||fd.location.origin!==location.origin;}catch(ignore){crossFrame=true;}
+ var frameArea=Math.max(0,Math.min(vw,fb.right)-Math.max(0,fb.left))*Math.max(0,Math.min(vh,fb.bottom)-Math.max(0,fb.top));
+ var frameHint=/webtoon|webtoons|comic|manga|toon|chapter|reader/i.test(location.href+' '+fs);
+ if(crossFrame&&frameHint&&fb.width>=vw*.55&&fb.height>=vh*.55&&fb.right>0&&fb.bottom>0&&fb.left<vw&&fb.top<vh&&frameArea>readerFrameArea){
+  readerFrame={src:fs,rect:fb,el:fe};readerFrameArea=frameArea;
+ }
+ if(!fd||!fd.images)continue;
  for(var fk=0;fk<fd.images.length;fk++){
   var ie=fd.images[fk],ir=ie.getBoundingClientRect(),is=ie.currentSrc||ie.src||'';
   if(!good(is)||ir.width<60||ir.height<45)continue;
   var rr={left:fb.left+ir.left,top:fb.top+ir.top,right:fb.left+ir.right,bottom:fb.top+ir.bottom,width:ir.width,height:ir.height};
   if(rr.right<=0||rr.bottom<=0||rr.left>=vw||rr.top>=vh||rr.width*rr.height<3500)continue;
   if(rr.width*rr.height>=Math.max(18000,vw*vh*0.12))hasLargeImage=true;
-  add('IMG',is,rr,'#'+(ie.naturalWidth||0)+'x'+(ie.naturalHeight||0));
+  var iw=ie.naturalWidth||0,ih=ie.naturalHeight||0,tag=sliceTag(rr,iw,ih);
+   add('IMG',is,rr,'#'+iw+'x'+ih+tag,tag?'IMG:'+is+tag:undefined);
  }}catch(ignore){}}
+if(readerFrame){
+ var scrollOffset=Math.max(window.pageYOffset||0,document.documentElement.scrollTop||0,document.body.scrollTop||0);
+ try{
+  var rn=readerFrame.el;
+  for(var rd=0;rn&&rd<24;rd++,rn=rn.parentElement){
+   var rs=rn.scrollTop||0,rsh=rn.scrollHeight||0,rch=rn.clientHeight||0;
+   if(rsh>rch+vh*.35)scrollOffset=Math.max(scrollOffset,rs);
+  }
+ }catch(ignore){}
+ scrollOffset=Math.max(scrollOffset,Math.max(0,-readerFrame.rect.top));
+ var frameSlice=Math.floor(scrollOffset/Math.max(1,vh*.55));
+ v.push('FRAME:'+(readerFrame.src||location.hostname)+'@'+Math.round(readerFrame.rect.width)+'x'+Math.round(readerFrame.rect.height)+'@slice='+frameSlice);
+}
 // SVG images, video posters and canvas readers do not always expose a normal <img>.
 var svgs=document.querySelectorAll('svg image');
 for(var si=0;si<svgs.length;si++){
