@@ -1824,7 +1824,8 @@ class MainActivity : Activity() {
         OcrDiag.log(
             "AHEAD_QUEUE",
             "bubbles=${batch.size} panels=${panelGroups.size.coerceAtMost(1)} requests=${chunks.size} cap=$chunkSize sizes=" +
-                chunks.joinToString(",") { it.size.toString() } state=$realtimeReadState visiblePlaced=$realtimeVisiblePlaced"
+                chunks.joinToString(",") { it.size.toString() } +
+                " state=$realtimeReadState visiblePlaced=$realtimeVisiblePlaced"
         )
         Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize")
         val minChunk = minOf(4, chunkSize)
