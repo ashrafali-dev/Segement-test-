@@ -575,6 +575,7 @@ internal object WebModeTextRemover {
                                     "CLEAN_TIER",
                                     "bubble=$bubbleNo tier=3 ms=$aiLastMs result=failed alpha=$TIER3_FILL_ALPHA"
                                 )
+                                OcrDiag.log("CLEAN", "migan_unavailable reason=initialization_or_inference_failed tier3_skipped")
                                 OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x${rh} result=skipped/failed ms=$aiLastMs")
                             }
                             val afterHeap = Runtime.getRuntime()
