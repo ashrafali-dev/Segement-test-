@@ -9005,7 +9005,45 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
                 return@evaluateJavascript
             }
-            val rawTranslation = cleanReply(decode(raw))
+            val cleanedResponse = cleanReply(decode(raw))
+            var rawTranslation = cleanedResponse
+            var chapterSummary = ""
+            var structuredScan = false
+            val scanState = scanChapterStates[tok]
+            if (scanState != null) {
+                structuredScan = true
+                val responseParts = WebModeChapterContext.parseResponse(cleanedResponse)
+                val returned = WebModeChapterContext.parseMarkedTranslations(responseParts.translation)
+                val currentWindow = scanState.windows.getOrNull(scanState.windowIndex)
+                if (currentWindow != null) {
+                    for (entry in currentWindow.outputEntries) {
+                        val translated = returned[entry.markerNumber]
+                        if (translated != null) scanState.translations[entry.markerNumber] = translated
+                    }
+                    val missing = currentWindow.outputEntries.count { !scanState.translations.containsKey(it.markerNumber) }
+                    OcrDiag.log(
+                        "CHAPTER_WINDOW_ALIGN",
+                        "window=${scanState.windowIndex + 1}/${scanState.windows.size} " +
+                            "expected=${currentWindow.outputEntries.size} returned=${currentWindow.outputEntries.size - missing} missing=$missing"
+                    )
+                }
+                if (responseParts.summary.isNotBlank()) scanState.summaries.add(responseParts.summary)
+                if (scanState.windowIndex + 1 < scanState.windows.size) {
+                    sendScanTranslationWindow(tok, ch, scanState, scanState.windowIndex + 1)
+                    return@evaluateJavascript
+                }
+                chapterSummary = responseParts.summary.ifBlank { scanState.summaries.lastOrNull().orEmpty() }
+                rawTranslation = scanState.context.assembleMarkedTranslation(scanState.translations, chapterSummary)
+                val translatedCount = scanState.context.entries.count { !scanState.translations[it.markerNumber].isNullOrBlank() }
+                val outputChars = scanState.translations.values.sumOf { it.length }
+                OcrDiag.log(
+                    "CHAPTER_TRANSLATE_DONE",
+                    "ms=${android.os.SystemClock.elapsedRealtime() - scanState.startedAtMs} " +
+                        "bubblesTranslated=$translatedCount charsOut=$outputChars windows=${scanState.windows.size}"
+                )
+                if (chapterSummary.isNotBlank()) OcrDiag.log("CHAPTER_SUMMARY", "chars=${chapterSummary.length}")
+                scanChapterStates.remove(tok)
+            }
             var partialLensFallback = false
             // Marker output can lag the fully-completed ML Kit fallback after a Lens network failure.
             // Wait at most 1500ms for that batch, then retry once after the 30s circuit cooldown.
@@ -9080,7 +9118,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 failJob(tok, ch, "The chatbot did not send any text. Just wait — the app will try again by itself.", autoRetry = true)
                 return@evaluateJavascript
             }
-            if (rawTranslation.length < (if (livePanelBatch) 2 else 30)) {
+            if (rawTranslation.length < (if (livePanelBatch || structuredScan) 2 else 30)) {
                 failJob(tok, ch, "Could not read the answer")
                 return@evaluateJavascript
             }
@@ -9088,7 +9126,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // clipboard or saved chapter, but keep the raw marked response for DOM
             // insertion so paragraph alignment survives AI formatting changes.
             val t = stripInternalMarkers(rawTranslation)
-            if (t.isBlank() || (!livePanelBatch && t.length < 30)) {
+            if (t.isBlank() || (!livePanelBatch && !structuredScan && t.length < 30)) {
                 failJob(tok, ch, "Could not read the translation")
                 return@evaluateJavascript
             }
