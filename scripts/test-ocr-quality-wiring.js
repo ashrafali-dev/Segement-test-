@@ -162,12 +162,16 @@ assert.ok(cleaner.includes('WebtoonBubbleMaskKit.shouldHandle(pageUrl)') &&
           cleaner.includes('webtoonFit?.accepted == true') &&
           cleaner.includes('else -> fillKnownBubbleShape(bitmap, bubble.cv'),
   'only webtoon pages may use the dedicated shape-paper cleaner; rejected fits must retain the conservative fallback');
-assert.ok(extractor.includes('fit.bands(WebtoonBubbleMaskKit.shapeBandLimit(startUrl))'),
-  'only Webtoon pages may raise the shape-band resolution; manga must retain the established default');
+assert.ok(extractor.includes('fit.bands(WebtoonBubbleMaskKit.shapeBandLimit(startUrl))') &&
+          extractor.includes('BubbleSegCore.bands(') &&
+          extractor.includes('maxBands = WebtoonBubbleMaskKit.segmentationBandLimit(startUrl)'),
+  'only Webtoon pages may raise the shape and segmentation band resolution; manga must retain established defaults');
 assert.ok(webtoonKit.includes('fun shouldHandle(pageUrl: String)') &&
           webtoonKit.includes('webtoonPath || webtoonsHost') &&
           webtoonKit.includes('SHAPE_BANDS = 96') &&
           webtoonKit.includes('DEFAULT_SHAPE_BANDS = 28') &&
+          webtoonKit.includes('SEGMENTATION_BANDS = 64') &&
+          webtoonKit.includes('DEFAULT_SEGMENTATION_BANDS = 14') &&
           webtoonKit.includes('inferPaperColour') &&
           webtoonKit.includes('interpolate(leftColour, rightColour') &&
           webtoonKit.includes('dense_ink_or_art'),
