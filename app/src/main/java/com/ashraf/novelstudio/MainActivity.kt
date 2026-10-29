@@ -9829,6 +9829,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (livePanelBatch) {
                 if (wmLayout == null || wmPlaced == null) {
                     releaseDeepSeekHashBatch(ch)
+                    completeRealtimeVisiblePlacement(0, false, "alignment_failed")
                     toast("⚠️ This batch did not match the bubbles; nothing was placed in the wrong spot")
                     restoreChapterAfterBubbleJob(ch.url)
                     return
@@ -9853,6 +9854,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 finishTranslationPlacement(placementId)
                 if (lastChapter !== ch) {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
+                    completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
                     return@evaluateJavascript
                 }
                 if (r != null && r.contains("ok")) {
@@ -9861,12 +9863,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                             if (wmPlaced?.getOrNull(index).isNullOrBlank()) null else WebModeLayout.fingerprint(bubble)
                         }?.toSet().orEmpty()
                         completeDeepSeekHashBatch(ch, matched)
+                        completeRealtimeVisiblePlacement(matched.size, matched.isNotEmpty(), "overlay_success")
                     }
                     hasTr = true
                     shownTranslated = true
                     updatePill()
                 } else {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
+                    if (livePanelBatch) completeRealtimeVisiblePlacement(0, false, "overlay_script_failed")
                     toast("⚠️ Could not show the translation on this page; it is saved in the library")
                 }
                 if (livePanelBatch) restoreChapterAfterBubbleJob(ch.url)
