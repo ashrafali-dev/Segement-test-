@@ -1,6 +1,7 @@
 package com.ashraf.novelstudio
 
 import android.os.SystemClock
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Per-panel timing. cold=first actual Lens request in this process; hot=subsequent Lens-request panels. */
