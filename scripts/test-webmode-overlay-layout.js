@@ -82,12 +82,13 @@ assert.ok(remover.includes("medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1)"
   "Tier 1 must use a median-ring paper colour and rounded solid fill");
 assert.ok(remover.includes("RESIDUAL_THRESHOLD") && remover.includes('"CLEAN_TIER"'),
   "tiered cleaner must gate each tier on residual energy and log the selected tier");
-assert.ok(remover.includes("openCvInpaint(region, rw, rh, mask)"),
-  "Tier 2 must attempt bounded OpenCV inpainting");
+assert.ok(remover.includes("openCvInpaint(tier1Region, rw, rh, mask)") &&
+          !remover.includes("openCvInpaint(region, rw, rh, mask)"),
+  "Tier 2 must inpaint Tier 1 output and never reintroduce the original text pixels");
 assert.ok(remover.includes('"CLEAN_JP_AUDIT"') && remover.includes('unmatched='),
   "Japanese OCR bubbles that were not cleaned must be visible in compact diagnostics");
-assert.ok(remover.includes("onionFill(") && remover.includes("region, mask, rw, rh"),
-  "text remover must retain a low-memory non-AI fill fallback for non-flat artwork");
+assert.ok(remover.includes("onionFill(") && remover.includes("tier1Region, mask, rw, rh"),
+  "non-AI fallback must continue from Tier 1 output on non-flat artwork");
 assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
   "text removal must not flatten the full speech-bubble interior");
 assert.ok(remover.includes('sourceUrl.startsWith("blob:", true)') && remover.includes("storeInlineCleanedBytes"),
@@ -136,8 +137,9 @@ assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = 
 assert.ok(extractor.includes("hasAheadResult || alreadyReadingAhead || recentlyBlank"),
   "prefetch slots must skip panels already cached, being read ahead, or recently known blank");
 assert.ok(extractor.includes("val realtimePriority = fastMode || req.ahead > 0") &&
-  extractor.includes("allowAi = req.ahead <= 0"),
-  "read-ahead OCR must not launch MI-GAN, while visible realtime panels can use the capped tier-3 path");
+  extractor.includes("allowAi = true") &&
+  extractor.includes("prefetchMode = req.ahead > 0"),
+  "prefetch OCR may use residual-driven MI-GAN with the cleaner's per-panel and global budgets");
 assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
   extractor.includes("else if (!realtimePriority && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
   "realtime and read-ahead OCR must not start RT-DETR or mask segmentation");
