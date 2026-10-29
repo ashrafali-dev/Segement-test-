@@ -809,6 +809,9 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
             reason = ""
         }
 
+        /** A probe after a cooldown must be an actual OCR request, never a background preconnect. */
+        @Synchronized fun shouldSkipWarmUp(): Boolean = openUntil > 0L || halfOpenProbeInFlight
+
         @Synchronized fun status(): String {
             val left = openUntil - SystemClock.elapsedRealtime()
             return if (left > 0) "OPEN (Lens paused for ${left / 1000}s more) reason=$reason"
@@ -869,6 +872,10 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
          * request or a previous warm-up touched the connection within [WARM_INTERVAL_MS].
          */
         fun warmUp(context: Context) {
+            if (Breaker.shouldSkipWarmUp()) {
+                OcrDiag.log("LENS_SKIP", "reason=circuit_open fallback=mlkit warmup=true")
+                return
+            }
             val now = SystemClock.elapsedRealtime()
             synchronized(this) {
                 if (lastWarmAt != 0L && now - lastWarmAt < WARM_INTERVAL_MS) return
