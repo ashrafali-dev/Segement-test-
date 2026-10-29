@@ -126,7 +126,7 @@ assert.ok(cleaner.includes('LARGE_MASK_THRESHOLD = 15_000') &&
           cleaner.includes('LARGE_MASK_ALPHA = 1.00f') &&
           cleaner.includes('openCvInpaintTiled(tier1Region, rw, rh, mask)') &&
           cleaner.includes('CLEAN_TIER2_TILE') &&
-          cleaner.includes('ringSamplePad=$ringSamplePad') &&
+          cleaner.includes('ringSamplePad=') && cleaner.includes('BBOX_DILATION_PX + ringSamplePad') &&
           cleaner.includes('migan_skipped reason=mask_too_large area=$maskArea'),
   'large sound-effect masks must use opaque fill, wider ring sampling, tiled Tier 2 and skip MI-GAN above the area limit');
 assert.ok(cleaner.includes('val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= 20f') &&
