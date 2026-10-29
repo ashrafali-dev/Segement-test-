@@ -201,7 +201,8 @@ assert.ok(cleaner.includes('MAX_CLEAN_W = 1200') &&
           cleaner.includes('CLEAN_GUARD') &&
           cleaner.includes('CLEAN_DOWNSCALE') &&
           cleaner.includes('scanMode: Boolean = !realtimeMode && !prefetchMode') &&
-          cleaner.includes('reason=text_bbox_fallback textPresent=true bboxPad=5 mode=scan'),
+          cleaner.includes('reason=text_bbox_fallback textPresent=true bboxPad=5 maskArea=') &&
+          cleaner.includes('mode=scan'),
   'cleaning must downscale out-of-bounds panels and keep a five-pixel OCR-bbox fallback for scan speech bubbles');
 assert.ok(cleaner.includes('BUBBLE_CLEAN_VERIFY') &&
           cleaner.includes('dilatePx=2') &&
