@@ -2972,7 +2972,11 @@ internal class WebModeExtractor(
                         OcrDiag.log("BUBBLE_MASK_FALLBACK", "marker=${out.size + 1} reason=no_bubble text_bbox_fallback=true textPresent=${text.isNotBlank()}")
                         nb0
                     } else {
-                        val bands = BubbleSegCore.bands(seg)
+                        // Keep the detector mask's contour finer on Webtoon pages, where coarse
+                        // bands leave visible steps/gaps; Japanese manga keeps the 14-band default.
+                        val bands = BubbleSegCore.bands(
+                            seg, maxBands = WebtoonBubbleMaskKit.segmentationBandLimit(startUrl)
+                        )
                         // Where the translation goes: the largest rectangle inside THIS balloon around the old lettering.
                         val seedBox = refinedSeed[i] ?: rects[i]
                         val fit = BubbleSegCore.fitRect(seg, seedBox)
