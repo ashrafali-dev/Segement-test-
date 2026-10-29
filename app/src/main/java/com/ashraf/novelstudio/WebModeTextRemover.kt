@@ -150,7 +150,7 @@ internal object WebModeTextRemover {
                 "MIGAN_STATUS",
                 "loaded=$aiLoadedAtStart reason=$miganStatusReason mode=${when { prefetchMode -> "prefetch"; realtimeMode -> "realtime"; else -> "scan" }}"
             )
-            // Scan mode may load lazily if a hard bubble needs Tier 3. Realtime only warms in background.
+            // Scan and prefetch may load lazily for a hard bubble. Realtime remains non-blocking if not loaded.
             val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown &&
                 (!realtimeMode || aiLoadedAtStart)
             if (!aiWanted) {
@@ -177,7 +177,7 @@ internal object WebModeTextRemover {
                 )
                 OcrDiag.log(
                     "CLEAN_FILL",
-                    "bubble=$bubbleNo maskArea=0 fillArea=0 appliedAlpha=$TIER1_FILL_ALPHA reason=$reason"
+                    "bubble=$bubbleNo maskArea=0 fillArea=0 appliedAlpha=0.00 reason=$reason"
                 )
                 OcrDiag.log(
                     "CLEAN_ASSERT",
@@ -433,8 +433,8 @@ internal object WebModeTextRemover {
                     }
                 }
 
-                // Tier 1: near-opaque median-ring paper fill, bounded to a rounded text box.
-                // Textured/free lettering skips the solid fill and advances to inpainting.
+                // Tier 1: near-opaque median-ring fill on flat bubbles; textured/free lettering gets
+                // a local gradient prediction per mask pixel so Tier 1 is never silently a no-op.
                 val paper = medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1) ?: bg
                 val tier1Start = android.os.SystemClock.elapsedRealtime()
                 val tier1Region = region.copyOf()
