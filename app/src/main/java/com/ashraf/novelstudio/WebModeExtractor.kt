@@ -2266,40 +2266,73 @@ internal class WebModeExtractor(
                     return finishResult()
                 }
                 OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel result=empty")
+                val fallbackHeight = (h * 0.60f).toInt().coerceIn(1, h)
+                val startSecond = (h - fallbackHeight).coerceAtLeast(0)
+                val fallbackSlices = listOf(0 to fallbackHeight, startSecond to h).distinct()
+                    .filter { it.second > it.first }
+                OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=${fallbackSlices.size} decision=fallback_slice")
                 @Suppress("DEPRECATION")
                 val region = try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null }
-                if (region == null) {
-                    OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel_fallback_unavailable")
-                    return finishResult()
-                }
-                try {
-                    val fallbackHeight = (h * 0.60f).toInt().coerceIn(1, h)
-                    val startSecond = (h - fallbackHeight).coerceAtLeast(0)
-                    val fallbackSlices = listOf(0 to fallbackHeight, startSecond to h).distinct()
-                        .filter { it.second > it.first }
-                    OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=${fallbackSlices.size} decision=fallback_slice")
-                    for ((idx, span) in fallbackSlices.withIndex()) {
-                        if (!alive()) break
-                        val (sliceTop, sliceBottom) = span
-                        val bmp = try { region.decodeRegion(Rect(0, sliceTop, w, sliceBottom), opts) }
-                            catch (_: Throwable) { null } ?: continue
+                if (region != null) {
+                    try {
+                        for ((idx, span) in fallbackSlices.withIndex()) {
+                            if (!alive()) break
+                            val (sliceTop, sliceBottom) = span
+                            val bmp = try { region.decodeRegion(Rect(0, sliceTop, w, sliceBottom), opts) }
+                                catch (_: Throwable) { null } ?: continue
+                            try {
+                                OcrDiag.log(
+                                    "PANEL_BITMAP",
+                                    "w=${bmp.width} h=${bmp.height} source=${src.take(100)} kind=fallback_slice " +
+                                        "originY=$sliceTop fullW=$w fullH=$h sample=$sample"
+                                )
+                                readSlice(
+                                    bmp, st, sliceTop, sample, w, h, src, texts, bubbles,
+                                    firstSlice = idx == 0, lastSlice = idx == fallbackSlices.lastIndex,
+                                    fastMode = false, forceFresh = forceFresh
+                                )
+                            } finally {
+                                bmp.recycle()
+                            }
+                        }
+                    } finally {
+                        region.recycle()
+                    }
+                } else {
+                    // A decoder that refuses region reads must not silently bypass the slice fallback.
+                    val full = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                    if (full == null) {
+                        OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=0 decision=fallback_decode_failed")
+                    } else {
                         try {
-                            OcrDiag.log(
-                                "PANEL_BITMAP",
-                                "w=${bmp.width} h=${bmp.height} source=${src.take(100)} kind=fallback_slice " +
-                                    "originY=$sliceTop fullW=$w fullH=$h sample=$sample"
-                            )
-                            readSlice(
-                                bmp, st, sliceTop, sample, w, h, src, texts, bubbles,
-                                firstSlice = idx == 0, lastSlice = idx == fallbackSlices.lastIndex,
-                                fastMode = false, forceFresh = forceFresh
-                            )
+                            for ((idx, span) in fallbackSlices.withIndex()) {
+                                if (!alive()) break
+                                val (sliceTop, sliceBottom) = span
+                                val scaledTop = (sliceTop / sample).coerceIn(0, full.height - 1)
+                                val scaledBottom = ((sliceBottom.toLong() + sample - 1L) / sample)
+                                    .toInt().coerceIn(scaledTop + 1, full.height)
+                                val bmp = try {
+                                    Bitmap.createBitmap(full, 0, scaledTop, full.width, scaledBottom - scaledTop)
+                                } catch (_: Throwable) { null } ?: continue
+                                try {
+                                    OcrDiag.log(
+                                        "PANEL_BITMAP",
+                                        "w=${bmp.width} h=${bmp.height} source=${src.take(100)} kind=fallback_slice_bitmap " +
+                                            "originY=$sliceTop fullW=$w fullH=$h sample=$sample"
+                                    )
+                                    readSlice(
+                                        bmp, st, sliceTop, sample, w, h, src, texts, bubbles,
+                                        firstSlice = idx == 0, lastSlice = idx == fallbackSlices.lastIndex,
+                                        fastMode = false, forceFresh = forceFresh
+                                    )
+                                } finally {
+                                    if (!bmp.isRecycled) bmp.recycle()
+                                }
+                            }
                         } finally {
-                            bmp.recycle()
+                            if (!full.isRecycled) full.recycle()
                         }
                     }
-                } finally {
-                    region.recycle()
                 }
             } else if (h <= WebModeLogic.SLICE_H) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
