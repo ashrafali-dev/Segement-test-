@@ -9794,6 +9794,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             // The app's own status pill (it was OCR'd and its text was translated onto the page).
             "reading this screen", "reading ahead", "reading the page", "sending to chatbot", "ai painter",
             "detector on", "detector off", "detector not installed", "mask only mode", "balloon masks",
+            "translating", "অনুবাদ হচ্ছে",
             "স্ক্রিন ক্যাপচার খালি",
             "প্রতিটি স্ক্রিন ক্যাপচার", "জোর করে বের করা হয়েছে",
             "বার্তা লিখুন", "শেয়ার করুন", "শেয়ার করুন"
