@@ -2196,7 +2196,8 @@ internal class WebModeExtractor(
                             allowAi = true,
                             realtimeMode = req.visibleOnly,
                             prefetchMode = req.ahead > 0,
-                            panelNo = panelNo
+                            panelNo = panelNo,
+                            scanMode = scanMode
                         )
                         val cleanMs = SystemClock.elapsedRealtime() - tClean
                         OcrPanelTiming.addClean(cleanMs)
@@ -2279,7 +2280,7 @@ internal class WebModeExtractor(
                     OcrDiag.log("PANEL_BITMAP", "w=${whole.width} h=${whole.height} source=${src.take(100)} kind=whole_panel fullW=$w fullH=$h sample=$sample")
                     readSlice(
                         whole, st, 0, sample, w, h, src, texts, bubbles,
-                        firstSlice = true, lastSlice = true, fastMode = false, forceFresh = forceFresh
+                        firstSlice = true, lastSlice = true, fastMode = fastMode, forceFresh = forceFresh
                     )
                 } finally {
                     whole.recycle()
@@ -2312,7 +2313,7 @@ internal class WebModeExtractor(
                                 readSlice(
                                     bmp, st, sliceTop, sample, w, h, src, texts, bubbles,
                                     firstSlice = idx == 0, lastSlice = idx == fallbackSlices.lastIndex,
-                                    fastMode = false, forceFresh = forceFresh
+                                    fastMode = fastMode, forceFresh = forceFresh
                                 )
                             } finally {
                                 bmp.recycle()
@@ -2346,7 +2347,7 @@ internal class WebModeExtractor(
                                     readSlice(
                                         bmp, st, sliceTop, sample, w, h, src, texts, bubbles,
                                         firstSlice = idx == 0, lastSlice = idx == fallbackSlices.lastIndex,
-                                        fastMode = false, forceFresh = forceFresh
+                                        fastMode = fastMode, forceFresh = forceFresh
                                     )
                                 } finally {
                                     if (!bmp.isRecycled) bmp.recycle()
