@@ -10118,7 +10118,12 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                             completeRealtimeVisiblePlacement(0, false, "no_translation_text")
                         } else {
                             matchedIndices.forEach { index ->
-                                OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=true")
+                                wmLayout?.bubbles?.getOrNull(index)?.let { bubble ->
+                                    OcrDiag.log(
+                                        "PLACE_ACCEPT",
+                                        "panelTop=$panelTop bubble=${index + 1} key=${WebModeTextRemover.cleanResultKey(bubble.src, bubble)} current=true"
+                                    )
+                                }
                             }
                             realtimeOverlayPlacedCount = matched.size
                             realtimeOverlayPanelTop = panelTop
