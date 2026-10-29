@@ -3261,7 +3261,12 @@ internal class WebModeExtractor(
                 return lensResult
             }
             // Real-time (fastMode) uses the light local path; thorough chapter scans may use more views.
-            val first = if (fastMode) engine.recognizeFast(bmp, st.current)
+            // Foreground visible OCR must really bypass the negative cache even for the local ML Kit route.
+            // The route-level cache is shared with read-ahead; calling recognizeFast() directly would reuse it.
+            val first = if (forceFresh) {
+                (engine as? RoutingOcrEngine)?.recognizeFresh(bmp, st.current, fastMode)
+                    ?: if (fastMode) engine.recognizeFast(bmp, st.current) else engine.recognize(bmp, st.current)
+            } else if (fastMode) engine.recognizeFast(bmp, st.current)
             else if (st.current == OcrScript.LATIN) engine.recognize(bmp, st.current)
             else if (scanFastFirst()) {
                 // Chapter scan: one quick pass first. Only a panel that gave (almost) no text gets the slow

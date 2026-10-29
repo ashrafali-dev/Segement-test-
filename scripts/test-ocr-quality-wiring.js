@@ -305,6 +305,8 @@ assert.ok(cleaner.includes('CLEAN_FILL_ENTER') && cleaner.includes('CLEAN_FILL_D
 assert.ok(extractor.includes('private fun foregroundVisibleOcr(): Boolean = req.visibleOnly && req.ahead <= 0') &&
           extractor.includes('if (freshOcrRequired() || !req.forceOcrSrc.isNullOrBlank()) false else') &&
           extractor.includes('forceFresh = targeted || freshOcrRequired()') &&
+          extractor.includes('if (forceFresh) {') &&
+          extractor.includes('recognizeFresh(bmp, st.current, fastMode)') &&
           extractor.includes('BUBBLE_PIXEL_FIT') &&
           !extractor.includes('textArea * 5 >= coverArea'),
   'foreground visible OCR must bypass read-ahead negative-cache/pre-filter suppression, and verified bubble shape fitting must not be rejected only because lettering is small');
