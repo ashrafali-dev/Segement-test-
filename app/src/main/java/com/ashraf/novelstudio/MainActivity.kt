@@ -7402,6 +7402,7 @@ return t.length>=40?'TXT:'+t:'';
             "mode=${if (realtimeViewport) "realtime" else "scan"} " +
                 "expectations=${if (realtimeViewport) "fast" else "premium"} reason=job_start"
         )
+        val realtimeSignatureAtStart = if (realtimeViewport) realtimeCurrentSignature else ""
         val jobSeq = ++webModeJobSerial
         webModeHandle?.cancel()
         webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()
@@ -7426,8 +7427,20 @@ return t.length>=40?'TXT:'+t:'';
                 }
             },
             onDone = { out ->
+                // A viewport may change while OCR/Lens is running even when the URL/navigation token stays the same.
+                if (realtimeViewport && realtimeSignatureAtStart.isNotBlank() &&
+                    realtimeSignatureAtStart != realtimeCurrentSignature) {
+                    val staleLayout = (out as? WebModeOutcome.Success)?.let {
+                        WebModeLayoutStore.getScan(it.chapter.url)
+                    }
+                    val oldTop = panelTopFromSignature(realtimeSignatureAtStart)
+                    staleLayout?.bubbles?.forEachIndexed { index, bubble ->
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+                    }
+                    OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${staleLayout?.bubbles?.size ?: 0}")
+                    if (translatingPillSignature == realtimeSignatureAtStart) hideRealtimeTranslatingPill("cancelled")
                 // A newer tap or a navigation owns the progress UI now; never touch it from a stale job.
-                if (token == navToken && jobSeq == webModeJobSerial) {
+                } else if (token == navToken && jobSeq == webModeJobSerial) {
                     webModeHandle = null
                     webModeLastProgressAtMs = 0L
                     if (realtimeViewport) realtimeVisibleJobActive = false
@@ -7499,7 +7512,8 @@ return t.length>=40?'TXT:'+t:'';
                                             val missLayout = WebModeLayout(scanLayout.titleOffset, missBubbles)
                                             queueRealtimeVisibleOcrBatch(
                                                 missChapter, missLayout, missHashes, token,
-                                                force = forcedHashes.isNotEmpty()
+                                                force = forcedHashes.isNotEmpty(),
+                                                panelSignature = realtimeSignatureAtStart
                                             )
                                         } else if (cachedCount == selected.size) {
                                             // The translation is already cached. Place it directly instead
@@ -7521,7 +7535,8 @@ return t.length>=40?'TXT:'+t:'';
                                             // after a short idle pause so realtime never waits indefinitely.
                                             queueRealtimeVisibleOcrBatch(
                                                 liveChapter, liveLayout, hashes, token,
-                                                force = forcedHashes.isNotEmpty()
+                                                force = forcedHashes.isNotEmpty(),
+                                                panelSignature = realtimeSignatureAtStart
                                             )
                                         }
                                     } else {
