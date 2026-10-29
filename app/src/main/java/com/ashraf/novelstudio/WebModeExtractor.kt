@@ -2453,13 +2453,6 @@ internal class WebModeExtractor(
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })
-            if (scanMode) {
-                OcrDiag.log(
-                    "DETECT_MODE",
-                    "mode=scan ran=true masks=${blocks.size} source=pixel_bbox_fallback bboxPad=5 " +
-                        "modelMasks=${dets?.count { it.seg != null } ?: 0}"
-                )
-            }
             fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
                 dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
