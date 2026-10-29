@@ -13,6 +13,16 @@ class WebtoonBubbleMaskKitTest {
     }
 
     @Test
+    fun webtoonUsesFinerBandsAndMangaKeepsDefault() {
+        assertTrue(WebtoonBubbleMaskKit.shapeBandLimit(
+            "https://www.toongood.org/webtoon/the-heavenly-demon"
+        ) == 96)
+        assertTrue(WebtoonBubbleMaskKit.shapeBandLimit(
+            "https://example.com/manga/chapter-12"
+        ) == 28)
+    }
+
+    @Test
     fun webtoonsHostUsesDedicatedKit() {
         assertTrue(WebtoonBubbleMaskKit.shouldHandle("https://www.webtoons.com/en/action/example/list"))
     }
