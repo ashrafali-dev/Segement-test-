@@ -68,9 +68,11 @@ assert.ok(extractor.includes('BATCH_START') && extractor.includes('BATCH_OCR_DON
 assert.ok(timing.includes('TIMING_BUCKET') && timing.includes('lensCalls=') &&
           timing.includes('avgCold=') && timing.includes('avgHot=') &&
           timing.includes('hostBucketCounts') && timing.includes('hostBuckets.getOrPut(frame.host)') &&
+          timing.includes('lensHostsSeen.add(frame.host)') &&
+          timing.includes('hostAvgCold=$hostAvgCold') &&
           timing.includes('"tonari" in raw') && timing.includes('"naver" in raw') &&
           diag.includes('OcrPanelTiming.normalizeHost(hostKey)'),
-  'timing buckets must measure cold/hot Lens panels by normalized host and actual Lens call count');
+  'timing buckets must measure cold/hot Lens panels independently by normalized host and actual Lens call count');
 assert.ok(diag.includes('PERF_SNAPSHOT') && diag.includes('s.jobs % 10 == 0') &&
           diag.includes('avgMs=$snapshotAvgMs cold=$cold hot=$hot') &&
           diag.includes('OcrPanelTiming.hostBucketCounts(hostForLog)'),
