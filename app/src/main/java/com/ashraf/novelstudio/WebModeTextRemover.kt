@@ -919,6 +919,68 @@ internal object WebModeTextRemover {
             ((sg / n).toInt() shl 8) or (sb / n).toInt()
     }
 
+    private data class TiledInpaintResult(val pixels: IntArray?, val tiles: Int)
+
+    /**
+     * Apply Telea to bounded 200x200 crops. A 20 px overlap is used for context, while each tile
+     * writes only its non-overlap core; this avoids seams and keeps native Mat allocation bounded.
+     */
+    private fun openCvInpaintTiled(
+        source: IntArray,
+        rw: Int,
+        rh: Int,
+        mask: ByteArray,
+        tileSize: Int = 200,
+        overlap: Int = 20
+    ): TiledInpaintResult {
+        if (rw <= 0 || rh <= 0 || source.size != rw * rh || mask.size != source.size ||
+            tileSize <= overlap || overlap < 0) return TiledInpaintResult(null, 0)
+        val stride = tileSize - overlap
+        val output = source.copyOf()
+        var tiles = 0
+        var failed = false
+        var tileY = 0
+        while (tileY < rh) {
+            val tileH = min(tileSize, rh - tileY)
+            var tileX = 0
+            while (tileX < rw) {
+                val tileW = min(tileSize, rw - tileX)
+                val tilePixels = IntArray(tileW * tileH)
+                val tileMask = ByteArray(tilePixels.size)
+                for (row in 0 until tileH) {
+                    val globalStart = (tileY + row) * rw + tileX
+                    val localStart = row * tileW
+                    System.arraycopy(source, globalStart, tilePixels, localStart, tileW)
+                    System.arraycopy(mask, globalStart, tileMask, localStart, tileW)
+                }
+                val tileOutput = openCvInpaint(tilePixels, tileW, tileH, tileMask)
+                tiles++
+                if (tileOutput == null) {
+                    failed = true
+                } else {
+                    // Split overlap at its midpoint; every output mask pixel is owned by exactly one tile.
+                    val coreX0 = if (tileX == 0) 0 else tileX + overlap / 2
+                    val coreX1 = if (tileX + tileW >= rw) rw else tileX + tileW - overlap / 2
+                    val coreY0 = if (tileY == 0) 0 else tileY + overlap / 2
+                    val coreY1 = if (tileY + tileH >= rh) rh else tileY + tileH - overlap / 2
+                    for (globalY in coreY0 until coreY1) {
+                        val localY = globalY - tileY
+                        for (globalX in coreX0 until coreX1) {
+                            val globalAt = globalY * rw + globalX
+                            if (mask[globalAt].toInt() == 0) continue
+                            output[globalAt] = tileOutput[localY * tileW + (globalX - tileX)]
+                        }
+                    }
+                }
+                if (tileX + tileW >= rw) break
+                tileX += stride
+            }
+            if (tileY + tileH >= rh) break
+            tileY += stride
+        }
+        return TiledInpaintResult(if (failed || tiles == 0) null else output, tiles)
+    }
+
     /** Official OpenCV Telea inpaint, capped to <=250k pixels for low-memory phones. */
     private fun openCvInpaint(region: IntArray, rw: Int, rh: Int, mask: ByteArray): IntArray? {
         if (rw <= 0 || rh <= 0 || rw.toLong() * rh > 250_000L || mask.size != rw * rh) return null
