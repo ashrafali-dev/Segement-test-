@@ -25,18 +25,27 @@ internal object OcrPanelTiming {
     private data class HostBucketCounts(var cold: Long = 0L, var hot: Long = 0L)
     private val hostBuckets = HashMap<String, HostBucketCounts>()
 
+    fun normalizeHost(host: String): String {
+        val raw = host.lowercase(Locale.US).ifBlank { "?" }
+        return when {
+            "tonari" in raw -> "tonari"
+            "naver" in raw -> "naver"
+            else -> raw
+        }
+    }
+
     fun begin(panel: Int, startedAtMs: Long, prefilterMs: Long = 0L, host: String = "?") {
         if (panel <= 0) { active.remove(); return }
         active.set(Frame(
             panel = panel,
             startedAtMs = if (startedAtMs > 0L) startedAtMs else SystemClock.elapsedRealtime(),
-            host = host.lowercase(Locale.US).ifBlank { "?" },
+            host = normalizeHost(host),
             ocrMs = prefilterMs.coerceAtLeast(0L)
         ))
     }
 
     fun hostBucketCounts(host: String): Pair<Long, Long> = synchronized(statsLock) {
-        val counts = hostBuckets[host.lowercase(Locale.US).ifBlank { "?" }]
+        val counts = hostBuckets[normalizeHost(host)]
         (counts?.cold ?: 0L) to (counts?.hot ?: 0L)
     }
 
