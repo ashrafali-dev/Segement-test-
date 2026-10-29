@@ -379,12 +379,29 @@ internal object WebModeTextRemover {
             // The bands are derived from the segmentation mask or the pixel flood-fill, not from the OCR bbox.
             // A flat verified bubble can therefore remove OCR-missed glyphs without painting a rectangular patch.
             val shapeFilled = HashSet<String>()
+            // Keep the Webtoon cleaner isolated by the active reader URL. Japanese manga and every
+            // other page continue to use the existing fillKnownBubbleShape() path without changes.
+            val webtoonBubblePage = WebtoonBubbleMaskKit.shouldHandle(pageUrl)
             for ((shapeIndex, bubble) in boundedBubbles.withIndex()) {
                 val key = WebModeTextRemovalCache.bubbleKey(bubble)
-                val result = if (bubble.free) {
-                    BubbleShapeFillResult(false, "free_art", bands = bubble.cv.size / 4)
-                } else {
-                    fillKnownBubbleShape(bitmap, bubble.cv, width, height, opaque(bubble.bg))
+                val webtoonFit = if (webtoonBubblePage && !bubble.free) {
+                    WebtoonBubbleMaskKit.fillInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)).also { fit ->
+                        OcrDiag.log(
+                            "WEBTOON_MASK_KIT",
+                            "bubble=${shapeIndex + 1} accepted=${fit.accepted} reason=${fit.reason} " +
+                                "bands=${fit.bands} area=${fit.area} changed=${fit.changed} " +
+                                "inkPct=${String.format(java.util.Locale.US, "%.1f", fit.inkPct)} " +
+                                "paperPct=${String.format(java.util.Locale.US, "%.1f", fit.paperPct)}"
+                        )
+                    }
+                } else null
+                val result = when {
+                    bubble.free -> BubbleShapeFillResult(false, "free_art", bands = bubble.cv.size / 4)
+                    webtoonFit?.accepted == true -> BubbleShapeFillResult(
+                        true, webtoonFit.reason, webtoonFit.bands, webtoonFit.area,
+                        webtoonFit.changed, webtoonFit.inkPct, webtoonFit.paperPct
+                    )
+                    else -> fillKnownBubbleShape(bitmap, bubble.cv, width, height, opaque(bubble.bg))
                 }
                 OcrDiag.log(
                     "BUBBLE_SHAPE_FILL",
