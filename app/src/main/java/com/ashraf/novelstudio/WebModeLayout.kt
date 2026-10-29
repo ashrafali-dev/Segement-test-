@@ -52,7 +52,7 @@ internal object UiChromeFilter {
     private val PHRASES = listOf(
         "reading this screen", "reading ahead", "reading the page", "sending to chatbot", "ai painter",
         "detector on", "detector off", "detector not installed", "mask only mode", "balloon masks",
-        "এআই পেইন্টার", "ডিটেক্টর", "স্ক্রিনটি পড়া হচ্ছে", "পেইন্টার বন্ধ"
+        "translating", "অনুবাদ হচ্ছে", "এআই পেইন্টার", "ডিটেক্টর", "স্ক্রিনটি পড়া হচ্ছে", "পেইন্টার বন্ধ"
     )
     fun isChrome(text: String): Boolean {
         val n = text.lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
