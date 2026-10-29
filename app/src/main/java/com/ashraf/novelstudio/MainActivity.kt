@@ -1223,7 +1223,9 @@ class MainActivity : Activity() {
         try { novelWv.evaluateJavascript(script, null) } catch (_: Throwable) {}
     }
 
-    private fun verifyRealtimeOverlay(panelTop: Int, placed: Int, signature: String) {
+    private fun verifyRealtimeOverlay(
+        panelTop: Int, placed: Int, signature: String, onVerified: ((Boolean) -> Unit)? = null
+    ) {
         val script = """
             (function(){
               var w=document.getElementById('__ns_wm_overlay');
@@ -1232,8 +1234,8 @@ class MainActivity : Activity() {
               var attached=!!(w&&w.parentNode&&document.contains(w));
               var visible=false;
               for(var i=0;attached&&bs&&i<bs.length;i++){
-                var b=bs[i],r=b.getBoundingClientRect(),cs=getComputedStyle(b);
-                if(r.width>0&&r.height>0&&b.style.display!=='none'&&cs.display!=='none'&&
+                var el=bs[i],r=el.getBoundingClientRect(),cs=getComputedStyle(el);
+                if(r.width>0&&r.height>0&&el.style.display!=='none'&&cs.display!=='none'&&
                    cs.visibility!=='hidden'&&parseFloat(cs.opacity||'1')>0){visible=true;break;}
               }
               var parent=w&&w.parentNode?w.parentNode.nodeName.toLowerCase():'none';
@@ -1242,26 +1244,45 @@ class MainActivity : Activity() {
             })()
         """.trimIndent()
         novelWv.evaluateJavascript(script) { raw ->
-            if (signature != realtimeCurrentSignature) return@evaluateJavascript
+            if (signature != realtimeCurrentSignature) {
+                onVerified?.invoke(false)
+                return@evaluateJavascript
+            }
             val p = decode(raw).trim().split("|")
-            if (p.size < 7) return@evaluateJavascript
+            if (p.size < 7) {
+                OcrDiag.log("OVERLAY_ATTACHED", "to=WebView parent=view actualParent=unknown width=0 height=0 bubbles=0")
+                OcrDiag.log("OVERLAY_VISIBLE", "alpha=0 translation=false")
+                realtimeOverlayActive = false
+                realtimeOverlaySignature = ""
+                realtimeOverlayPlacedCount = 0
+                realtimeOverlayPanelTop = 0
+                onVerified?.invoke(false)
+                return@evaluateJavascript
+            }
             val attached = p[0] == "1"
             val visible = p[1] == "1"
             OcrDiag.log(
                 "OVERLAY_ATTACHED",
                 "to=WebView parent=view actualParent=${p[4]} width=${p[2]} height=${p[3]} bubbles=${p[5]}"
             )
-            OcrDiag.log("OVERLAY_VISIBLE", "alpha=${p[6]} translation=$visible")
+            OcrDiag.log("OVERLAY_VISIBLE", "alpha=${p[6]} translation=${attached && visible}")
             if (attached && visible) {
                 realtimeOverlayActive = true
                 realtimeOverlaySignature = signature
                 realtimeOverlayPlacedCount = placed
                 realtimeOverlayPanelTop = panelTop
                 OcrDiag.log("OVERLAY_SHOW", "panelTop=$panelTop placed=$placed")
+            } else {
+                if (realtimeOverlaySignature == signature) {
+                    realtimeOverlayActive = false
+                    realtimeOverlaySignature = ""
+                    realtimeOverlayPlacedCount = 0
+                    realtimeOverlayPanelTop = 0
+                }
             }
+            onVerified?.invoke(attached && visible)
         }
     }
-
     private fun clearRealtimePlacementQueue(nextSignature: String) {
         var dropped = 0
         val pending = rtVisibleOcrBatch
