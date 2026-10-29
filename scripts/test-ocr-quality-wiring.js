@@ -278,7 +278,7 @@ assert.ok(cleaner.includes('realtimeMode) {') && cleaner.includes('realtime_tier
           extractor.includes('CLEAN_SKIP'),
   'every visible OCR panel must log fast Tier-1 cleaning or a specific CLEAN_SKIP');
 assert.ok(extractor.includes('DETECT_REALTIME') &&
-          extractor.includes('source=\${if (realtimePixelBubbleTargets > 0) "pixel" else "text_bbox"}') &&
+          extractor.includes('source=${if (realtimePixelBubbleTargets > 0) "pixel" else "text_bbox"}') &&
           extractor.includes('pixel_bubble_fit'),
   'realtime OCR must log pixel-derived bubble-fit placement targets or the text-bbox fallback');
 assert.ok(extractor.includes('adOrRedirectSkipReason(startUrl)') &&
