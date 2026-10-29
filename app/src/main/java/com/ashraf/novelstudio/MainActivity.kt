@@ -9218,6 +9218,21 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         }
     }
 
+    /** Scanning-mode summary comes from the same chapter-context translation request; realtime never shows it. */
+    private fun showChapterSummaryDialog(ch: Chapter, summary: String) {
+        if (summary.isBlank() || isFinishing || isDestroyed) return
+        val chapterLabel = ch.number.takeIf { it.isNotBlank() }?.let { "Chapter $it" } ?: ch.title
+        AlertDialog.Builder(this)
+            .setTitle("Chapter summary")
+            .setMessage(
+                (ch.novel.ifBlank { ch.title }.takeIf { it.isNotBlank() }?.plus("\n") ?: "") +
+                    chapterLabel + "\n\n" + summary.trim()
+            )
+            .setPositiveButton("Got it", null)
+            .show()
+        OcrDiag.log("CHAPTER_SUMMARY", "chars=${summary.length} display=shown chapter=${ch.number.ifBlank { "-" }}")
+    }
+
     // on failure: stop the queue, keep the chapter on the clipboard so you can do it by hand
     private fun failJob(tok: Int, ch: Chapter, msg: String, fallback: Boolean = false, autoRetry: Boolean = false) {
         if (tok != runToken) return
