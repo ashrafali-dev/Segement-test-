@@ -2032,7 +2032,7 @@ internal class WebModeExtractor(
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles, allowAi = true
+                            wv.context, src, bytes, bubbles, allowAi = req.ahead <= 0
                         )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                         OcrDiag.log("CLEAN", "bubbles=${bubbles.size} cleaned=$cleaned residual_max=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)}")

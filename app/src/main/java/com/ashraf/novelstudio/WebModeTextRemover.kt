@@ -73,7 +73,7 @@ internal object WebModeTextRemover {
             val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
             val aiModelReady = WebModeInpainter.isReady(context)
             val aiCoolingDown = WebModeInpainter.tooSlow
-            var aiWanted = aiEnabledPref && aiModelReady && !aiCoolingDown
+            var aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown
             if (!aiModelReady) {
                 OcrDiag.log("CLEAN", "migan_unavailable reason=file_missing falling_back_to_tier2")
             }
@@ -455,7 +455,7 @@ internal object WebModeTextRemover {
             lastResidualMax = panelResidualMax
             OcrDiag.log(
                 "AI_PANEL",
-                "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count " +
+                "allowAi=true policy=tiered aiExecutionAllowed=$allowAi tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
                     "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)}"

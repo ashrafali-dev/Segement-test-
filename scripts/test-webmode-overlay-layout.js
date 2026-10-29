@@ -136,8 +136,8 @@ assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = 
 assert.ok(extractor.includes("hasAheadResult || alreadyReadingAhead || recentlyBlank"),
   "prefetch slots must skip panels already cached, being read ahead, or recently known blank");
 assert.ok(extractor.includes("val realtimePriority = fastMode || req.ahead > 0") &&
-  extractor.includes("allowAi = !fastMode && req.ahead <= 0"),
-  "read-ahead OCR must never launch AI inpainting even if a caller changes the fastMode flag");
+  extractor.includes("allowAi = req.ahead <= 0"),
+  "read-ahead OCR must not launch MI-GAN, while visible realtime panels can use the capped tier-3 path");
 assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
   extractor.includes("else if (!realtimePriority && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
   "realtime and read-ahead OCR must not start RT-DETR or mask segmentation");
