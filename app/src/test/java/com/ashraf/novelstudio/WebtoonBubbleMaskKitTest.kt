@@ -14,16 +14,18 @@ class WebtoonBubbleMaskKitTest {
     }
 
     @Test
-    fun overlaySafetyMaskSurvivesLayoutCacheRoundTrip() {
-        val cover = listOf(0.31f, 0.42f, 0.69f, 0.48f)
+    fun overlaySafetyMaskStaysSeparateFromCleanerMask() {
+        val cleanerMask = listOf(0.20f, 0.20f, 0.80f, 0.80f)
+        val coverOnlyMask = listOf(0.31f, 0.42f, 0.69f, 0.48f)
         val bubble = WmBubble(
             src = "https://www.toongood.org/webtoon/example",
             cx = 0.5f, cy = 0.45f, w = 0.6f, h = 0.2f,
             angle = 0f, font = 0.03f, bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
-            sourceText = "HELLO", overlayCv = cover
+            sourceText = "HELLO", cv = cleanerMask, overlayCv = coverOnlyMask
         )
-        val stored = WebModeLayout.fromJson(WebModeLayout(0, listOf(bubble)).toJson())!!
-        assertEquals(cover, stored.bubbles.single().overlayCv)
+        assertEquals(cleanerMask, bubble.cv)
+        assertEquals(coverOnlyMask, bubble.overlayCv)
+        assertEquals(coverOnlyMask, bubble.copy(translatedText = "হ্যালো").overlayCv)
     }
 
     @Test
