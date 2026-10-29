@@ -434,31 +434,9 @@ internal object WebModeTextRemover {
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)}"
                 )
                 // Tier 2: OpenCV Telea inpaint; apply a 0.98 fill alpha before measuring residual.
+                // Always give Tier 2 its chance even when MI-GAN is unavailable; the final
+                // residual warning keeps uncertain artwork from being reported as fully erased.
                 val tier2Start = android.os.SystemClock.elapsedRealtime()
-                if (bubble.free && !smoothSurround(region, mask, rw, rh) &&
-                    (!aiWanted || (realtimeMode && !WebModeInpainter.isLoaded()))) {
-                    panelResidualMax = max(panelResidualMax, residual1)
-                    OcrDiag.log(
-                        "CLEAN_RESIDUAL",
-                        "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} skipped=true"
-                    )
-                    if (residual1 > TIER2_RESIDUAL_THRESHOLD) {
-                        OcrDiag.log(
-                            "CLEAN_WARN",
-                            "bubble=$bubbleNo residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} reason=ghost_likely failed=${residual1 > CLEAN_FAILED_RESIDUAL_THRESHOLD}"
-                        )
-                    }
-                    if (residual1 > TIER3_RESIDUAL_THRESHOLD && !aiWanted) {
-                        val reason = when {
-                            !aiModelReady -> "file_missing"
-                            !aiEnabledPref -> "disabled"
-                            !allowAi -> "not_allowed"
-                            else -> miganStatusReason
-                        }
-                        OcrDiag.log("CLEAN", "migan_unavailable reason=$reason tier3_skipped")
-                    }
-                    continue
-                }
                 val cvConfidence = if (!soft) 0.82f
                     else if (estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1) != null) 0.78f else 0.42f
                 val cvOut = openCvInpaint(region, rw, rh, mask)
