@@ -298,6 +298,7 @@ internal object WebModeTextRemover {
         var panelResidualMax = 0f
         var panelHardFailure = false
         var acceptedLargeMask = false
+        var shapeFillCount = 0
         try {
             var totalRemoved = 0
             // Prefetch has a per-panel limit of two calls; realtime keeps three; thorough scan is capped globally.
@@ -378,7 +379,6 @@ internal object WebModeTextRemover {
             // The bands are derived from the segmentation mask or the pixel flood-fill, not from the OCR bbox.
             // A flat verified bubble can therefore remove OCR-missed glyphs without painting a rectangular patch.
             val shapeFilled = HashSet<String>()
-            var shapeFillCount = 0
             for ((shapeIndex, bubble) in boundedBubbles.withIndex()) {
                 val key = WebModeTextRemovalCache.bubbleKey(bubble)
                 val result = if (bubble.free) {
