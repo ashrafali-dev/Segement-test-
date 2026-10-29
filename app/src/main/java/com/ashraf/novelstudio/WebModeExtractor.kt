@@ -2285,8 +2285,11 @@ internal class WebModeExtractor(
                 } finally {
                     whole.recycle()
                 }
-                if (texts.isNotEmpty() && bubbles.isNotEmpty()) {
-                    OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel")
+                if (texts.isNotEmpty()) {
+                    OcrDiag.log(
+                        "SLICE_STRATEGY",
+                        "mode=scan slices=1 decision=whole_panel result=nonempty bubbles=${bubbles.size}"
+                    )
                     return finishResult()
                 }
                 OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel result=empty")
