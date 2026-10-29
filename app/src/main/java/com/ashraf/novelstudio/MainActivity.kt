@@ -1177,7 +1177,7 @@ class MainActivity : Activity() {
         realtimeVisiblePlaced = false
         realtimeVisibleJobActive = true
         if (realtimeReadState != RealtimeReadState.IDLE && realtimeReadState != RealtimeReadState.READING_VISIBLE) {
-            transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
+            transitionRealtimeReadState(RealtimeReadState.IDLE, "visible_read_restart")
         }
         transitionRealtimeReadState(RealtimeReadState.READING_VISIBLE, "visible_panel_changed")
     }
