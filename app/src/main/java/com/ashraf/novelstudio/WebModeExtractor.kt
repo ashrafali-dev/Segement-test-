@@ -2117,6 +2117,80 @@ internal class WebModeExtractor(
             return if (pairs == 0) 0f else edges.toFloat() / pairs.toFloat()
         }
 
+        private fun sampledLumaVariance(bitmap: Bitmap): Double {
+            if (bitmap.width <= 0 || bitmap.height <= 0) return 0.0
+            fun gray(pixel: Int): Double =
+                (((pixel ushr 16) and 255) * 299 + ((pixel ushr 8) and 255) * 587 + (pixel and 255) * 114) / 1000.0
+            val stepX = maxOf(1, bitmap.width / 32)
+            val stepY = maxOf(1, bitmap.height / 32)
+            var count = 0
+            var sum = 0.0
+            var sumSq = 0.0
+            var y = 0
+            while (y < bitmap.height) {
+                var x = 0
+                while (x < bitmap.width) {
+                    val value = gray(bitmap.getPixel(x, y))
+                    sum += value
+                    sumSq += value * value
+                    count++
+                    x += stepX
+                }
+                y += stepY
+            }
+            if (count == 0) return 0.0
+            val mean = sum / count
+            return (sumSq / count - mean * mean).coerceAtLeast(0.0)
+        }
+
+        private data class RealtimeSampleDecision(
+            val sample: Int,
+            val skipBlank: Boolean,
+            val edgeDensity: Float,
+            val variance: Double,
+            val decision: String
+        )
+
+        /** A small preview can identify a truly blank crop without ever sending low-resolution text to Lens. */
+        private fun chooseRealtimeSample(bytes: ByteArray, fullW: Int, fullH: Int): RealtimeSampleDecision {
+            val maxDimension = maxOf(fullW, fullH)
+            val previewSample = when {
+                maxDimension > 9600 -> 8
+                maxDimension > 4800 -> 4
+                maxDimension > 2400 -> 2
+                else -> 1
+            }
+            var preview: Bitmap? = null
+            return try {
+                preview = BitmapFactory.decodeByteArray(
+                    bytes, 0, bytes.size,
+                    BitmapFactory.Options().apply {
+                        inSampleSize = previewSample
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                )
+                val bmp = preview ?: return RealtimeSampleDecision(1, false, 1f, 255.0, "preview_failed_keep_full")
+                val edge = sampledEdgeDensity(bmp)
+                val variance = sampledLumaVariance(bmp)
+                // Very strict blank test: require both almost no edges and near-zero luma variance.
+                val blank = edge < 0.05f && variance < 3.0
+                if (blank) {
+                    RealtimeSampleDecision(8, true, edge, variance, "skip_blank")
+                } else {
+                    val textLikely = edge >= 0.012f || variance >= 3.0
+                    val sample = if (textLikely || fullW < 800) 1 else 2
+                    RealtimeSampleDecision(
+                        sample, false, edge, variance,
+                        if (textLikely) "ocr_full" else "ocr_min_400"
+                    )
+                }
+            } catch (_: Throwable) {
+                RealtimeSampleDecision(1, false, 1f, 255.0, "preview_error_keep_full")
+            } finally {
+                try { preview?.recycle() } catch (_: Throwable) {}
+            }
+        }
+
         private fun scanPrefilterSaysEmpty(bytes: ByteArray, st: ScriptState, panelNo: Int = 0): Boolean {
             if (!Prefs.bool(wv.context, "scanLocalPrefilter", true)) return false
             var bmp: Bitmap? = null
@@ -2126,7 +2200,9 @@ internal class WebModeExtractor(
                 val w = bounds.outWidth; val h = bounds.outHeight
                 if (w < MIN_W || h < MIN_H) return false
                 // Small on purpose: this only answers "is there any ink-shaped text?", never the final read.
-                val sample = when { w > 1200 -> 4; w > 600 -> 2; else -> 1 }
+                val sample = if (req.visibleOnly) {
+                    if (w >= 800) 2 else 1 // Never let realtime prefilter OCR fall below a 400 px decode width.
+                } else when { w > 1200 -> 4; w > 600 -> 2; else -> 1 }
                 bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
                     BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 })
                     ?: return false
@@ -2168,14 +2244,38 @@ internal class WebModeExtractor(
                 OcrPanelTiming.finish()
                 return null
             }
-            // Scan the full panel once whenever practical. Extremely large/stitched images are sampled
-            // before decode so the whole-panel attempt does not create a multi-megabyte temporary bitmap.
+            // Realtime must never feed tiny downsampled lettering to OCR. A preview is used only to
+            // confidently skip a genuinely blank crop; otherwise OCR runs full-resolution or at most 1/2.
+            val scanMode = !req.visibleOnly && req.ahead <= 0
             val maxDimension = maxOf(w, h)
-            val sample = when { maxDimension > 9600 -> 8; maxDimension > 4800 -> 4; maxDimension > 2400 -> 2; else -> 1 }
+            val sampleDecision = if (req.visibleOnly) chooseRealtimeSample(bytes, w, h) else null
+            val sample = sampleDecision?.sample ?: when {
+                maxDimension > 9600 -> 8
+                maxDimension > 4800 -> 4
+                maxDimension > 2400 -> 2
+                else -> 1
+            }
+            OcrDiag.log(
+                "PANEL_SAMPLE",
+                "panel=$panelNo fullW=$w fullH=$h sampleFactor=$sample " +
+                    "decision=${sampleDecision?.decision ?: "scan_default"}" +
+                    (sampleDecision?.let {
+                        " edgeDensity=${String.format(java.util.Locale.US, "%.4f", it.edgeDensity)} " +
+                            "variance=${String.format(java.util.Locale.US, "%.2f", it.variance)}"
+                    } ?: "")
+            )
+            if (sampleDecision?.skipBlank == true) {
+                OcrPanelTiming.finish()
+                OcrDiag.log(
+                    "PANEL_BITMAP",
+                    "w=${((w.toLong() + sample - 1L) / sample).toInt()} h=${((h.toLong() + sample - 1L) / sample).toInt()} " +
+                        "source=${src.take(100)} kind=skip_blank fullW=$w fullH=$h sample=$sample"
+                )
+                return PanelOcr("", emptyList())
+            }
             val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
             val texts = ArrayList<String>()
             val bubbles = ArrayList<WmBubble>()
-            val scanMode = !req.visibleOnly && req.ahead <= 0
             fun finishResult(): PanelOcr {
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
@@ -2197,7 +2297,8 @@ internal class WebModeExtractor(
                             realtimeMode = req.visibleOnly,
                             prefetchMode = req.ahead > 0,
                             panelNo = panelNo,
-                            scanMode = scanMode
+                            scanMode = scanMode,
+                            pageUrl = startUrl
                         )
                         val cleanMs = SystemClock.elapsedRealtime() - tClean
                         OcrPanelTiming.addClean(cleanMs)
