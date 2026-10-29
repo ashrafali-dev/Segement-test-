@@ -147,6 +147,7 @@ internal object WebtoonBubbleMaskKit {
         // is rejected and left to the normal mask/inpainting path.
         var inkPixels = 0L
         var paperPixels = 0L
+        var changeCandidates = 0L
         for (band in bands) {
             for (y in band.top until band.bottom) {
                 bitmap.getPixels(row, 0, width, band.left, y, band.width, 1)
@@ -154,6 +155,7 @@ internal object WebtoonBubbleMaskKit {
                     val d2 = distanceSquared(row[x], paper)
                     if (d2 >= INK_DISTANCE * INK_DISTANCE * 3L) inkPixels++
                     if (d2 <= PAPER_DISTANCE * PAPER_DISTANCE * 3L) paperPixels++
+                    if (d2 >= 4L * 4L * 3L) changeCandidates++
                 }
             }
         }
@@ -164,6 +166,11 @@ internal object WebtoonBubbleMaskKit {
         }
         if (paperPct < 48f) {
             return FillResult(false, "interior_not_flat_paper", bands.size, area, 0, inkPct, paperPct)
+        }
+        // Validate before mutating the bitmap. If the inferred paper is already indistinguishable
+        // from the input, return safely without a partial edit followed by a rejection.
+        if (changeCandidates < 8L) {
+            return FillResult(false, "no_pixels_to_change", bands.size, area, changeCandidates.toInt(), inkPct, paperPct)
         }
 
         var changed = 0
