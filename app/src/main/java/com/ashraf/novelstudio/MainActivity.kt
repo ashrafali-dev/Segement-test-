@@ -2754,6 +2754,13 @@ return t.length>=40?'TXT:'+t:'';
                             aheadOcrHandle = null
                             aheadOcrStage = ""
                             aheadOcrPct = -1
+                            cancelRealtimeAheadWorker(requeue = false)
+                            rtAheadTranslationQueue.clear()
+                            rtAheadTranslationQueuedIds.clear()
+                            rtAheadHold.clear()
+                            rtAheadHoldFlushRunnable?.let { handler.removeCallbacks(it) }
+                            rtAheadHoldFlushRunnable = null
+                            rtAheadHoldSince = 0L
                             realtimeVisiblePlaced = false
                             transitionRealtimeReadState(RealtimeReadState.IDLE, "user_scrolled")
                         }
