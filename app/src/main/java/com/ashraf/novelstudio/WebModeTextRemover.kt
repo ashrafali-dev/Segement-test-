@@ -31,7 +31,7 @@ internal object WebModeTextRemover {
     private const val LARGE_MASK_THRESHOLD = 15_000
     private const val MIGAN_MAX_MASK_AREA = 40_000
     private const val LARGE_MASK_ALPHA = 1.00f
-    private const val BBOX_DILATION_PX = 3
+    private const val BBOX_DILATION_PX = 5
     private const val TIER1_FILL_ALPHA = 0.98f
     private const val TIER2_FILL_ALPHA = 0.98f
     private const val TIER3_FILL_ALPHA = 1.00f
