@@ -8,6 +8,7 @@ on:
       - experiment/migan-inpainting-rt-ocr-20261028
       - fix/ocr-placement-quality-and-adaptive-bg-20261029
       - fix/webtoon-bubble-mask-cleanup-20261029
+      - fix/webtoon-bubble-ocr-stability-20261030
   workflow_dispatch:
 
 permissions:
@@ -66,6 +67,10 @@ jobs:
           fi
           echo "PASS: optional MI-GAN model is not packaged."
           ls -lh "$APK" app/build/outputs/apk/debug/app-debug.apk
+          echo "Largest APK entries (uncompressed, top 20):"
+          unzip -l "$APK" | awk 'NF >= 4 && $1 ~ /^[0-9]+$/ { print $1 "\t" $4 }' | sort -nr | head -n 20
+          echo "Native library footprint by ABI (uncompressed):"
+          unzip -l "$APK" | awk 'NF >= 4 && $1 ~ /^[0-9]+$/ && $4 ~ /^lib\// { split($4, p, "/"); total[p[2]] += $1 } END { for (abi in total) printf "  %s: %.2f MiB\n", abi, total[abi] / 1048576 }'
       - name: Verify permanent release signing certificate
         run: |
           set -euo pipefail
