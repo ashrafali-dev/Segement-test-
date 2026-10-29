@@ -259,12 +259,15 @@ internal class WebModeExtractor(
             // A one-panel visible read with no recognized blocks is usually a tiny dialogue panel, not a signal
             // to start an expensive screenshot re-scan while the page may be moving.
             val visibleEmpty = req.visibleOnly && e == WebModeError.OCR_EMPTY
-            val tinyVisibleEmpty = visibleEmpty && diag.decoded in 1..1 && diag.chars == 0 && !req.forceScreenOcr
+            val knownLayout = WebModeLayoutStore.getScan(startUrl) ?: WebModeLayoutStore.get(wv.context, startUrl)
+            val expectedBlocks = knownLayout?.bubbles?.count { it.sourceText.isNotBlank() }
+            val tinyVisibleEmpty = visibleEmpty && diag.decoded == 1 && diag.chars == 0 &&
+                expectedBlocks != null && expectedBlocks < 3 && !req.forceScreenOcr
             OcrDiag.log("FAIL", "${e.name}: $msg | willFallBack=${!fellBackToForce && !tinyVisibleEmpty && (visibleNoImages || visibleEmpty || e == WebModeError.IMAGES_NOT_LOADED || e == WebModeError.DECODE_FAILED)} | ${diag.summary()}")
             if (tinyVisibleEmpty) {
-                OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks<3 decoded=${diag.decoded} chars=${diag.chars}")
+                OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks=${expectedBlocks} decoded=${diag.decoded} chars=${diag.chars}")
                 diag.error = e
-                OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "FORCE_SKIP reason=tiny_panel expectedBlocks<3")
+                OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "FORCE_SKIP reason=tiny_panel expectedBlocks=${expectedBlocks}")
                 onMain { req.onDone(WebModeOutcome.Failure(e, msg, diag)) }
                 return
             }
