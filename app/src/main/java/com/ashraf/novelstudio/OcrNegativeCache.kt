@@ -2,7 +2,6 @@ package com.ashraf.novelstudio
 
 import android.graphics.Bitmap
 import android.os.SystemClock
-import android.util.Log
 import java.util.LinkedHashMap
 
 /**
@@ -14,7 +13,6 @@ internal object OcrNegativeCache {
     private data class Negative(val insertedAt: Long, val ttlMs: Long, val savedMs: Long)
     private data class EmptyHistory(val count: Int, val lastAt: Long)
 
-    private const val TAG = "NovelStudioOCR"
     private const val DEFAULT_TTL_MS = 30_000L
     private const val REPEATED_TTL_MS = 120_000L
     private const val REPEAT_WINDOW_MS = 120_000L
@@ -68,7 +66,7 @@ internal object OcrNegativeCache {
             negatives.remove(storedKey)
             return false
         }
-        Log.i(TAG, "LENS_NEG_CACHE_HIT: w=${target.width} h=${target.height} ageMs=$age savedMs=${entry.savedMs}")
+        OcrDiag.log("LENS_NEG_CACHE_HIT", "w=${target.width} h=${target.height} ageMs=$age savedMs=${entry.savedMs}")
         return true
     }
 
@@ -91,7 +89,7 @@ internal object OcrNegativeCache {
         val ttl = if (count >= 3) REPEATED_TTL_MS else DEFAULT_TTL_MS
         val negativeKey = nearKey(target, negatives.keys) ?: target
         negatives[negativeKey] = Negative(now, ttl, elapsedMs.coerceAtLeast(1L))
-        Log.i(TAG, "LENS_NEG_CACHE_INSERT: w=${target.width} h=${target.height} ttl=${ttl / 1000}s")
+        OcrDiag.log("LENS_NEG_CACHE_INSERT", "w=${target.width} h=${target.height} ttl=${ttl / 1000}s")
     }
 
     @Synchronized

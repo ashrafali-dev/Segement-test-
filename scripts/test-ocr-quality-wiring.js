@@ -19,12 +19,13 @@ assert.ok(routing.includes('OcrGarbageFilter.filter(raw.blocks, script, bitmap.w
 assert.ok(negative.includes('DEFAULT_TTL_MS = 30_000L') &&
           negative.includes('REPEATED_TTL_MS = 120_000L'),
   'negative cache must use the requested 30s / 120s TTL policy');
-assert.ok(negative.includes('LENS_NEG_CACHE_HIT:') && negative.includes('LENS_NEG_CACHE_INSERT:'),
-  'negative cache hits and inserts must have structured logs');
-assert.ok(filter.includes('FILTER_REJECT: reason=$reason text=') &&
+assert.ok(negative.includes('OcrDiag.log("LENS_NEG_CACHE_HIT"') &&
+          negative.includes('OcrDiag.log("LENS_NEG_CACHE_INSERT"'),
+  'negative cache hits and inserts must be present in the copied OCR report timeline');
+assert.ok(filter.includes('OcrDiag.log("FILTER_REJECT", "reason=$reason text=') &&
           filter.includes('latin_mixed') && filter.includes('script_mismatch') &&
           filter.includes('single_char') && filter.includes('border'),
-  'garbage filter must emit per-rejection reasons for requested categories');
+  'garbage filter must put per-rejection reasons in the copied OCR report timeline');
 assert.ok(layout.includes('placed == n -> "ACCEPT"') &&
           layout.includes('placed == 0 -> "REJECT"') &&
           layout.includes('"ALIGN_MISS"'),

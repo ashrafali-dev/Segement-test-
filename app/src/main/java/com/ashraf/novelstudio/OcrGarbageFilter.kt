@@ -1,10 +1,8 @@
 package com.ashraf.novelstudio
 
-import android.util.Log
 
 /** Rejects high-confidence script mismatches and common recognizer fragments before translation. */
 internal object OcrGarbageFilter {
-    private const val TAG = "NovelStudioOCR"
     private val koreanOnomatopoeia = setOf("아", "어", "흐", "음", "핫", "윽", "헉", "흡")
     private val japaneseOnomatopoeia = setOf("あ", "う", "え", "お", "ん", "ハ", "ふ", "ぁ", "っ")
     private val knownKoreanNoise = setOf("려은걱해야하고싶")
@@ -23,7 +21,7 @@ internal object OcrGarbageFilter {
             if (reason == null) true else {
                 val safeText = block.text.replace("\\", "\\\\")
                     .replace("\"", "\\\"").replace("\n", " ").replace("\r", " ").take(100)
-                try { Log.i(TAG, "FILTER_REJECT: reason=$reason text=\"$safeText\"") } catch (_: Throwable) {}
+                try { OcrDiag.log("FILTER_REJECT", "reason=$reason text=\"$safeText\"") } catch (_: Throwable) {}
                 false
             }
         }
