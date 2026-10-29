@@ -214,7 +214,7 @@ internal object WebModeInpainter {
 
     /** Load in the background so the first scanned image does not wait for GPU model compilation. */
     fun warmUpAsync(ctx: Context) {
-        if (engine != null || sessionFailed || !isReady(ctx) || !warming.compareAndSet(false, true)) return
+        if (engine != null || sessionFailed || inferenceCircuitOpen || !isReady(ctx) || !warming.compareAndSet(false, true)) return
         val app = ctx.applicationContext
         Thread {
             try {
