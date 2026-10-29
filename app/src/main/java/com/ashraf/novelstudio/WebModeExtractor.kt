@@ -2287,10 +2287,21 @@ internal class WebModeExtractor(
                 // translation. The bytes here are the real panel pixels either way, which is all the remover needs.
                 val cleanableSrc = src.startsWith("https://", true) || src.startsWith("http://", true) ||
                     src.startsWith("ns-canvas:", true) || src.startsWith("blob:", true)
+                if (req.visibleOnly && bubbles.isNotEmpty()) {
+                    val skipReason = when {
+                        crop != null -> "manual_crop"
+                        !Prefs.bool(wv.context, "wmTextRemoval2", true) -> "text_removal_disabled"
+                        !cleanableSrc -> "source_not_cleanable"
+                        else -> ""
+                    }
+                    if (skipReason.isNotBlank()) {
+                        OcrDiag.log("CLEAN_SKIP", "reason=$skipReason bubbles=${bubbles.size} source=${src.take(80)}")
+                        OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)} ms=0 cleaned=false")
+                    }
+                }
                 if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) && cleanableSrc) {
                     try {
-                        // All panels may escalate into MI-GAN only when residual remains high.
-                        // Read-ahead is allowed a stricter per-panel and global call budget in the cleaner.
+                        // Visible realtime uses the same safe mask but Tier 1 only; scanning keeps all tiers.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
                             wv.context, src, bytes, bubbles,
@@ -2303,11 +2314,26 @@ internal class WebModeExtractor(
                         )
                         val cleanMs = SystemClock.elapsedRealtime() - tClean
                         OcrPanelTiming.addClean(cleanMs)
+                        val residual = String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)
                         OcrDiag.log("CLEAN", "ms=$cleanMs cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
-                        OcrDiag.log("CLEAN", "bubbles=${bubbles.size} cleaned=$cleaned residual_max=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)}")
+                        OcrDiag.log("CLEAN", "bubbles=${bubbles.size} cleaned=$cleaned residual_max=$residual")
+                        if (req.visibleOnly && bubbles.isNotEmpty()) {
+                            OcrDiag.log(
+                                "CLEAN_REALTIME",
+                                "bubbles=${bubbles.size} tier1=${WebModeTextRemover.lastTier1Count} residualMax=$residual ms=$cleanMs cleaned=$cleaned"
+                            )
+                        }
                     } catch (_: OutOfMemoryError) {
+                        OcrDiag.log("CLEAN_SKIP", "reason=oom bubbles=${bubbles.size} source=${src.take(80)}")
+                        if (req.visibleOnly && bubbles.isNotEmpty()) {
+                            OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=0 cleaned=false")
+                        }
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
+                        OcrDiag.log("CLEAN_SKIP", "reason=${e.javaClass.simpleName} bubbles=${bubbles.size} source=${src.take(80)}")
+                        if (req.visibleOnly && bubbles.isNotEmpty()) {
+                            OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=0 cleaned=false")
+                        }
                         // If cleanup is uncertain, retain the original panel and normal overlay.
                     }
                 }
