@@ -133,6 +133,7 @@ class MainActivity : Activity() {
     private val realtimeBatchKeyByChapter = java.util.IdentityHashMap<Chapter, String>()
     private val realtimeBatchLayouts = LinkedHashMap<String, WebModeLayout>(16, 0.75f, true)
     private val realtimeBatchCanvasVersions = mutableMapOf<String, Map<String, Long>>()
+    private val realtimeBatchSignatureByKey = mutableMapOf<String, String>()
 
     // Scanning (Web Mode) chapters whose chatbot job failed: they are sent again automatically (twice at most).
     // The OCR text is still in memory, so nothing is scanned again.
@@ -1138,7 +1139,8 @@ class MainActivity : Activity() {
         var titleOffset: Int,
         val bubbles: MutableList<WmBubble> = ArrayList(),
         val hashes: LinkedHashSet<String> = LinkedHashSet(),
-        val seen: HashSet<String> = HashSet()
+        val seen: HashSet<String> = HashSet(),
+        var panelSignature: String = ""
     )
     private var rtVisibleOcrBatch: RtVisibleOcrBatch? = null
     private var rtVisibleOcrFlush: Runnable? = null
@@ -1163,15 +1165,31 @@ class MainActivity : Activity() {
     private var realtimeVisiblePlaced = false
     private var realtimeCurrentSignature = ""
     private var realtimePausedSignature = ""
+    // Overlay DOM lives independently from the realtime state machine; state changes never clear it.
+    private var realtimeOverlayActive = false
+    private var realtimeOverlaySignature = ""
+    private var realtimeOverlayPlacedCount = 0
+    private var realtimeOverlayPanelTop = 0
+    private var translatingPillSignature = ""
 
     private fun transitionRealtimeReadState(next: RealtimeReadState, reason: String) {
         val previous = realtimeReadState
         if (previous == next) return
         realtimeReadState = next
         OcrDiag.log("REALTIME_STATE", "from=$previous to=$next reason=$reason")
+        if ((next == RealtimeReadState.PREFETCH_NEXT || next == RealtimeReadState.IDLE) &&
+            realtimeOverlayActive && reason != "user_scrolled" && reason != "visible_read_restart") {
+            OcrDiag.log("OVERLAY_KEEP", "state=$next visible=true panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount")
+        }
     }
 
     private fun beginRealtimeVisibleRead(signature: String) {
+        val previousSignature = realtimeCurrentSignature
+        if (previousSignature.isNotBlank() && previousSignature != signature) {
+            clearRealtimePlacementQueue(signature)
+            clearRealtimeOverlay("scroll")
+            hideRealtimeTranslatingPill("cancelled")
+        }
         realtimeCurrentSignature = signature
         if (realtimePausedSignature.isNotBlank() && realtimePausedSignature != signature) realtimePausedSignature = ""
         realtimeVisiblePlaced = false
