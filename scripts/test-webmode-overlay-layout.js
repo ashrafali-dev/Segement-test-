@@ -77,9 +77,10 @@ assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed 
 // Tiered no-AI cleaner: median-ring solid fill first, then bounded local/OpenCV inpainting.
 assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
   "text remover must estimate local background outside the OCR box");
-assert.ok(remover.includes("medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1)") &&
+assert.ok(remover.includes("medianRingColor(") &&
+          remover.includes("ringSamplePad") &&
           remover.includes("fillRoundedRect("),
-  "Tier 1 must use a median-ring paper colour and rounded solid fill");
+  "Tier 1 must use median-ring sampling and rounded solid fill, with an extra sampling-only margin on large masks");
 assert.ok(remover.includes("RESIDUAL_THRESHOLD") && remover.includes('"CLEAN_TIER"'),
   "tiered cleaner must gate each tier on residual energy and log the selected tier");
 assert.ok(remover.includes("openCvInpaint(tier1Region, rw, rh, mask)") &&
