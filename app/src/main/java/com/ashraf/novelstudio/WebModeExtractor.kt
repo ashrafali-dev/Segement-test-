@@ -2336,12 +2336,11 @@ internal class WebModeExtractor(
             // middle rows from the ink detector. Never discard an edge reading on the assumption that
             // another slice will find it; the fuller overlapping reading can upgrade it below.
             val tOcr = android.os.SystemClock.elapsedRealtime()
-            // Realtime viewport and speculative read-ahead share the latency-sensitive path. Reuse a completed
-            // detection-cache entry if one exists, but never schedule or wait for RT-DETR/mask inference here:
-            // these models can take several seconds and contend with the Lens request, image cleaning and scrolling.
-            // Their geometry is an optional enhancement, so realtime falls back to OCR-derived bubble grouping.
-            // Thorough scan mode remains separate and can opt into detector inference via wmDetectInScan.
-            val realtimePriority = fastMode || req.ahead > 0
+            // Mode is independent of the OCR engine's fast flag. Full scans may use parallel Lens
+            // requests (fastMode=true) but must still run pixel-based bubble-interior analysis.
+            // Realtime and read-ahead never wait for the heavy optional RT-DETR model.
+            val scanMode = !req.visibleOnly && req.ahead <= 0
+            val realtimePriority = !scanMode
             if (realtimePriority) BubbleDetector.noteActivity()
             val detOk = Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
             val cachedDets: List<BubbleDetectorCore.Det>? = if (detOk) BubbleDetector.cached(bmp) else null
@@ -2349,7 +2348,7 @@ internal class WebModeExtractor(
             // A whole-chapter scan (100+ pictures) must finish in about a minute: the two models need 4-10 s PER picture on a
             // mid-range phone, one after the other, so the scan does not run them unless wmDetectInScan is switched on.
             val scanDetect = Prefs.bool(wv.context, "wmDetectInScan", false)
-            val detectWanted = preRecognized == null && cachedDets == null && !realtimePriority && remoteDet && detOk && scanDetect
+            val detectWanted = preRecognized == null && cachedDets == null && scanMode && remoteDet && detOk && scanDetect
             if (detectWanted) {
                 detFuture = try {
                     DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
@@ -2368,7 +2367,10 @@ internal class WebModeExtractor(
                 }, bmp)
             ocrMs = android.os.SystemClock.elapsedRealtime() - tOcr
             lineCount = blocks.size
-            if (blocks.isEmpty()) return
+            if (blocks.isEmpty()) {
+                if (scanMode) OcrDiag.log("DETECT_MODE", "mode=scan ran=true masks=0 source=no_ocr_blocks bboxPad=5")
+                return
+            }
             val rects = blocks.map { WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
             val k = sample.toFloat()
             // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
@@ -2379,18 +2381,25 @@ internal class WebModeExtractor(
                 if (cachedDets != null) cachedDets
                 else if (earlyDet != null) {
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
-                    try { if (fastMode) earlyDet.get(9, java.util.concurrent.TimeUnit.SECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
-                } else if (!realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+                    try { if (realtimePriority) earlyDet.get(9, java.util.concurrent.TimeUnit.SECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
+                } else if (scanMode && scanDetect && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
-            val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true))
+            val detectRan = detectWanted || cachedDets != null || earlyDet != null
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
-                "masks=${dets?.count { it.seg != null } ?: 0} source=${if (cachedDets != null) "cache" else if (earlyDet != null) "scan-run" else if (realtimePriority && detOk) "skipped-realtime" else "none"} " +
+                "masks=${dets?.count { it.seg != null } ?: 0} source=${if (cachedDets != null) "cache" else if (earlyDet != null) "scan-run" else if (realtimePriority && detOk) "skipped-realtime" else if (scanMode) "scan-pixel-bbox-fallback" else "none"} " +
                 "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })
+            if (scanMode) {
+                OcrDiag.log(
+                    "DETECT_MODE",
+                    "mode=scan ran=true masks=${blocks.size} source=pixel_bbox_fallback bboxPad=5 " +
+                        "modelMasks=${dets?.count { it.seg != null } ?: 0}"
+                )
+            }
             fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
                 dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
@@ -2464,12 +2473,12 @@ internal class WebModeExtractor(
                 // In realtime mode, passing a band collector forces bubbleInterior to scan every pixel
                 // again and compare it against every OCR box; a tall panel with many bubbles can stall.
                 // Without a collector the helper returns immediately after finding the bubble's fill.
-                val bands: MutableList<IntArray>? = if (fastMode) null else ArrayList()
+                val bands: MutableList<IntArray>? = if (realtimePriority) null else ArrayList()
                 // Realtime screens optimise for latency: flood-filling up to 1.2M pixels around
                 // every OCR block repeatedly was the dominant freeze on long/mobile Webtoon panels.
                 // Keep this expensive interior/leftover audit only for thorough chapter extraction.
                 var fromDet = false
-                val inter: IntArray? = if (fastMode) {
+                val inter: IntArray? = if (realtimePriority) {
                     BubbleDetectorCore.interiorFor(dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]).also { fromDet = it != null }
                 } else try {
                     WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
@@ -2518,7 +2527,7 @@ internal class WebModeExtractor(
                 }
                 // Recover missed bubble rows only during a thorough scan; doing up to three extra
                 // OCR inferences for every visible bubble made real-time reading feel frozen.
-                if (bands?.isNotEmpty() == true && !fastMode) recoverBubbleLines(bmp, st, inter, bands, lines, medFont)
+                if (bands?.isNotEmpty() == true && !fastMode && !remoteDet) recoverBubbleLines(bmp, st, inter, bands, lines, medFont)
                 val joinedText = lines.sortedBy { it.cy }.joinToString(" ") { it.text }
                     .replace(Regex("\\s+"), " ").trim()
                 if (joinedText.isBlank()) continue
