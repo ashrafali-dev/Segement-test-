@@ -2913,7 +2913,11 @@ internal class WebModeExtractor(
                         val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
                         val coverArea = (cR - cL).toLong() * (cB - cT)
                         val textArea = (xr - xl).toLong() * (xb - xt)
-                        val candidateBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
+                        // Webtoon uses a finer shape-to-band approximation to avoid visible seams around
+                        // curved balloon edges. The manga path retains the established 28-band behavior.
+                        val candidateBands = try {
+                            fit.bands(WebtoonBubbleMaskKit.shapeBandLimit(startUrl))
+                        } catch (_: Throwable) { emptyList() }
                         val coverCoverage = if (coverArea > 0L) fit.coverage(cL, cT, cR, cB) else 0f
                         val safeCoverage = if (xr > xl && xb > xt) fit.coverage(xl, xt, xr, xb) else 0f
                         val accepted = xr - xl >= 10 && xb - xt >= 10 && coverArea > 0L &&
