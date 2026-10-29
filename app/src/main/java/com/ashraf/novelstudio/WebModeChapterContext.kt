@@ -175,8 +175,10 @@ internal data class WebModeChapterContext(
                 val normalizedSource = bubble?.src.orEmpty()
                 if (position > 0 && bubble != null) {
                     val switchedSource = normalizedSource != previousSource
+                    // Same-URL comic CDNs can reuse one source string for multiple panels. OCR blocks
+                    // are emitted top-to-bottom within a panel, so a clear Y reset is the panel boundary.
                     val restartedVerticalPosition = normalizedSource == previousSource &&
-                        previousY > 0.68f && bubble.cy < 0.32f
+                        previousY >= 0f && bubble.cy + 0.08f < previousY
                     if (switchedSource || restartedVerticalPosition) {
                         panelIndex++
                         bubbleIndex = 0
