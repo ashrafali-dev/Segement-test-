@@ -549,7 +549,10 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
                 }
                 if (e.retryAfterMs > 0) waitMs = maxOf(waitMs, e.retryAfterMs)
             } catch (e: SocketTimeoutException) {
-                last = e                              // SocketTimeoutException IS an InterruptedIOException: keep first
+                // A timed-out Lens request opens the process-wide network circuit immediately; do not
+                // retry the same dead route inside this panel's deadline.
+                Breaker.transient("timeout")
+                throw OcrUnavailableException("Google Lens: timeout", e)
             } catch (e: InterruptedIOException) {
                 Thread.currentThread().interrupt()    // genuine cancellation: not a network fault, do not retry
                 throw OcrUnavailableException("Google Lens: cancelled", e)
