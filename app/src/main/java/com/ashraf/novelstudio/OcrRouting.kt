@@ -409,7 +409,8 @@ internal class RoutingOcrEngine : OcrEngine {
                 // The endpoint-level circuit already owns its cooldown. While it is open, go directly to
                 // ML Kit rather than counting skipped calls as more outages or pausing the entire scan.
                 val circuitOpen = failure.contains("paused after", ignoreCase = true) ||
-                    failure.contains("circuit open", ignoreCase = true)
+                    failure.contains("circuit open", ignoreCase = true) ||
+                    LensOcrEngine.breakerStatus().startsWith("OPEN", ignoreCase = true)
                 if (circuitOpen) {
                     OcrDiag.log("LENS_SKIP", "reason=circuit_open fallback=mlkit")
                     report("mlkit(lens-error-fallback)", true)
