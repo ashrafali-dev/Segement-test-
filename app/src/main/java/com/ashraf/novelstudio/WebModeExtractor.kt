@@ -75,6 +75,15 @@ internal data class WebModeAheadPanel(
     val bubbles: List<WmBubble>
 )
 
+/** Per-panel realtime resolution decision, based on a cheap edge/variance preview. */
+private data class WebModeWebModeRealtimeSampleDecision(
+    val sample: Int,
+    val skipBlank: Boolean,
+    val edgeDensity: Float,
+    val variance: Double,
+    val decision: String
+)
+
 internal class WebModeRequest(
     val webView: WebView,
     /** When true, OCR only images intersecting the current viewport and never scrolls the reader. */
@@ -2143,16 +2152,8 @@ internal class WebModeExtractor(
             return (sumSq / count - mean * mean).coerceAtLeast(0.0)
         }
 
-        private data class RealtimeSampleDecision(
-            val sample: Int,
-            val skipBlank: Boolean,
-            val edgeDensity: Float,
-            val variance: Double,
-            val decision: String
-        )
-
         /** A small preview can identify a truly blank crop without ever sending low-resolution text to Lens. */
-        private fun chooseRealtimeSample(bytes: ByteArray, fullW: Int, fullH: Int): RealtimeSampleDecision {
+        private fun chooseRealtimeSample(bytes: ByteArray, fullW: Int, fullH: Int): WebModeRealtimeSampleDecision {
             val maxDimension = maxOf(fullW, fullH)
             val previewSample = when {
                 maxDimension > 9600 -> 8
@@ -2169,23 +2170,23 @@ internal class WebModeExtractor(
                         inPreferredConfig = Bitmap.Config.ARGB_8888
                     }
                 )
-                val bmp = preview ?: return RealtimeSampleDecision(1, false, 1f, 255.0, "preview_failed_keep_full")
+                val bmp = preview ?: return WebModeRealtimeSampleDecision(1, false, 1f, 255.0, "preview_failed_keep_full")
                 val edge = sampledEdgeDensity(bmp)
                 val variance = sampledLumaVariance(bmp)
                 // Very strict blank test: require both almost no edges and near-zero luma variance.
                 val blank = edge < 0.05f && variance < 3.0
                 if (blank) {
-                    RealtimeSampleDecision(8, true, edge, variance, "skip_blank")
+                    WebModeRealtimeSampleDecision(8, true, edge, variance, "skip_blank")
                 } else {
                     val textLikely = edge >= 0.012f || variance >= 3.0
                     val sample = if (textLikely || fullW < 800) 1 else 2
-                    RealtimeSampleDecision(
+                    WebModeRealtimeSampleDecision(
                         sample, false, edge, variance,
                         if (textLikely) "ocr_full" else "ocr_min_400"
                     )
                 }
             } catch (_: Throwable) {
-                RealtimeSampleDecision(1, false, 1f, 255.0, "preview_error_keep_full")
+                WebModeRealtimeSampleDecision(1, false, 1f, 255.0, "preview_error_keep_full")
             } finally {
                 try { preview?.recycle() } catch (_: Throwable) {}
             }
