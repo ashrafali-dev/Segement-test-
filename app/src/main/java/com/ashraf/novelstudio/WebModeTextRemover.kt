@@ -329,7 +329,7 @@ internal object WebModeTextRemover {
                 val out = region.copyOf()
                 val cvOut = openCvInpaint(region, rw, rh, mask)
                 val tele = if (cvOut == null && soft) onionFill(
-                    region, rw, rh, mask, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
+                    region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
                 ) else null
                 for (ry in 0 until rh) {
                     for (rx in 0 until rw) {

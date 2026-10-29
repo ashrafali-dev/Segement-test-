@@ -74,15 +74,20 @@ assert.ok(rescan.includes("MIN_REMOTE_AUDIT_HEIGHT = 12"), "Lens audit must allo
 assert.ok(rescan.includes("findUncovered(bmp, base.blocks, REMOTE_AUDIT_CANDIDATE_LIMIT)"), "Lens audit must inspect multiple candidates");
 assert.ok(rescan.includes("REMOTE_AUDIT_MAX_REGIONS = 2"), "Lens audit must retry up to two likely missed regions");
 assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed labels must be prioritized over partial re-reads");
-// No-AI text removal: stable local background should allow colour-mask erasure before conservative component checks.
+// Tiered no-AI cleaner: median-ring solid fill first, then bounded local/OpenCV inpainting.
 assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
   "text remover must estimate local background outside the OCR box");
-assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI flat-background path");
+assert.ok(remover.includes("medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1)") &&
+          remover.includes("fillRoundedRect("),
+  "Tier 1 must use a median-ring paper colour and rounded solid fill");
+assert.ok(remover.includes("RESIDUAL_THRESHOLD") && remover.includes('"CLEAN_TIER"'),
+  "tiered cleaner must gate each tier on residual energy and log the selected tier");
+assert.ok(remover.includes("openCvInpaint(region, rw, rh, mask)"),
+  "Tier 2 must attempt bounded OpenCV inpainting");
 assert.ok(remover.includes('"CLEAN_JP_AUDIT"') && remover.includes('unmatched='),
   "Japanese OCR bubbles that were not cleaned must be visible in compact diagnostics");
-assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
-  "flat-background erasure must expand the mask to clear anti-aliased text edges");
-assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
+assert.ok(remover.includes("onionFill(region, mask, rw, rh"),
+  "text remover must retain a low-memory non-AI fill fallback for non-flat artwork");
 assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
   "text removal must not flatten the full speech-bubble interior");
 assert.ok(remover.includes('sourceUrl.startsWith("blob:", true)') && remover.includes("storeInlineCleanedBytes"),
