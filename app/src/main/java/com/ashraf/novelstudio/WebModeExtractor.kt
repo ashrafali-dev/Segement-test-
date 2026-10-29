@@ -2085,14 +2085,15 @@ internal class WebModeExtractor(
                     src.startsWith("ns-canvas:", true) || src.startsWith("blob:", true)
                 if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) && cleanableSrc) {
                     try {
-                        // Real-time AND speculative read-ahead use the same low-latency cleaner. MI-GAN remains
-                        // available to thorough scan mode, but must not consume CPU/RAM while the reader is scrolling
-                        // or while the current visible panel is waiting for a translation.
+                        // All panels may escalate into MI-GAN only when residual remains high.
+                        // Read-ahead is allowed a stricter per-panel and global call budget in the cleaner.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
                             wv.context, src, bytes, bubbles,
-                            allowAi = req.ahead <= 0,
-                            realtimeMode = req.visibleOnly
+                            allowAi = true,
+                            realtimeMode = req.visibleOnly,
+                            prefetchMode = req.ahead > 0,
+                            panelNo = panelNo
                         )
                         val cleanMs = SystemClock.elapsedRealtime() - tClean
                         OcrPanelTiming.addClean(cleanMs)
