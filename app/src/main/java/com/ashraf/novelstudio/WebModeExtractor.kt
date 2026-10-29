@@ -265,9 +265,9 @@ internal class WebModeExtractor(
                 expectedBlocks != null && expectedBlocks < 3 && !req.forceScreenOcr
             OcrDiag.log("FAIL", "${e.name}: $msg | willFallBack=${!fellBackToForce && !tinyVisibleEmpty && (visibleNoImages || visibleEmpty || e == WebModeError.IMAGES_NOT_LOADED || e == WebModeError.DECODE_FAILED)} | ${diag.summary()}")
             if (tinyVisibleEmpty) {
-                OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks=${expectedBlocks} decoded=${diag.decoded} chars=${diag.chars}")
+                OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks<3 actual=${expectedBlocks} decoded=${diag.decoded} chars=${diag.chars}")
                 diag.error = e
-                OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "FORCE_SKIP reason=tiny_panel expectedBlocks=${expectedBlocks}")
+                OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "FORCE_SKIP reason=tiny_panel expectedBlocks<3 actual=${expectedBlocks}")
                 onMain { req.onDone(WebModeOutcome.Failure(e, msg, diag)) }
                 return
             }
@@ -298,7 +298,7 @@ internal class WebModeExtractor(
                 val knownLayout = WebModeLayoutStore.getScan(startUrl) ?: WebModeLayoutStore.get(wv.context, startUrl)
                 val expectedBlocks = knownLayout?.bubbles?.count { it.sourceText.isNotBlank() }
                 if (expectedBlocks != null && expectedBlocks < 3) {
-                    OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks=$expectedBlocks source=known_layout")
+                    OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks<3 actual=$expectedBlocks source=known_layout")
                     diag.error = WebModeError.OCR_EMPTY
                     OcrDiag.jobDone(
                         diag.host, diag.summary(), false, how, elapsed(),
