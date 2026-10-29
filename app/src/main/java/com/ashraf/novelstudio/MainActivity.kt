@@ -1256,8 +1256,16 @@ class MainActivity : Activity() {
     private var lastAheadBudgetLogAtMs = 0L
 
     private fun startAheadOcr() {
-        if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
-        val configuredN = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) {
+            OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
+            return
+        }
+        if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
+            finishRealtimePrefetchIfIdle("prefetch_disabled")
+            return
+        }
+        // The visible screen is the product; speculate on at most one next panel.
+        val configuredN = (Prefs.get(this, "rtAheadOcr", "1").toIntOrNull() ?: 1).coerceIn(0, 1)
         val runtime = Runtime.getRuntime()
         val maxHeapMb = runtime.maxMemory() / 1_048_576L
         val freeHeapMb = (runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())) / 1_048_576L
@@ -1270,9 +1278,7 @@ class MainActivity : Activity() {
         val n = when {
             configuredN == 0 -> 0
             memoryInfo.lowMemory || freeHeapMb < 72L -> 0
-            maxHeapMb <= 192L -> minOf(configuredN, 1)
-            maxHeapMb <= 256L -> minOf(configuredN, 2)
-            else -> configuredN
+            else -> minOf(configuredN, 1)
         }
         deepSeekAheadAtMs = System.currentTimeMillis()
         if (n != configuredN && System.currentTimeMillis() - lastAheadBudgetLogAtMs >= 5_000L) {
@@ -1283,7 +1289,10 @@ class MainActivity : Activity() {
                     " freeHeapMB=" + freeHeapMb + " systemLowMemory=" + memoryInfo.lowMemory
             )
         }
-        if (n == 0) return
+        if (n == 0) {
+            finishRealtimePrefetchIfIdle("prefetch_memory_or_disabled")
+            return
+        }
         val token = navToken
         val seq = ++aheadOcrSeq
         val collectedPanels = LinkedHashMap<String, WebModeAheadPanel>()
@@ -1297,8 +1306,13 @@ class MainActivity : Activity() {
         }
         fun flushCollected() {
             cancelCollectedFlush()
+            if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) {
+                collectedPanels.clear()
+                OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
+                return
+            }
             if (collectedPanels.isEmpty()) return
-            val ready = collectedPanels.values.sortedBy { it.top }
+            val ready = collectedPanels.values.sortedBy { it.top }.take(1)
             collectedPanels.clear()
             queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready)
         }
@@ -1326,7 +1340,8 @@ class MainActivity : Activity() {
             ahead = n,
             fullChapterLinks = true,
             onAheadPanelsReady = { panels ->
-                if (seq == aheadOcrSeq && token == navToken) {
+                if (seq == aheadOcrSeq && token == navToken &&
+                    realtimeReadState == RealtimeReadState.PREFETCH_NEXT && realtimeVisiblePlaced) {
                     // The read-ahead OCR can be the first job to notice a canvas page swap.
                     // Clear stale visible text immediately, even while the chatbot is busy.
                     clearCanvasTransitionOverlay(novelWv.url.orEmpty())
@@ -1358,7 +1373,10 @@ class MainActivity : Activity() {
                     collectedPanels.clear()
                 }
                 deepSeekAheadAtMs = System.currentTimeMillis()
-                handler.postDelayed({ pumpRealtimeAheadTranslation() }, 80L)
+                handler.postDelayed({
+                    pumpRealtimeAheadTranslation()
+                    finishRealtimePrefetchIfIdle("prefetch_ocr_done")
+                }, 80L)
             }
         ))
     }
@@ -1660,8 +1678,15 @@ class MainActivity : Activity() {
     }
 
     private fun queueRealtimeAheadTranslations(pageUrl: String, panels: List<WebModeAheadPanel>, force: Boolean = false) {
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) {
+            OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
+            return
+        }
         refreshRtScroll()
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
+            finishRealtimePrefetchIfIdle("prefetch_disabled")
+            return
+        }
         val page = cleanUrl(pageUrl)
         if (page != rtAheadHoldPage) {
             rtAheadHold.clear()
@@ -1783,8 +1808,8 @@ class MainActivity : Activity() {
         // One WmBubble = one translation unit; OCR line grouping (BubbleGrouping) decides how many there are.
         OcrDiag.log(
             "AHEAD_QUEUE",
-            "bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize sizes=" +
-                chunks.joinToString(",") { it.size.toString() }
+            "bubbles=${batch.size} panels=${panelGroups.size.coerceAtMost(1)} requests=${chunks.size} cap=$chunkSize sizes=" +
+                chunks.joinToString(",") { it.size.toString() } state=$realtimeReadState visiblePlaced=$realtimeVisiblePlaced"
         )
         Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize")
         val minChunk = minOf(4, chunkSize)
@@ -2017,7 +2042,11 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
     }
 
     private fun pumpRealtimeAheadTranslation() {
-        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this)) return
+        if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this)) {
+            finishRealtimePrefetchIfIdle("prefetch_disabled")
+            return
+        }
+        if (realtimeReadState != RealtimeReadState.PREFETCH_NEXT || !realtimeVisiblePlaced) return
         if (rtPausedForReOcr) { scheduleRealtimeAheadPump(400L); return }
         // Read-ahead uses its own WebView and can overlap with a foreground bubble batch. The shorter,
         // randomized real-time request gap still prevents rapid-fire submissions.
