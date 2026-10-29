@@ -48,7 +48,7 @@ internal object WebModeInpainter {
     @Synchronized
     fun tryAcquireGlobalCallBudget(): Boolean {
         val now = SystemClock.elapsedRealtime()
-        while (recentGlobalCalls.isNotEmpty() && now - recentGlobalCalls.peekFirst() >= GLOBAL_CALL_WINDOW_MS) {
+        while (recentGlobalCalls.peekFirst()?.let { now - it >= GLOBAL_CALL_WINDOW_MS } == true) {
             recentGlobalCalls.removeFirst()
         }
         if (recentGlobalCalls.size >= GLOBAL_CALL_LIMIT) return false
