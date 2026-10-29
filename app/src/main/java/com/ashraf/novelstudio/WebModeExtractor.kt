@@ -2032,9 +2032,10 @@ internal class WebModeExtractor(
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0
+                            wv.context, src, bytes, bubbles, allowAi = true
                         )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
+                        OcrDiag.log("CLEAN", "bubbles=${bubbles.size} cleaned=$cleaned residual_max=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
@@ -2489,7 +2490,10 @@ internal class WebModeExtractor(
                 val nb = run {
                     val seg = if (dets == null || freeAt(i)) null
                         else BubbleSegCore.balloonAt(dets.mapNotNull { it.seg }, ((rects[i][0] + rects[i][2]) / 2), ((rects[i][1] + rects[i][3]) / 2))
-                    if (seg == null) nb0 else {
+                    if (seg == null) {
+                        OcrDiag.log("BUBBLE_MASK_FALLBACK", "marker=${out.size + 1} reason=no_bubble text_bbox_fallback=true textPresent=${text.isNotBlank()}")
+                        nb0
+                    } else {
                         val bands = BubbleSegCore.bands(seg)
                         // Where the translation goes: the largest rectangle inside THIS balloon around the old lettering.
                         val seedBox = refinedSeed[i] ?: rects[i]

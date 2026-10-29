@@ -69,7 +69,7 @@ internal object OcrGarbageFilter {
             OcrScript.CHINESE -> han
             OcrScript.LATIN -> latin
         }
-        if (letters.size >= 2 && (letters.size - expected) * 2 > letters.size) return "script_mismatch"
+        if (letters.isNotEmpty() && (letters.size - expected) * 2 > letters.size) return "script_mismatch"
 
         if (letters.size == 1 && !onomatopoeia &&
             (hangul == 1 || script == OcrScript.JAPANESE && (kana + han) == 1)) {

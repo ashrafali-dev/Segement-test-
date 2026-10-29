@@ -22,6 +22,9 @@ import kotlin.math.min
  * bounded for phones and returns false when the image is too large or the mask is unsafe.
  */
 internal object WebModeTextRemover {
+    private const val RESIDUAL_THRESHOLD = 24f
+    @Volatile var lastResidualMax: Float = 0f
+        private set
     private const val MAX_WIDTH = 4096
     private const val MAX_HEIGHT = 20000
     private const val MAX_PIXELS = 14_000_000L
@@ -34,6 +37,7 @@ internal object WebModeTextRemover {
         bubbles: List<WmBubble>,
         allowAi: Boolean = true
     ): Boolean {
+        lastResidualMax = 0f
         if (!Prefs.bool(context, "wmTextRemoval2", true)) return false
         if (sourceUrl.isBlank() || encoded.size !in 1..MAX_BYTES || bubbles.isEmpty()) return false
         if (isAnimatedOrUnsupported(encoded)) return false
@@ -56,30 +60,27 @@ internal object WebModeTextRemover {
         var aiCallsAttempted = 0
         var aiCallsSucceeded = 0
         var aiTotalMs = 0L
-        var aiPolicy = "not-evaluated"
         var panelRemovedForLog = 0
+        var tier1Count = 0
+        var tier2Count = 0
+        var tier3Count = 0
+        var panelResidualMax = 0f
         try {
             var totalRemoved = 0
-            // AI inpainting (optional, downloaded on request; used automatically once installed) is slow on a phone:
-            // only a few artwork bubbles / free-text boxes per image.
-            var aiBudget = 6
+            // Policy stays tiered on every panel. Fast-path panels still run Tiers 1 and 2;
+            // MI-GAN is conditional on residual ink and low CV confidence, with at most three calls.
+            var aiBudget = 3
             val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
             val aiModelReady = WebModeInpainter.isReady(context)
             val aiCoolingDown = WebModeInpainter.tooSlow
-            var aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown
-            aiPolicy = when {
-                !allowAi -> "disallowed-by-fast-path"
-                !aiEnabledPref -> "disabled-in-settings"
-                !aiModelReady -> "model-not-ready"
-                aiCoolingDown -> "cooldown-after-slow-run"
-                else -> "ready"
+            var aiWanted = aiEnabledPref && aiModelReady && !aiCoolingDown
+            if (!aiModelReady) {
+                OcrDiag.log("CLEAN", "migan_unavailable reason=file_missing falling_back_to_tier2")
             }
             if (aiWanted && !WebModeInpainter.isLoaded()) {
-                // Loading the model takes several seconds: do it in the background; THIS image uses the fast cleaner
-                // so the page never waits for it.
                 WebModeInpainter.warmUpAsync(context)
+                // Never block the current panel for interpreter/GPU compilation.
                 aiWanted = false
-                aiPolicy = "model-warming-in-background"
             }
             val aiStartMs = android.os.SystemClock.elapsedRealtime()
             var aiLastMs = 0L
@@ -195,58 +196,6 @@ internal object WebModeTextRemover {
                     }
                 }
 
-                // Non-AI fast path: if the pixels just outside this OCR box have one stable background
-                // colour, erase only pixels matching the detected lettering colour. This is ideal for white
-                // or coloured speech-bubble interiors and avoids rejecting the whole word because one glyph
-                // touches a burst line. The path is disabled for textured/gradient backgrounds.
-                if (soft) {
-                    val localPaper = estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)
-                    if (localPaper != null &&
-                        min(distance(localPaper, fg1), distance(localPaper, fg2)) >= 52f) {
-                        val inkMask = ByteArray(regionCount)
-                        var inkCount = 0
-                        for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
-                            val at = ry * rw + rx
-                            if (candidate[at].toInt() != 0 &&
-                                distance(region[at], localPaper) >= 34f) {
-                                inkMask[at] = 1
-                                inkCount++
-                            }
-                        }
-                        // A suspiciously dense mask is more likely an artwork patch than lettering.
-                        if (inkCount >= 4 && inkCount <= innerArea * 0.72f) {
-                            val mask = inkMask.copyOf()
-                            val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)
-                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
-                                if (inkMask[ry * rw + rx].toInt() == 0) continue
-                                for (dy in -grow..grow) for (dx in -grow..grow) {
-                                    val nx = rx + dx; val ny = ry + dy
-                                    if (nx !in ix0 until ix1 || ny !in iy0 until iy1) continue
-                                    val ni = ny * rw + nx
-                                    if (mask[ni].toInt() == 0 && distance(region[ni], localPaper) >= 22f &&
-                                        min(distance(region[ni], fg1), distance(region[ni], fg2)) <= 110f) {
-                                        mask[ni] = 1
-                                    }
-                                }
-                            }
-                            val out = region.copyOf()
-                            var removedPixels = 0
-                            for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
-                                val at = ry * rw + rx
-                                if (mask[at].toInt() == 0) continue
-                                out[at] = localPaper
-                                removedPixels++
-                            }
-                            if (removedPixels >= 4) {
-                                bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                                totalRemoved += removedPixels
-                                erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
-                                continue
-                            }
-                        }
-                    }
-                }
-
                 val queue = IntArray(regionCount)
                 var selectedCount = 0
                 for (start in 0 until regionCount) {
@@ -342,42 +291,56 @@ internal object WebModeTextRemover {
                     }
                 }
 
-                // Lettering on artwork: let the AI model rebuild the picture when it is installed and enabled.
-                var aiFill: IntArray? = null
-                // Hard time cap: no new AI call if it would probably push this image past ~8 s in total.
-                if (soft && aiWanted && aiBudget > 0 &&
-                    (android.os.SystemClock.elapsedRealtime() - aiStartMs) + aiLastMs < 8000L) {
-                    val t0 = android.os.SystemClock.elapsedRealtime()
-                    aiCallsAttempted++
-                    aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
-                    aiLastMs = android.os.SystemClock.elapsedRealtime() - t0
-                    aiTotalMs += aiLastMs
-                    if (aiFill != null) {
-                        aiBudget--
-                        aiCallsSucceeded++
-                    }
-                    OcrDiag.log(
-                        "AI_PAINT",
-                        "region src=${sourceUrl.take(80)} box=${rw}x$rh result=${if (aiFill != null) "ok" else "skipped/failed"} ms=$aiLastMs"
+                // Tier 1: median-ring paper fill at alpha 0.92, bounded to a rounded text box.
+                // Textured/free lettering skips the solid fill and advances to inpainting.
+                val bubbleNo = bubbles.indexOf(bubble) + 1
+                val paper = medianRingColor(region, rw, rh, ix0, iy0, ix1, iy1) ?: bg
+                val tier1Start = android.os.SystemClock.elapsedRealtime()
+                val tier1Region = region.copyOf()
+                val fillPad = grow.coerceIn(1, 8)
+                if (!soft && !bubble.free) {
+                    fillRoundedRect(
+                        tier1Region, rw, rh,
+                        (ix0 - fillPad).coerceAtLeast(0), (iy0 - fillPad).coerceAtLeast(0),
+                        (ix1 + fillPad).coerceAtMost(rw), (iy1 + fillPad).coerceAtMost(rh),
+                        paper, 0.92f, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                     )
                 }
-                // Free lettering (sound effects on artwork) is only erased when the AI inpainter really did it: the
-                // onion-peel fill smears artwork, and an untouched original under the overlay is the safer result.
-                if (bubble.free && aiFill == null && !smoothSurround(region, mask, rw, rh)) continue
-                // Artwork without AI: onion-peel (Telea-style) fill, outside in, layer by layer.
-                val tele = if (soft && aiFill == null)
-                    onionFill(region, mask, rw, rh, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg) else null
-                // Fill only the masked glyph pixels from their surroundings (never repaint a whole box).
+                val residual1 = residualEnergy(tier1Region, mask, paper, soft = false, width = rw)
+                if (!soft && !bubble.free && residual1 <= RESIDUAL_THRESHOLD) {
+                    bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
+                    totalRemoved += selectedCount
+                    tier1Count++
+                    panelResidualMax = max(panelResidualMax, residual1)
+                    erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                    OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start}")
+                    continue
+                }
+
+                // Tier 2: OpenCV Telea inpaint on the mask. A bounded local fill remains as a fallback when
+                // native OpenCV is unavailable or the crop is too large for safe native temporary buffers.
+                val tier2Start = android.os.SystemClock.elapsedRealtime()
+                if (bubble.free && !smoothSurround(region, mask, rw, rh) && (!aiWanted || !WebModeInpainter.isLoaded())) {
+                    panelResidualMax = max(panelResidualMax, residual1)
+                    continue
+                }
+                val cvConfidence = if (!soft) 0.82f
+                    else if (estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1) != null) 0.78f else 0.42f
                 val out = region.copyOf()
+                val cvOut = openCvInpaint(region, rw, rh, mask)
+                val tele = if (cvOut == null && soft) onionFill(
+                    region, rw, rh, mask, (fontPx * 0.3f).toInt().coerceIn(4, 10), bg
+                ) else null
                 for (ry in 0 until rh) {
                     for (rx in 0 until rw) {
                         val at = ry * rw + rx
                         if (mask[at].toInt() == 0) continue
+                        if (cvOut != null) {
+                            out[at] = cvOut[at]
+                            continue
+                        }
                         if (soft) {
-                            // Lettering on artwork: rebuild the picture from the surroundings (sky, shading, screentone
-                            // gradients) by blending the nearest untouched pixels left/right/up/down, nearest weighted most.
-                            out[at] = if (aiFill != null) (0xFF000000.toInt() or (aiFill[at] and 0xFFFFFF))
-                                else if (tele != null) (0xFF000000.toInt() or (tele[at] and 0xFFFFFF))
+                            out[at] = if (tele != null) (0xFF000000.toInt() or (tele[at] and 0xFFFFFF))
                                 else 0xFF000000.toInt() or
                                     gradientFill(region, mask, rw, rh, rx, ry, (fontPx * 1.6f).toInt().coerceIn(8, 60), bg)
                             continue
@@ -386,31 +349,57 @@ internal object WebModeTextRemover {
                         var sumR = 0; var sumG = 0; var sumB = 0
                         var radius = 1
                         while (radius <= 9 && sampleN < 6) {
-                            for (dy in -radius..radius) {
-                                for (dx in -radius..radius) {
-                                    if (max(abs(dx), abs(dy)) != radius) continue
-                                    val nx = rx + dx; val ny = ry + dy
-                                    if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue
-                                    val ni = ny * rw + nx
-                                    if (mask[ni].toInt() != 0) continue
-                                    val p = region[ni]
-                                    if (distance(p, bg) > 72f) continue
-                                    sumR += red(p); sumG += green(p); sumB += blue(p); sampleN++
-                                }
+                            for (dy in -radius..radius) for (dx in -radius..radius) {
+                                if (max(abs(dx), abs(dy)) != radius) continue
+                                val nx = rx + dx; val ny = ry + dy
+                                if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue
+                                val ni = ny * rw + nx
+                                if (mask[ni].toInt() != 0) continue
+                                val p = region[ni]
+                                if (distance(p, paper) > 72f) continue
+                                sumR += red(p); sumG += green(p); sumB += blue(p); sampleN++
                             }
                             radius++
                         }
-                        val fill = if (sampleN >= 3) {
-                            (sumR / sampleN shl 16) or (sumG / sampleN shl 8) or (sumB / sampleN)
-                        } else bg and 0x00FFFFFF
+                        val fill = if (sampleN >= 3) (sumR / sampleN shl 16) or (sumG / sampleN shl 8) or (sumB / sampleN)
+                            else paper and 0x00FFFFFF
                         out[at] = 0xFF000000.toInt() or fill
                     }
                 }
+                tier2Count++
+                val tier2Ms = android.os.SystemClock.elapsedRealtime() - tier2Start
+                var residualFinal = residualEnergy(out, mask, paper, soft, rw)
+                OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=2 ms=$tier2Ms reason=tier1_incomplete")
+
+                // Tier 3: MI-GAN only after Tier 2 still leaves residual ink and CV confidence is below 0.5.
+                if (residualFinal > RESIDUAL_THRESHOLD && cvConfidence < 0.5f && aiWanted &&
+                    aiBudget > 0 && WebModeInpainter.isLoaded() &&
+                    android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs < 8_000L) {
+                    val t3Start = android.os.SystemClock.elapsedRealtime()
+                    aiCallsAttempted++
+                    val aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
+                    aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
+                    aiTotalMs += aiLastMs
+                    if (aiFill != null) {
+                        aiBudget--
+                        aiCallsSucceeded++
+                        tier3Count++
+                        for (at in mask.indices) if (mask[at].toInt() != 0 && aiFill[at] != 0) out[at] = aiFill[at]
+                        residualFinal = residualEnergy(out, mask, paper, soft, rw)
+                        OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=3 ms=$aiLastMs reason=tier2_failed conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}")
+                    } else {
+                        OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x$rh result=skipped/failed ms=$aiLastMs")
+                    }
+                }
+                panelResidualMax = max(panelResidualMax, residualFinal)
                 bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
-                totalRemoved += selectedCount
-                erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                if (residualFinal <= RESIDUAL_THRESHOLD) {
+                    totalRemoved += selectedCount
+                    erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                }
             }
             panelRemovedForLog = totalRemoved
+            lastResidualMax = panelResidualMax
             // Compact Japanese-script audit: show whether Lens/OCR found a bubble but the local cleaner
             // skipped it. This distinguishes OCR geometry/color-mask misses from MI-GAN timing without
             // logging the dialogue itself or emitting a separate line for every bubble.
@@ -427,10 +416,10 @@ internal object WebModeTextRemover {
                     "CLEAN_JP_AUDIT",
                     "src=${sourceUrl.take(80)} detected=${japaneseBubbles.size} erased=$erasedJapanese " +
                         "unmatched=${japaneseBubbles.size - erasedJapanese} " +
-                        "soft=${japaneseBubbles.count { it.soft }} allowAi=$allowAi aiPolicy=$aiPolicy"
+                        "soft=${japaneseBubbles.count { it.soft }} allowAi=true policy=tiered"
                 )
             }
-            if (totalRemoved < 8) return false
+            if (totalRemoved < 8 || panelResidualMax > RESIDUAL_THRESHOLD) return false
 
             val bytesOut = ByteArrayOutputStream()
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
@@ -463,14 +452,138 @@ internal object WebModeTextRemover {
         } catch (_: Exception) {
             return false
         } finally {
+            lastResidualMax = panelResidualMax
             OcrDiag.log(
                 "AI_PANEL",
-                "src=${sourceUrl.take(100)} allowAi=$allowAi policy=$aiPolicy calls=$aiCallsAttempted " +
-                    "ok=$aiCallsSucceeded aiMs=$aiTotalMs elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
-                    "removedPixels=$panelRemovedForLog"
+                "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count " +
+                    "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
+                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)}"
             )
             bitmap.recycle()
         }
+    }
+
+    /** Median channel colour from the ring around the text box. */
+    private fun medianRingColor(region: IntArray, rw: Int, rh: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int): Int? {
+        val samples = ArrayList<Int>(min(2048, rw * rh))
+        var y = 0
+        while (y < rh) {
+            var x = 0
+            while (x < rw) {
+                if (x < ix0 || x >= ix1 || y < iy0 || y >= iy1) samples.add(region[y * rw + x])
+                x += 2
+            }
+            y += 2
+        }
+        if (samples.size < 8) return null
+        val rs = IntArray(samples.size) { red(samples[it]) }.also { it.sort() }
+        val gs = IntArray(samples.size) { green(samples[it]) }.also { it.sort() }
+        val bs = IntArray(samples.size) { blue(samples[it]) }.also { it.sort() }
+        val mid = samples.size / 2
+        return 0xFF000000.toInt() or (rs[mid] shl 16) or (gs[mid] shl 8) or bs[mid]
+    }
+
+    private fun fillRoundedRect(
+        pixels: IntArray, rw: Int, rh: Int, x0: Int, y0: Int, x1: Int, y1: Int,
+        color: Int, alpha: Float, radius: Int
+    ) {
+        if (rw <= 0 || rh <= 0 || x1 <= x0 || y1 <= y0) return
+        val a = alpha.coerceIn(0f, 1f)
+        val r = radius.coerceIn(0, min((x1 - x0) / 2, (y1 - y0) / 2))
+        val cr = red(color); val cg = green(color); val cb = blue(color)
+        for (y in y0.coerceAtLeast(0) until y1.coerceAtMost(rh)) {
+            for (x in x0.coerceAtLeast(0) until x1.coerceAtMost(rw)) {
+                val dx = when {
+                    x < x0 + r -> (x0 + r - x).toFloat()
+                    x >= x1 - r -> (x - (x1 - r - 1)).toFloat()
+                    else -> 0f
+                }
+                val dy = when {
+                    y < y0 + r -> (y0 + r - y).toFloat()
+                    y >= y1 - r -> (y - (y1 - r - 1)).toFloat()
+                    else -> 0f
+                }
+                if (dx > 0f && dy > 0f && dx * dx + dy * dy > r * r) continue
+                val at = y * rw + x
+                val old = pixels[at]
+                val rr = (cr * a + red(old) * (1f - a)).toInt().coerceIn(0, 255)
+                val gg = (cg * a + green(old) * (1f - a)).toInt().coerceIn(0, 255)
+                val bb = (cb * a + blue(old) * (1f - a)).toInt().coerceIn(0, 255)
+                pixels[at] = 0xFF000000.toInt() or (rr shl 16) or (gg shl 8) or bb
+            }
+        }
+    }
+
+    /** Mean remaining ink contrast on the text mask; textured panels use a local neighbourhood reference. */
+    private fun residualEnergy(region: IntArray, mask: ByteArray, background: Int, soft: Boolean, width: Int): Float {
+        var sum = 0.0
+        var count = 0
+        for (at in mask.indices) {
+            if (mask[at].toInt() == 0) continue
+            val p = region[at]
+            val sample = if (soft) neighbourMean(region, mask, at, width) else null
+            val reference = sample ?: background
+            sum += (kotlin.math.abs(red(p) - red(reference)) + kotlin.math.abs(green(p) - green(reference)) +
+                kotlin.math.abs(blue(p) - blue(reference))) / 3.0
+            count++
+        }
+        return if (count == 0) 0f else (sum / count).toFloat()
+    }
+
+    private fun neighbourMean(region: IntArray, mask: ByteArray, at: Int, width: Int): Int? {
+        if (width <= 0) return null
+        val height = region.size / width
+        val x = at % width; val y = at / width
+        var sr = 0L; var sg = 0L; var sb = 0L; var n = 0
+        for (radius in 1..5) {
+            for (dy in -radius..radius) for (dx in -radius..radius) {
+                if (max(kotlin.math.abs(dx), kotlin.math.abs(dy)) != radius) continue
+                val nx = x + dx; val ny = y + dy
+                if (nx !in 0 until width || ny !in 0 until height) continue
+                val i = ny * width + nx
+                if (mask[i].toInt() != 0) continue
+                val p = region[i]
+                sr += red(p); sg += green(p); sb += blue(p); n++
+            }
+            if (n >= 3) break
+        }
+        return if (n == 0) null else 0xFF000000.toInt() or ((sr / n).toInt() shl 16) or
+            ((sg / n).toInt() shl 8) or (sb / n).toInt()
+    }
+
+    /** Official OpenCV Telea inpaint, capped to <=250k pixels for low-memory phones. */
+    private fun openCvInpaint(region: IntArray, rw: Int, rh: Int, mask: ByteArray): IntArray? {
+        if (rw <= 0 || rh <= 0 || rw.toLong() * rh > 250_000L || mask.size != rw * rh) return null
+        return try {
+            if (!org.opencv.android.OpenCVLoader.initLocal()) return null
+            val src = org.opencv.core.Mat(rh, rw, org.opencv.core.CvType.CV_8UC3)
+            val maskMat = org.opencv.core.Mat(rh, rw, org.opencv.core.CvType.CV_8UC1)
+            val dst = org.opencv.core.Mat()
+            try {
+                val srcBytes = ByteArray(region.size * 3)
+                val maskBytes = ByteArray(mask.size)
+                for (i in region.indices) {
+                    val p = region[i]; val j = i * 3
+                    srcBytes[j] = blue(p).toByte()
+                    srcBytes[j + 1] = green(p).toByte()
+                    srcBytes[j + 2] = red(p).toByte()
+                    maskBytes[i] = if (mask[i].toInt() == 0) 0 else 255.toByte()
+                }
+                src.put(0, 0, srcBytes)
+                maskMat.put(0, 0, maskBytes)
+                org.opencv.photo.Photo.inpaint(src, maskMat, dst, 3.0, org.opencv.photo.Photo.INPAINT_TELEA)
+                val output = ByteArray(region.size * 3)
+                dst.get(0, 0, output)
+                IntArray(region.size) { i ->
+                    val j = i * 3
+                    0xFF000000.toInt() or ((output[j + 2].toInt() and 255) shl 16) or
+                        ((output[j + 1].toInt() and 255) shl 8) or (output[j].toInt() and 255)
+                }
+            } finally {
+                src.release(); maskMat.release(); dst.release()
+            }
+        } catch (_: Throwable) { null }
     }
 
     /**

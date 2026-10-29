@@ -92,6 +92,8 @@ dependencies {
     implementation 'com.google.ai.edge.litert:litert:1.0.1'
     implementation 'com.google.ai.edge.litert:litert-gpu:1.0.1'
     implementation 'com.google.ai.edge.litert:litert-gpu-api:1.0.1'
+    // OpenCV is used only for small OCR masks, with the custom low-memory fallback retained.
+    implementation 'org.opencv:opencv:4.10.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
     testImplementation 'junit:junit:4.13.2'

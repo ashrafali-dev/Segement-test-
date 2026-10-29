@@ -6,6 +6,7 @@ on:
       - fix/lens-ocr-model-routing-manual-extract-20261024
       - fix/canvas-page-overlay-lifecycle-20261025
       - experiment/migan-inpainting-rt-ocr-20261028
+      - fix/ocr-placement-quality-and-adaptive-bg-20261029
   workflow_dispatch:
 
 permissions:
@@ -23,6 +24,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
+      - name: Prepare pinned MI-GAN model asset (build-time only; APK contains the model)
+        run: bash scripts/prepare-migan-asset.sh
       - name: Test embedded WebView overlay layout
         run: node scripts/test-webmode-overlay-layout.js
       - name: Configure the existing release signing key required by app/build.gradle

@@ -176,7 +176,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
 
             val markers = MARK.findAll(text).toList()
             if (markers.isEmpty()) {
-                OcrDiag.log("ALIGN", "bubbles=$n markers=0 -> REJECT (no markers)")
+                OcrDiag.log("ALIGN", "bubbles=$n markers=0 placed=0 missing=$n -> REJECT")
+                for (i in 0 until n) OcrDiag.log("ALIGN_MISS", "marker=${1 + layout.titleOffset + i} reason=no_text")
                 return null
             }
 
