@@ -37,6 +37,8 @@ internal object WebModeTextRemover {
     private const val TIER3_FILL_ALPHA = 1.00f
     @Volatile var lastResidualMax: Float = 0f
         private set
+    @Volatile var lastTier1Count: Int = 0
+        private set
     private val cleanSemaphore = Semaphore(2, true)
     private val cleanDurationMs = ThreadLocal<Long>()
     fun lastCleanMsForThread(): Long = cleanDurationMs.get() ?: 0L
@@ -88,8 +90,13 @@ internal object WebModeTextRemover {
         pageUrl: String
     ): Boolean {
         lastResidualMax = 0f
+        lastTier1Count = 0
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
         fun earlySkip(reason: String): Boolean {
+            if (realtimeMode) {
+                OcrDiag.log("CLEAN_SKIP", "reason=$reason bubbles=${bubbles.size}")
+                OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=${android.os.SystemClock.elapsedRealtime() - callStartedMs} cleaned=false")
+            }
             OcrDiag.log(
                 "AI_PANEL",
                 "allowAi=true policy=tiered tier1=0 tier2=0 tier3=0 aiExecutionAllowed=$allowAi " +
@@ -623,6 +630,27 @@ internal object WebModeTextRemover {
                     "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
                 )
+                if (realtimeMode) {
+                    // Visible realtime is the fast product: persist Tier 1 only. Do not start OpenCV or MI-GAN
+                    // while the reader waits; scanning still uses the full tiered path.
+                    bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
+                    tier1Count++
+                    panelResidualMax = max(panelResidualMax, residual1)
+                    OcrDiag.log(
+                        "CLEAN_TIER",
+                        "bubble=$bubbleNo tier=1 realtime=true ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$tier1Alpha"
+                    )
+                    if (residual1 <= TIER2_RESIDUAL_THRESHOLD) {
+                        totalRemoved += selectedCount
+                        erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                    }
+                    OcrDiag.log(
+                        "BUBBLE_CLEAN_VERIFY",
+                        "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                            "finalAlpha=$tier1Alpha extraPass=false reason=realtime_tier1_only"
+                    )
+                    continue
+                }
                 if (residual1 <= TIER2_RESIDUAL_THRESHOLD && !largeMask) {
                     bitmap.setPixels(tier1Region, 0, rw, x0, y0, rw, rh)
                     totalRemoved += selectedCount
@@ -919,6 +947,7 @@ internal object WebModeTextRemover {
             }
             panelRemovedForLog = totalRemoved
             lastResidualMax = panelResidualMax
+            lastTier1Count = tier1Count
             // Compact Japanese-script audit: show whether Lens/OCR found a bubble but the local cleaner
             // skipped it. This distinguishes OCR geometry/color-mask misses from MI-GAN timing without
             // logging the dialogue itself or emitting a separate line for every bubble.
@@ -938,7 +967,7 @@ internal object WebModeTextRemover {
                         "soft=${japaneseBubbles.count { it.soft }} allowAi=true policy=tiered"
                 )
             }
-            if ((totalRemoved < 8 && !acceptedLargeMask) || panelHardFailure) return false
+            if ((totalRemoved < 8 && !acceptedLargeMask && !(realtimeMode && tier1Count > 0)) || panelHardFailure) return false
 
             val bytesOut = ByteArrayOutputStream()
             // API 30+ supports lossless WebP. Older Android versions use lossless PNG instead
