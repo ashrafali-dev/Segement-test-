@@ -169,6 +169,22 @@ internal object WebModeTextRemover {
                 .take(500)
                 .toList()
 
+            fun logMaskSkip(bubbleNo: Int, reason: String) {
+                OcrDiag.log(
+                    "MASK_DILATE",
+                    "bubble=$bubbleNo origArea=0 dilatedArea=0 increasePct=0.0 " +
+                        "scope=mask kernel=3x3 iterations=1 bboxPad=$BBOX_DILATION_PX skipped=$reason"
+                )
+                OcrDiag.log(
+                    "CLEAN_FILL",
+                    "bubble=$bubbleNo maskArea=0 fillArea=0 appliedAlpha=$TIER1_FILL_ALPHA reason=$reason"
+                )
+                OcrDiag.log(
+                    "CLEAN_ASSERT",
+                    "bubble=$bubbleNo tier1_covers_mask=false maskArea=0 fillArea=0 reason=$reason"
+                )
+            }
+
             // Do NOT paint the entire speech-bubble interior from cv: that flattens paper texture/gradients and
             // can turn the bubble into a visibly boxy patch. cv is contour/placement guidance, not a text mask.
             // The loop below edits only pixels selected as lettering inside the OCR box plus a small safety margin.
@@ -181,6 +197,7 @@ internal object WebModeTextRemover {
                 val bh = bubble.h * height
                 if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite()) {
                     OcrDiag.log("MASK_DILATE", "bubble=$bubbleNo origArea=0 dilatedArea=0 increasePct=0.0 scope=bbox pad=$BBOX_DILATION_PX reason=invalid_bbox")
+                    logMaskSkip(bubbleNo, "invalid_bbox")
                     continue
                 }
                 // Widen the OCR box before mask creation: OCR geometry often cuts antialiased letter edges.
@@ -204,7 +221,10 @@ internal object WebModeTextRemover {
                 )
                 val innerW = ox1 - ox0
                 val innerH = oy1 - oy0
-                if (innerW < 4 || innerH < 4 || innerW.toLong() * innerH.toLong() > 1_250_000L) continue
+                if (innerW < 4 || innerH < 4 || innerW.toLong() * innerH.toLong() > 1_250_000L) {
+                    logMaskSkip(bubbleNo, "bbox_out_of_bounds")
+                    continue
+                }
 
                 val soft = bubble.soft
                 val bg = opaque(bubble.bg)
@@ -212,7 +232,10 @@ internal object WebModeTextRemover {
                 val fg2 = opaque(bubble.fg2)
                 // Outline colour of fill+stroke lettering is ink too (otherwise a white edge would stay behind).
                 val fg3 = if (bubble.stroke != 0) opaque(bubble.stroke) else fg2
-                if (distance(bg, fg1) < 52 && distance(bg, fg2) < 52 && distance(bg, fg3) < 52) continue
+                if (distance(bg, fg1) < 52 && distance(bg, fg2) < 52 && distance(bg, fg3) < 52) {
+                    logMaskSkip(bubbleNo, "foreground_background_low_contrast")
+                    continue
+                }
 
                 val fontPx = (bubble.font * width).takeIf { it.isFinite() && it > 0f }
                     ?.coerceIn(3f, 400f) ?: max(3f, min(innerW, innerH).toFloat() * 0.65f)
@@ -226,7 +249,10 @@ internal object WebModeTextRemover {
                 val rw = x1 - x0
                 val rh = y1 - y0
                 val regionSize = rw.toLong() * rh.toLong()
-                if (regionSize > 2_000_000L) continue
+                if (regionSize > 2_000_000L) {
+                    logMaskSkip(bubbleNo, "region_too_large")
+                    continue
+                }
                 val regionCount = regionSize.toInt()
                 // Coordinates of the already-dilated OCR box inside the padded region.
                 val ix0 = ox0 - x0; val iy0 = oy0 - y0
@@ -346,7 +372,10 @@ internal object WebModeTextRemover {
                 // around two heavy kanji columns is ~70 % ink, and the old 50 % cap threw the whole bubble away.
                 // Only very dense (>= 85 %) masks are treated as artwork now; the shape-size limits above and
                 // the on-artwork AI gate still decide whether this is really lettering.
-                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) continue
+                if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) {
+                    logMaskSkip(bubbleNo, "mask_rejected")
+                    continue
+                }
 
                 // Flat bubble: sweep EVERYTHING inside the OCR box (slightly widened) that differs from the paper
                 // colour, unless it belongs to a protected shape. This removes the faint ghosts that the strict
