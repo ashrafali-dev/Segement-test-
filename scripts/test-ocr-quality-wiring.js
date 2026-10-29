@@ -15,6 +15,7 @@ const assetScript = read('scripts/prepare-migan-asset.sh');
 const mainActivity = read('app/src/main/java/com/ashraf/novelstudio/MainActivity.kt');
 const timing = read('app/src/main/java/com/ashraf/novelstudio/OcrPanelTiming.kt');
 const diag = read('app/src/main/java/com/ashraf/novelstudio/OcrDiag.kt');
+const lensTransport = read('app/src/main/java/com/ashraf/novelstudio/LensOcrEngine.kt');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
 const localFastStart = routing.indexOf('fun recognizeLocalFast(');
@@ -113,11 +114,46 @@ assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true r
           painter.includes('GLOBAL_CALL_WINDOW_MS = 60_000L'),
   'prefetch MI-GAN must be residual-gated, budgeted per panel and globally rate limited');
 assert.ok(extractor.includes('FORCE_CAPTURE') && extractor.includes('stableSamples < 3') &&
-          extractor.includes('timeoutMs = minOf(180L, remainingMs)') &&
+          extractor.includes('timeoutMs = minOf(if (forceCrossOriginCanvas) 100L else 180L, remainingMs)') &&
           extractor.includes('FORCE_ABORT') &&
           extractor.includes('recapture $driftRetries/1') &&
-          extractor.includes('FORCE_SKIP'),
-  'FORCE capture must wait for scroll settle, skip known tiny panels and cap recaptures');
+          extractor.includes('FORCE_SKIP') &&
+          extractor.includes('FORCE_MODE') &&
+          extractor.includes('reason=cross_origin_canvas') &&
+          extractor.includes('maxBlankRetries = if (forceCrossOriginCanvas) 1 else 3'),
+  'FORCE capture must settle, reduce screenshot retries for cross-origin canvas, and retain diagnostics');
+assert.ok(cleaner.includes('LARGE_MASK_THRESHOLD = 15_000') &&
+          cleaner.includes('LARGE_MASK_ALPHA = 1.00f') &&
+          cleaner.includes('openCvInpaintTiled(tier1Region, rw, rh, mask)') &&
+          cleaner.includes('CLEAN_TIER2_TILE') &&
+          cleaner.includes('ringSamplePad=$ringSamplePad') &&
+          cleaner.includes('migan_skipped reason=mask_too_large area=$maskArea'),
+  'large sound-effect masks must use opaque fill, wider ring sampling, tiled Tier 2 and skip MI-GAN above the area limit');
+assert.ok(cleaner.includes('val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= 20f') &&
+          cleaner.includes('best_effort_large_mask'),
+  'only very large masks with residual >=20% may become hard clean failures');
+assert.ok(painter.includes('INFERENCE_CIRCUIT_COOLDOWN_MS = 60_000L') &&
+          painter.includes('MIGAN_CIRCUIT_OPEN') &&
+          painter.includes('MIGAN_BLANK_OUTPUT') &&
+          painter.includes('MIGAN_QUEUE') &&
+          painter.includes('val side = minOf(SIZE, maxOf(160, (maxOf(rw, rh) * 1.6f).toInt()))'),
+  'MI-GAN must circuit-break failures, validate output, serialize calls and pad crops into a fixed-size tensor');
+assert.ok(lensTransport.includes('LENS_CIRCUIT_OPEN') &&
+          lensTransport.includes('LENS_SKIP') &&
+          lensTransport.includes('halfOpenProbeInFlight') &&
+          lensTransport.includes('cooldownMs = if (wasHalfOpenProbe) 60_000L else 30_000L') &&
+          lensTransport.includes('Google Lens: timeout'),
+  'Lens must open a 30s outage circuit and allow exactly one half-open probe, extending to 60s on probe failure');
+assert.ok(routing.includes('BATCH_WAIT_OCR') &&
+          routing.includes('reason=circuit_open fallback=mlkit') &&
+          routing.includes('noteNetworkFallback(failure, fallbackResult.blocks.size)'),
+  'Lens failures must finish synchronous ML Kit fallback before returning to alignment');
+assert.ok(mainActivity.includes('no_markers_after_lens_failure') &&
+          mainActivity.includes('-> RETRY_PENDING') &&
+          mainActivity.includes('lens_dns_failure -> PARTIAL') &&
+          mainActivity.includes('delayMs=30000 attempt=1'),
+  'markerless Lens outage must wait 1.5s, retry once after cooldown, and remain partial rather than reject');
+
 const beginForceAt = extractor.indexOf('fun begin()');
 const forceDispatchAt = extractor.indexOf('if ((req.force && !req.visibleOnly) || req.forceScreenOcr)', beginForceAt);
 assert.ok(beginForceAt >= 0 && forceDispatchAt > beginForceAt &&
