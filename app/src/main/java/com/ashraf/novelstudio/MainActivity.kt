@@ -1522,7 +1522,8 @@ class MainActivity : Activity() {
         layout: WebModeLayout,
         hashes: Set<String>,
         token: Int,
-        force: Boolean = false
+        force: Boolean = false,
+        panelSignature: String = realtimeCurrentSignature
     ) {
         val page = cleanUrl(chapter.url)
         if (page.isBlank() || token != navToken ||
@@ -1532,13 +1533,24 @@ class MainActivity : Activity() {
             return
         }
 
+        if (panelSignature.isNotBlank() && panelSignature != realtimeCurrentSignature) {
+            layout.bubbles.forEachIndexed { index, bubble ->
+                OcrDiag.log("PLACE_REJECT", "panelTop=${panelTopFromSignature(panelSignature)} bubble=${index + 1} current=false reason=stale")
+            }
+            OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=${layout.bubbles.size}")
+            synchronized(deepSeekInFlightTextHashes) { deepSeekInFlightTextHashes.removeAll(hashes) }
+            return
+        }
         var pending = rtVisibleOcrBatch
-        if (pending != null && (pending.pageUrl != page || pending.navToken != token)) {
+        if (pending != null && (pending.pageUrl != page || pending.navToken != token ||
+                pending.panelSignature != panelSignature)) {
+            val dropped = pending.bubbles.size
             clearRealtimeVisibleOcrBatch()
+            OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=$dropped")
             pending = null
         }
         if (pending == null) {
-            pending = RtVisibleOcrBatch(page, token, chapter, layout.titleOffset)
+            pending = RtVisibleOcrBatch(page, token, chapter, layout.titleOffset, panelSignature = panelSignature)
             rtVisibleOcrBatch = pending
             rtVisibleOcrFirstAtMs = android.os.SystemClock.elapsedRealtime()
         } else {
@@ -1586,6 +1598,12 @@ class MainActivity : Activity() {
         }
         val pending = rtVisibleOcrBatch ?: return
         if (expectedPage != null && expectedPage != pending.pageUrl) return
+        if (pending.panelSignature.isNotBlank() && pending.panelSignature != realtimeCurrentSignature) {
+            val dropped = pending.bubbles.size
+            clearRealtimeVisibleOcrBatch()
+            OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=$dropped")
+            return
+        }
 
         // Another viewport OCR job is still reading the same screen: let its bubbles join this request
         // (bounded, so real-time never waits long). This is what keeps three bubbles in ONE request.
@@ -9830,12 +9848,20 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             deepSeekTextHashByChapter.remove(oldKey)
             realtimeBatchLayouts.remove(oldKey)
             realtimeBatchCanvasVersions.remove(oldKey)
+            realtimeBatchSignatureByKey.remove(oldKey)
         }
         val key = "realtime-batch-" + (++realtimeBatchSerial)
         realtimeBatchKeyByChapter[ch] = key
         deepSeekTextHashByChapter[key] = hashes.toSet()
         realtimeBatchCanvasVersions[key] = WebModeLayoutStore.canvasVersions(ch.url, layout)
-        if (layout != null) realtimeBatchLayouts[key] = layout
+        realtimeBatchSignatureByKey[key] = realtimeCurrentSignature
+        if (layout != null) {
+            realtimeBatchLayouts[key] = layout
+            val panelTop = panelTopFromSignature(realtimeCurrentSignature)
+            layout.bubbles.forEachIndexed { index, bubble ->
+                OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1}")
+            }
+        }
         while (realtimeBatchLayouts.size > 64) {
             val iterator = realtimeBatchLayouts.entries.iterator()
             if (!iterator.hasNext()) break
@@ -9846,11 +9872,15 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             deepSeekTextHashByChapter.remove(staleKey)
             realtimeBatchCanvasVersions.remove(staleKey)
             realtimeBatchLayouts.remove(staleKey)
+            realtimeBatchSignatureByKey.remove(staleKey)
         }
     }
 
     private fun realtimeBatchLayout(ch: Chapter): WebModeLayout? =
         realtimeBatchKeyByChapter[ch]?.let { realtimeBatchLayouts[it] }
+
+    private fun realtimeBatchSignature(ch: Chapter): String? =
+        realtimeBatchKeyByChapter[ch]?.let { realtimeBatchSignatureByKey[it] }
 
     private fun realtimeBatchCanvasStillCurrent(ch: Chapter): Boolean {
         val key = realtimeBatchKeyByChapter[ch] ?: return false
@@ -9930,6 +9960,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         val reserved = deepSeekTextHashByChapter.remove(key) ?: emptySet()
         realtimeBatchLayouts.remove(key)
         realtimeBatchCanvasVersions.remove(key)
+        realtimeBatchSignatureByKey.remove(key)
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(reserved)
             val completed = if (matched == null) reserved else matched.intersect(reserved)
@@ -9945,6 +9976,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         val reserved = deepSeekTextHashByChapter.remove(key) ?: emptySet()
         realtimeBatchLayouts.remove(key)
         realtimeBatchCanvasVersions.remove(key)
+        realtimeBatchSignatureByKey.remove(key)
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(reserved)
         }
