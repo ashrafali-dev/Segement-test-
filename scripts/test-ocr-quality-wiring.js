@@ -137,8 +137,10 @@ assert.ok(painter.includes('INFERENCE_CIRCUIT_COOLDOWN_MS = 60_000L') &&
           painter.includes('MIGAN_CIRCUIT_OPEN') &&
           painter.includes('MIGAN_BLANK_OUTPUT') &&
           painter.includes('MIGAN_QUEUE') &&
-          painter.includes('val side = minOf(SIZE, maxOf(160, (maxOf(rw, rh) * 1.6f).toInt()))'),
-  'MI-GAN must circuit-break failures, validate output, serialize calls and pad crops into a fixed-size tensor');
+          painter.includes('val side = minOf(SIZE, maxOf(160, (maxOf(rw, rh) * 1.6f).toInt()))' ) &&
+          cleaner.includes('!WebModeInpainter.inferenceCircuitOpen') &&
+          cleaner.includes('WebModeInpainter.inferenceCircuitOpen || aiCircuitOpen'),
+  'MI-GAN must circuit-break failures, validate output, serialize calls, pad fixed-size inputs, and stop retry spam immediately');
 assert.ok(lensTransport.includes('LENS_CIRCUIT_OPEN') &&
           lensTransport.includes('LENS_SKIP') &&
           lensTransport.includes('halfOpenProbeInFlight') &&
