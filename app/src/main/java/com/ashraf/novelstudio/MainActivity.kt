@@ -2778,8 +2778,9 @@ function add(kind,s,r,extra,identity){
  seen[key]=1;
  v.push(kind+':'+s+'@'+Math.round(r.width)+'x'+Math.round(r.height)+(extra||''));
 }
+var webtoonReader=/(?:^|\\/)(?:webtoon|webtoons)(?:\\/|$)/i.test(location.pathname)||/(?:^|\\.)webtoons\\.com$/i.test(location.hostname);
 function sliceTag(r,iw,ih){
- if(!(r.height>vh*1.15&&ih>iw*1.25))return '';
+ if(!webtoonReader||!(r.height>vh*1.15&&ih>iw*1.25))return '';
  return '@slice='+Math.floor(Math.max(0,-r.top)/Math.max(1,vh*.55));
 }
 var imgs=document.images||[];
@@ -2797,7 +2798,7 @@ for(var fi=0;fi<frs.length&&fi<8;fi++){try{
  var fe=frs[fi],fb=fe.getBoundingClientRect(),fs=absolute(fe.getAttribute('src')||''),fd=fe.contentDocument,crossFrame=false;
  try{crossFrame=!fd||fd.location.origin!==location.origin;}catch(ignore){crossFrame=true;}
  var frameArea=Math.max(0,Math.min(vw,fb.right)-Math.max(0,fb.left))*Math.max(0,Math.min(vh,fb.bottom)-Math.max(0,fb.top));
- var frameHint=/webtoon|webtoons|comic|manga|toon|chapter|reader/i.test(location.href+' '+fs);
+ var frameHint=webtoonReader&&/webtoon|webtoons|comic|toon|chapter|reader/i.test(location.href+' '+fs);
  if(crossFrame&&frameHint&&fb.width>=vw*.55&&fb.height>=vh*.55&&fb.right>0&&fb.bottom>0&&fb.left<vw&&fb.top<vh&&frameArea>readerFrameArea){
   readerFrame={src:fs,rect:fb,el:fe};readerFrameArea=frameArea;
  }
