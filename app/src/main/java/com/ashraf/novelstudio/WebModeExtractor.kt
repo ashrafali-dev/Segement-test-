@@ -76,7 +76,7 @@ internal data class WebModeAheadPanel(
 )
 
 /** Per-panel realtime resolution decision, based on a cheap edge/variance preview. */
-private data class WebModeWebModeRealtimeSampleDecision(
+private data class WebModeRealtimeSampleDecision(
     val sample: Int,
     val skipBlank: Boolean,
     val edgeDensity: Float,
