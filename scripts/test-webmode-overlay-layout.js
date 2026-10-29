@@ -110,6 +110,9 @@ assert.ok(writer.includes("var hasCv=!!(it.cv&&it.cv.length>=4)") &&
   "the overlay must reconstruct the detected speech-bubble silhouette from cv rectangles");
 assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl&&!hasCv"),
   "the small OCR-box fallback should wait for cleaned image only when no bubble mask exists");
+assert.ok(writer.includes("if(!it.cl)cover.style.opacity='1'") &&
+  writer.includes("PLACE_UNCLEANED"),
+  "a translation must remain visible on an opaque fallback even when pixel cleaning failed");
 const layoutSource = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 assert.ok(layoutSource.includes("fun canvasBubbleCachePrefix(sourceUrl: String)"),
   "canvas cache keys need a source prefix that can be invalidated after a page transition");
@@ -145,9 +148,11 @@ assert.ok(extractor.includes("val realtimePriority = !scanMode") &&
 assert.ok(extractor.includes("scanMode && remoteDet && detOk && scanDetect") &&
   extractor.includes("else if (scanMode && scanDetect && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
   "heavy RT-DETR must run only when scan detection is explicitly enabled; the pixel bbox fallback always remains");
-assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
-  mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0"),
-  "ahead OCR must be reduced to one panel on low-heap devices and paused under memory pressure");
+assert.ok(mainActivity.includes("coerceIn(0, 1)") &&
+  mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0") &&
+  mainActivity.includes("visible_placement_not_complete") &&
+  mainActivity.includes("AHEAD_QUEUE_BLOCKED"),
+  "realtime look-ahead must be limited to one panel and blocked until visible placement completes");
 assert.ok(extractor.includes('normalizedSource.contains("/link-slot-")') &&
   extractor.includes('normalizedSource.contains("/link_slot_")'),
   "promotional link-slot images must be excluded even when iframe collection bypasses page-script filtering");
