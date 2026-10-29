@@ -533,7 +533,7 @@ internal object WebModeTextRemover {
                 val bboxArea = innerArea.coerceAtLeast(1L)
                 val scriptLabel = scriptLabelForBubble(bubble.sourceText, sourceUrl, pageUrl)
                 val maskPct = maskArea.toDouble() * 100.0 / bboxArea.toDouble()
-                val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0 && !soft && !bubble.free
+                val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0
                 OcrDiag.log(
                     "CLEAN_BRANCH",
                     "bubble=$bubbleNo script=$scriptLabel fix=${if (scriptLabel == "JAPANESE") "skipped (preserve current)" else "ghost"}"
@@ -569,7 +569,7 @@ internal object WebModeTextRemover {
                 val tier1Region = region.copyOf()
                 val fillPad = grow.coerceIn(1, 8)
                 var fillArea = 0
-                if (!soft && !bubble.free) {
+                if (ghostFixCandidate || (!soft && !bubble.free)) {
                     val coverPad = if (ghostFixCandidate) 3 else fillPad
                     val coverL = (ix0 - coverPad).coerceAtLeast(0)
                     val coverT = (iy0 - coverPad).coerceAtLeast(0)
