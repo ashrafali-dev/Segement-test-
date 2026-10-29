@@ -1260,6 +1260,8 @@ class MainActivity : Activity() {
             OcrDiag.log("AHEAD_QUEUE_BLOCKED", "reason=visible_placement_not_complete state=$realtimeReadState")
             return
         }
+        // Never overlap next-panel OCR with a visible reply/placement still being handled.
+        if (running != null || queue.isNotEmpty() || rtVisibleOcrBatch != null || activePlacementIds.isNotEmpty()) return
         if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) {
             finishRealtimePrefetchIfIdle("prefetch_disabled")
             return
@@ -7376,10 +7378,12 @@ return t.length>=40?'TXT:'+t:'';
                                         }
                                     }
                                 } else {
-                                    // Fallback for OCR pages where geometry metadata is unavailable. This path
-                                    // has no panel geometry, so it may translate text but must not unlock prefetch.
-                                    pauseRealtimeVisible("visible_geometry_unavailable")
+                                    // No OCR text means wait for user scroll. Geometry-less nonempty text may
+                                    // still use the text fallback, but never unlock speculative look-ahead.
                                     val normalized = WebModeLayout.normalizeOcrText(out.chapter.text)
+                                    pauseRealtimeVisible(
+                                        if (normalized.isBlank()) "visible_empty" else "visible_geometry_unavailable"
+                                    )
                                     if (normalized.isNotBlank()) {
                                         val hash = java.security.MessageDigest.getInstance("SHA-256")
                                             .digest((cleanUrl(out.chapter.url) + "|" + normalized).toByteArray(Charsets.UTF_8))
