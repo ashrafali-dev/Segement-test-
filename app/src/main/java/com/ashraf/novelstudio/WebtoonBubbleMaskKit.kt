@@ -194,7 +194,7 @@ internal object WebtoonBubbleMaskKit {
             }
         }
 
-        if (changed < 8) {
+        if (changed == 0) {
             return FillResult(false, "no_pixels_to_change", bands.size, area, changed, inkPct, paperPct)
         }
         return FillResult(true, "webtoon_shape_paper_fill", bands.size, area, changed, inkPct, paperPct)
