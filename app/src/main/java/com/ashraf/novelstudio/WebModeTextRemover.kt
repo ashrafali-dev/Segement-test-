@@ -569,16 +569,20 @@ internal object WebModeTextRemover {
                     if (protect[at].toInt() != 0) unmaskedProtectedCandidatePixels++
                 }
                 val unmaskedCandidateThreshold = max(12, maskArea / 100)
+                val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0
+                // A flat speech bubble already receives a rounded-box fill. Only fail closed when the
+                // renderer would otherwise expose unmasked foreground-colour candidates (art/free-text path).
+                val bboxFillExpected = ghostFixCandidate || (!soft && !bubble.free)
                 val unmaskedCandidateLikelyInk = scriptLabel != "JAPANESE" &&
-                    unmaskedCandidatePixels > unmaskedCandidateThreshold
+                    !bboxFillExpected && unmaskedCandidatePixels > unmaskedCandidateThreshold
                 OcrDiag.log(
                     "CLEAN_BBOX_AUDIT",
                     "bubble=$bubbleNo script=$scriptLabel bboxArea=$bboxArea maskArea=$maskArea " +
                         "unmaskedCandidatePixels=$unmaskedCandidatePixels " +
                         "protectedCandidates=$unmaskedProtectedCandidatePixels threshold=$unmaskedCandidateThreshold " +
-                        "scope=bbox residualMetric=mask_only likelyInkOutsideMask=$unmaskedCandidateLikelyInk"
+                        "bboxFillExpected=$bboxFillExpected scope=bbox residualMetric=mask_only " +
+                        "likelyInkOutsideMask=$unmaskedCandidateLikelyInk"
                 )
-                val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0
                 OcrDiag.log(
                     "CLEAN_BRANCH",
                     "bubble=$bubbleNo script=$scriptLabel fix=${if (scriptLabel == "JAPANESE") "skipped (preserve current)" else "ghost"}"
