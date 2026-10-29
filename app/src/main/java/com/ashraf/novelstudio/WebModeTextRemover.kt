@@ -55,7 +55,8 @@ internal object WebModeTextRemover {
         allowAi: Boolean = true,
         realtimeMode: Boolean = false,
         prefetchMode: Boolean = false,
-        panelNo: Int = -1
+        panelNo: Int = -1,
+        scanMode: Boolean = !realtimeMode && !prefetchMode
     ): Boolean {
         val startedAt = android.os.SystemClock.elapsedRealtime()
         var acquired = false
@@ -66,7 +67,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log("MEM_GUARD", "clean_skipped_concurrency activeLimit=2 waitMs=1000")
                 return false
             }
-            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo)
+            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode)
         } finally {
             if (acquired) cleanSemaphore.release()
             cleanDurationMs.set(android.os.SystemClock.elapsedRealtime() - startedAt)
@@ -81,7 +82,8 @@ internal object WebModeTextRemover {
         allowAi: Boolean,
         realtimeMode: Boolean,
         prefetchMode: Boolean,
-        panelNo: Int
+        panelNo: Int,
+        scanMode: Boolean
     ): Boolean {
         lastResidualMax = 0f
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
@@ -448,8 +450,24 @@ internal object WebModeTextRemover {
                 // Only very dense (>= 85 %) masks are treated as artwork now; the shape-size limits above and
                 // the on-artwork AI gate still decide whether this is really lettering.
                 if (selectedCount < 4 || selectedCount > innerArea * (if (soft) 0.82 else 0.6)) {
-                    logMaskSkip(bubbleNo, "mask_rejected")
-                    continue
+                    // Trusted scanning must not silently leave ordinary speech text over the translation.
+                    // On flat dialogue bubbles only, fall back to the OCR text bbox already expanded by 5 px.
+                    // Free/stylized on-art lettering keeps the conservative pixel mask to protect the illustration.
+                    if (scanMode && !soft && !bubble.free &&
+                        selectedCount < 4) {
+                        for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                            val at = ry * rw + rx
+                            if (protect[at].toInt() == 0) selected[at] = 1
+                        }
+                        selectedCount = selected.count { it.toInt() != 0 }
+                        OcrDiag.log(
+                            "BUBBLE_MASK_FALLBACK",
+                            "bubble=$bubbleNo reason=text_bbox_fallback textPresent=true bboxPad=5 maskArea=$selectedCount mode=scan"
+                        )
+                    } else {
+                        logMaskSkip(bubbleNo, "mask_rejected")
+                        continue
+                    }
                 }
 
                 // Flat bubble: sweep EVERYTHING inside the OCR box (slightly widened) that differs from the paper
