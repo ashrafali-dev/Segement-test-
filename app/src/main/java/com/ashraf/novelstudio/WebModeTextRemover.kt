@@ -71,6 +71,10 @@ internal object WebModeTextRemover {
                 catch (_: InterruptedException) { Thread.currentThread().interrupt(); false }
             if (!acquired) {
                 OcrDiag.log("MEM_GUARD", "clean_skipped_concurrency activeLimit=2 waitMs=1000")
+                if (realtimeMode) {
+                    OcrDiag.log("CLEAN_SKIP", "reason=concurrency_limit bubbles=${bubbles.size}")
+                    OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=1000 cleaned=false")
+                }
                 return false
             }
             return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode, pageUrl)
