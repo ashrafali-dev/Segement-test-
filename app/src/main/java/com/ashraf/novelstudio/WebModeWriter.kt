@@ -180,16 +180,28 @@ internal object WebModeWriter {
       }
       b.appendChild(t);
       var cover=null;
-      // Keep a small cover exactly around the OCR text box until a cleaned image is ready.
-      // Never paint the whole cv/bubble interior: it flattens the balloon and can cover artwork.
-      // This local cover also protects canvas-backed bubbles if the cleaned image takes time to load.
-      cover=document.createElement('div');cover.className='__ns_cover';
-      cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
-        +'pointer-events:none;will-change:transform;background:'+it.bg+';'
-        +'border-radius:'+(it.sf?'12px':'4px')+';'
-        +'box-shadow:'+(it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg)+';';
-      cover.__nsWaitClean=!!it.cl;
-      coverLayer.appendChild(cover);
+      var hasCv=!!(it.cv&&it.cv.length>=4);
+      // Restore the speech-bubble silhouette from the detector's mask rectangles. These are local cover shapes,
+      // not text-removal pixels: the cleaner below still erases only the detected glyph mask and its small margin.
+      // If no reliable silhouette exists, use the small OCR-box cover as a conservative fallback.
+      if(!it.er){
+        cover=document.createElement('div');cover.className='__ns_cover';
+        cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
+          +'pointer-events:none;will-change:transform;background:'+(hasCv?'transparent':it.bg)+';';
+        if(hasCv){
+          for(var ci=0;ci+3<it.cv.length;ci+=4){
+            var cd=document.createElement('div');cd.className='__ns_cv';
+            cd.style.cssText='position:absolute;pointer-events:none;margin:0;padding:0;left:'+(it.cv[ci]*100)+'%;top:'+(it.cv[ci+1]*100)+'%;'
+              +'width:'+((it.cv[ci+2]-it.cv[ci])*100)+'%;height:'+((it.cv[ci+3]-it.cv[ci+1])*100)+'%;background:'+it.bg+';';
+            cover.appendChild(cd);
+          }
+        }else{
+          cover.style.borderRadius=it.sf?'12px':'4px';
+          cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
+        }
+        cover.__nsWaitClean=!!it.cl&&!hasCv;
+        coverLayer.appendChild(cover);
+      }
       b.__nsCover=cover;
       textLayer.appendChild(b);
     }
@@ -1280,7 +1292,23 @@ internal object WebModeWriter {
                 // If the source image was cleaned, keep the local text-box cover until the replacement really loads.
                 // The clean image removes only the recognized lettering patch; failed/unsupported sources retain the
                 // small text-box cover instead of flattening the whole speech-bubble interior.
-                .put("cl", WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
+                .put("cl", WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
+                .put("er", b.src.startsWith("ns-canvas:", true) &&
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
+                .apply {
+                    if (b.cv.size >= 4 && b.w > 0f && b.h > 0f) {
+                        val bl = b.cx - b.w / 2f
+                        val bt = b.cy - b.h / 2f
+                        val ja = JSONArray()
+                        var q = 0
+                        while (q + 3 < b.cv.size) {
+                            ja.put(r5((b.cv[q] - bl) / b.w)).put(r5((b.cv[q + 1] - bt) / b.h))
+                                .put(r5((b.cv[q + 2] - bl) / b.w)).put(r5((b.cv[q + 3] - bt) / b.h))
+                            q += 4
+                        }
+                        put("cv", ja)
+                    }
+                })
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()
