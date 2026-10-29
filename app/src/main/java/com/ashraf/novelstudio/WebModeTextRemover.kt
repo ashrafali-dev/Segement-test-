@@ -594,6 +594,11 @@ internal object WebModeTextRemover {
                         "CLEAN_TIER",
                         "bubble=$bubbleNo tier=1 ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$tier1Alpha"
                     )
+                    OcrDiag.log(
+                        "BUBBLE_CLEAN_VERIFY",
+                        "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
+                            "finalAlpha=$tier1Alpha extraPass=false reason=residual_under_5"
+                    )
                     continue
                 }
                 OcrDiag.log(
@@ -799,6 +804,52 @@ internal object WebModeTextRemover {
                     OcrDiag.log(
                         "CLEAN_RESIDUAL",
                         "bubble=$bubbleNo tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} metric=normalized_0_100"
+                    )
+                }
+                // One extra pass is permitted only for flat dialogue bubbles. Sound effects/free lettering
+                // must preserve the original illustration, so their masks are never expanded with a solid rectangle.
+                if (residualFinal > TIER2_RESIDUAL_THRESHOLD && !soft && !bubble.free) {
+                    val verifyMask = mask.copyOf()
+                    for (ry in 0 until rh) for (rx in 0 until rw) {
+                        val at = ry * rw + rx
+                        if (mask[at].toInt() == 0) continue
+                        for (dy in -2..2) for (dx in -2..2) {
+                            if (max(abs(dx), abs(dy)) > 2) continue
+                            val nx = rx + dx
+                            val ny = ry + dy
+                            if (nx !in 0 until rw || ny !in 0 until rh) continue
+                            val ni = ny * rw + nx
+                            if (protect[ni].toInt() == 0) verifyMask[ni] = 1
+                        }
+                    }
+                    val verifyOut = out.copyOf()
+                    for (at in verifyMask.indices) {
+                        if (verifyMask[at].toInt() != 0 && protect[at].toInt() == 0) {
+                            verifyOut[at] = blendPixel(verifyOut[at], paper, 1.0f)
+                        }
+                    }
+                    val verifyResidual = residualEnergy(verifyOut, mask, paper, soft, rw, baseline = region)
+                    if (verifyResidual < residualFinal) {
+                        out = verifyOut
+                        residualFinal = verifyResidual
+                        OcrDiag.log(
+                            "BUBBLE_CLEAN_VERIFY",
+                            "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                                "finalAlpha=1.0 extraPass=true accepted=true dilatePx=2"
+                        )
+                    } else {
+                        OcrDiag.log(
+                            "BUBBLE_CLEAN_VERIFY",
+                            "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                                "finalAlpha=1.0 extraPass=true accepted=false candidate=${String.format(java.util.Locale.US, "%.2f", verifyResidual)} dilatePx=2"
+                        )
+                    }
+                } else {
+                    OcrDiag.log(
+                        "BUBBLE_CLEAN_VERIFY",
+                        "bubble=$bubbleNo residual=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
+                            "finalAlpha=${if (!soft && !bubble.free) "1.0" else TIER3_FILL_ALPHA.toString()} " +
+                            "extraPass=false reason=${if (residualFinal <= TIER2_RESIDUAL_THRESHOLD) "residual_under_5" else "preserve_art"}"
                     )
                 }
                 panelResidualMax = max(panelResidualMax, residualFinal)
