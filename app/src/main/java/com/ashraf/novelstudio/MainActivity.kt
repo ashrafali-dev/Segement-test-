@@ -1314,7 +1314,8 @@ class MainActivity : Activity() {
             if (collectedPanels.isEmpty()) return
             val ready = collectedPanels.values.sortedBy { it.top }.take(1)
             collectedPanels.clear()
-            queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready)
+            // A strict one-panel look-ahead cannot hold a small panel to combine it with another panel.
+            queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready, force = true)
         }
         fun scheduleCollectedFlush() {
             if (collectedPanels.isEmpty() || collectedFlushRunnable != null) return
@@ -1599,7 +1600,13 @@ class MainActivity : Activity() {
      * Put already-cached bubble translations straight onto the page overlay (no chatbot request)
      * and mark them as translated so they are not selected again.
      */
-    private fun placeCachedBubbles(pageUrl: String, bubbles: List<WmBubble>, values: List<String>, hashes: Set<String>) {
+    private fun placeCachedBubbles(
+        pageUrl: String,
+        bubbles: List<WmBubble>,
+        values: List<String>,
+        hashes: Set<String>,
+        completesVisiblePlacement: Boolean = false
+    ) {
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(hashes)
             deepSeekTranslatedTextHashes.addAll(hashes)
@@ -1615,7 +1622,15 @@ class MainActivity : Activity() {
             cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
             Prefs.fontFile(this), pageKey(pageUrl)
         )
-        novelWv.evaluateJavascript(script, null)
+        novelWv.evaluateJavascript(script) { raw ->
+            if (completesVisiblePlacement) {
+                completeRealtimeVisiblePlacement(
+                    values.count { it.isNotBlank() },
+                    decode(raw).contains("ok"),
+                    "cached_visible"
+                )
+            }
+        }
         hasTr = true
         shownTranslated = true
         updatePill()
@@ -7242,6 +7257,7 @@ return t.length>=40?'TXT:'+t:'';
                                             else rtAheadTranslationCache[rtAheadBubbleCacheKey(it)]
                                         }
                                         val cachedCount = cachedTranslations.count { !it.isNullOrBlank() }
+                                        markRealtimeVisiblePlacing("visible_ocr_complete")
                                         if (cachedCount in 1 until selected.size) {
                                             // Partly cached: place the cached bubbles immediately and send ONLY the
                                             // missing ones to the chatbot (previously all were re-translated).
@@ -7273,8 +7289,11 @@ return t.length>=40?'TXT:'+t:'';
                                             remember(stripInternalMarkers(cachedMarked))
                                             shownTrRaw = cachedMarked
                                             webModeStage = "Applying cached ahead translation"
-                                            placeCachedBubbles(liveChapter.url, selected, cachedValues, hashes)
-                                            handler.postDelayed({ pumpRealtimeAheadTranslation() }, 220L)
+                                            markRealtimeVisiblePlacing("cached_translation_ready")
+                                            placeCachedBubbles(
+                                                liveChapter.url, selected, cachedValues, hashes,
+                                                completesVisiblePlacement = true
+                                            )
                                         } else {
                                             // Hold visible OCR until 10 bubbles are collected, or flush
                                             // after a short idle pause so realtime never waits indefinitely.
@@ -7283,9 +7302,21 @@ return t.length>=40?'TXT:'+t:'';
                                                 force = forcedHashes.isNotEmpty()
                                             )
                                         }
+                                    } else {
+                                        val alreadyPlaced = sourceBubbles.count {
+                                            WebModeLayout.fingerprint(it) in deepSeekTranslatedTextHashes
+                                        }
+                                        if (alreadyPlaced > 0) {
+                                            markRealtimeVisiblePlacing("visible_already_translated")
+                                            completeRealtimeVisiblePlacement(alreadyPlaced, true, "visible_already_translated")
+                                        } else {
+                                            pauseRealtimeVisible("visible_empty")
+                                        }
                                     }
                                 } else {
-                                    // Fallback for OCR pages where geometry metadata is unavailable.
+                                    // Fallback for OCR pages where geometry metadata is unavailable. This path
+                                    // has no panel geometry, so it may translate text but must not unlock prefetch.
+                                    pauseRealtimeVisible("visible_geometry_unavailable")
                                     val normalized = WebModeLayout.normalizeOcrText(out.chapter.text)
                                     if (normalized.isNotBlank()) {
                                         val hash = java.security.MessageDigest.getInstance("SHA-256")
@@ -7319,6 +7350,7 @@ return t.length>=40?'TXT:'+t:'';
                             if (realtimeViewport) handler.postDelayed({ pumpRealtimeAheadTranslation() }, 350L)
                         }
                         is WebModeOutcome.Failure -> {
+                            if (realtimeViewport) pauseRealtimeVisible("visible_empty")
                             // Even when OCR/network fails, the clean screenshot fingerprint may already
                             // have proved that this canvas now shows a different manga page.
                             clearCanvasTransitionOverlay(novelWv.url.orEmpty())
