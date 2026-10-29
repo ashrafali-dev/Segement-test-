@@ -2617,6 +2617,7 @@ internal class WebModeExtractor(
             lineCount = blocks.size
             if (blocks.isEmpty()) {
                 if (scanMode) OcrDiag.log("DETECT_MODE", "mode=scan ran=true masks=0 source=no_ocr_blocks bboxPad=5")
+                if (req.visibleOnly) OcrDiag.log("DETECT_REALTIME", "ran=false bubbles=0 ms=0 reason=no_ocr_blocks fallback=text_bbox")
                 return
             }
             val rects = blocks.map { WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
@@ -2653,6 +2654,7 @@ internal class WebModeExtractor(
             // Box of the LETTERING of a bubble (not its outline): the seed from which the bubble shape is rebuilt.
             val refinedSeed = arrayOfNulls<IntArray>(blocks.size)
             val consumed = BooleanArray(blocks.size)
+            var realtimePixelBubbleTargets = 0
             // Cache interiors so multi-line text in the same balloon triggers only one retry.
             val triedInteriors = HashSet<String>()
 
@@ -2857,6 +2859,7 @@ internal class WebModeExtractor(
                         val coverArea = (cR - cL).toLong() * (cB - cT)
                         val textArea = (xr - xl).toLong() * (xb - xt)
                         if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
+                            if (req.visibleOnly) realtimePixelBubbleTargets++
                             tL = xl; tT = xt; tR = xr; tB = xb
                             // The whole interior (not just the lettering box) is what gets painted over when the picture
                             // itself is not cleaned.
@@ -2958,6 +2961,13 @@ internal class WebModeExtractor(
                     "DETECT_MODE",
                     "mode=scan ran=true masks=$emitted source=${if (dets?.any { it.seg != null } == true) "model+pixel" else "pixel_bbox_fallback"} " +
                         "bboxPad=5 modelMasks=${dets?.count { it.seg != null } ?: 0}"
+                )
+            } else if (req.visibleOnly) {
+                OcrDiag.log(
+                    "DETECT_REALTIME",
+                    "ran=${realtimePixelBubbleTargets > 0} bubbles=$realtimePixelBubbleTargets " +
+                        "ms=$fitMs source=${if (realtimePixelBubbleTargets > 0) "pixel" else "text_bbox"} " +
+                        "reason=${if (realtimePixelBubbleTargets > 0) "pixel_bubble_fit" else "no_pixel_bubble_fit"}"
                 )
             }
             } finally {
