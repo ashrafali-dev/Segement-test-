@@ -141,12 +141,14 @@ internal object WebModeTextRemover {
             val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
             val aiModelReady = WebModeInpainter.isReady(context)
             val aiCoolingDown = WebModeInpainter.tooSlow
+            val aiCircuitOpen = WebModeInpainter.inferenceCircuitOpen
             val aiLoadedAtStart = WebModeInpainter.isLoaded()
             val miganStatusReason = when {
                 !aiEnabledPref -> "disabled"
                 !allowAi -> "not_allowed"
                 !aiModelReady -> "file_missing"
                 aiCoolingDown -> "cooldown"
+                aiCircuitOpen -> "inference_circuit_open"
                 aiLoadedAtStart -> "ready"
                 realtimeMode -> "not_loaded_realtime"
                 prefetchMode -> "not_loaded_prefetch_warming"
@@ -157,7 +159,7 @@ internal object WebModeTextRemover {
                 "loaded=$aiLoadedAtStart reason=$miganStatusReason mode=${when { prefetchMode -> "prefetch"; realtimeMode -> "realtime"; else -> "scan" }}"
             )
             // Scan and prefetch may load lazily for a hard bubble. Realtime remains non-blocking if not loaded.
-            val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown &&
+            val aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown && !aiCircuitOpen &&
                 (!realtimeMode || aiLoadedAtStart) && (prefetchMode || aiLoadedAtStart)
             if (!aiWanted) {
                 OcrDiag.log("CLEAN", "migan_unavailable reason=$miganStatusReason tier3_skipped")
@@ -606,6 +608,8 @@ internal object WebModeTextRemover {
                     )
                     if (largeMask && maskArea > MIGAN_MAX_MASK_AREA) {
                         OcrDiag.log("CLEAN", "migan_skipped reason=mask_too_large area=$maskArea")
+                    } else if (rw > 512 || rh > 512) {
+                        OcrDiag.log("CLEAN", "migan_skipped reason=input_dim_too_large dims=${rw}x${rh} area=$maskArea")
                     } else {
                     val realtimeTimeExpired = realtimeMode &&
                         (android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs >= 8_000L)
@@ -616,6 +620,7 @@ internal object WebModeTextRemover {
                             !aiEnabledPref -> "disabled"
                             !allowAi -> "not_allowed"
                             !aiModelReady -> "file_missing"
+                            aiCircuitOpen -> "inference_circuit_open"
                             aiCoolingDown -> "cooldown"
                             aiBudget <= 0 -> if (prefetchMode) "panel_budget_exhausted" else "realtime_budget"
                             realtimeTimeExpired -> "realtime_time_budget"
@@ -647,7 +652,7 @@ internal object WebModeTextRemover {
                             // MI-GAN's context must include accepted Tier-2 pixels, never resurrect original text.
                             bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
                             val aiFill = try {
-                                WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask)
+                                WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask, bubbleNo = bubbleNo)
                             } catch (_: Throwable) { null }
                             aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
                             aiTotalMs += aiLastMs
