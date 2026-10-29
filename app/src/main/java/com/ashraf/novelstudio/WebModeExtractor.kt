@@ -2126,7 +2126,7 @@ internal class WebModeExtractor(
             cropFallback: Boolean = false, forceFresh: Boolean = false,
             panelNo: Int = 0, timingStartedAtMs: Long = 0L, prefilterMs: Long = 0L
         ): PanelOcr? {
-            OcrPanelTiming.begin(panelNo, timingStartedAtMs, prefilterMs)
+            OcrPanelTiming.begin(panelNo, timingStartedAtMs, prefilterMs, hostOf(startUrl))
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             val w = bounds.outWidth
