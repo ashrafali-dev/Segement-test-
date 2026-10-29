@@ -1180,7 +1180,7 @@ class MainActivity : Activity() {
         if (reason == "scroll") {
             OcrDiag.log(
                 "OVERLAY_CLEAR",
-                "reason=scroll hadOverlay=$realtimeOverlayPlacedCount > 0 panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
+                "reason=scroll hadOverlay=${realtimeOverlayPlacedCount > 0} panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
             )
         }
         try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
