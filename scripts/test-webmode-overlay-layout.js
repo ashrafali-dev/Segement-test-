@@ -88,6 +88,7 @@ assert.ok(extractor.includes("keepWebtoonOverlay") &&
   "only the Webtoon screenshot fallback keeps its current overlay visible during capture");
 assert.ok(layout.includes("val overlayCv: List<Float> = emptyList()") &&
           layout.includes('put("ocv"') &&
+          layout.includes('optJSONArray("ocv")') &&
           writer.includes("coverCv=it.cv") && writer.includes("coverCv.concat(it.ocv)") &&
           writer.includes('put("ocv", ja)'),
   "cover-only glyph-edge geometry must persist separately from the cleaner mask and remain isolated from Japanese cleanup");
