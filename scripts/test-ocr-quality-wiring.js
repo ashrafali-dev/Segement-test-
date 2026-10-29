@@ -41,6 +41,28 @@ assert.ok(cleaner.includes('medianRingColor(') && cleaner.includes('fillRoundedR
           cleaner.includes('openCvInpaint(') && cleaner.includes('CLEAN_TIER') &&
           cleaner.includes('policy=tiered') && cleaner.includes('residual_max='),
   'cleaner must contain all tiers and residual diagnostics');
+assert.ok(cleaner.includes('MAX_CLEAN_W = 1200') &&
+          cleaner.includes('MAX_CLEAN_H = 2400') &&
+          cleaner.includes('CLEAN_GUARD') &&
+          cleaner.includes('CLEAN_DOWNSCALE') &&
+          cleaner.includes('inSampleSize = decodeSample') &&
+          !cleaner.includes('image_dimensions_out_of_bounds'),
+  'large panels must be sampled/downscaled inside safe bounds rather than rejected by the old dimensions guard');
+assert.ok(cleaner.includes('BBOX_DILATION_PX = 5'),
+  'cleaning masks must start from OCR boxes padded by five pixels');
+assert.ok(extractor.includes('SLICE_STRATEGY') &&
+          extractor.includes('decision=whole_panel') &&
+          extractor.includes('decision=fallback_slice') &&
+          extractor.includes('fallbackHeight = (h * 0.60f)') &&
+          extractor.includes('PANEL_BITMAP'),
+  'scanning must try whole-panel OCR first, fall back to at most two overlapping slices, and log bitmap dimensions/source');
+assert.ok(extractor.includes('val scanMode = !req.visibleOnly && req.ahead <= 0') &&
+          extractor.includes('val realtimePriority = !scanMode') &&
+          extractor.includes('DETECT_MODE') &&
+          extractor.includes('source=pixel_bbox_fallback bboxPad=5') &&
+          extractor.includes('!fastMode && !remoteDet'),
+  'scanning detection must use pixel-based bbox fallback independently of fast Lens dispatch without extra per-bubble Lens reads');
+
 assert.ok(!cleaner.includes('disallowed-by-fast-path'),
   'legacy fast-path AI-deny policy must be removed');
 assert.ok(extractor.includes('allowAi = true') &&
