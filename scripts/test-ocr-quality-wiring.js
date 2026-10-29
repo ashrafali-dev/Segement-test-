@@ -254,22 +254,23 @@ assert.ok(writer.includes('PLACE_UNCLEANED') &&
           writer.includes('placed=true bgAlpha=1.0 script=$scriptLabel') &&
           writer.includes("if(!it.cl)cover.style.opacity='1'"),
   'nonempty translations must have an opaque fallback cover even when pixel cleaning did not erase the source text');
-assert.ok(mainActivity.includes('verifyRealtimeOverlay(panelTop, matched.size, livePanelSignature)') &&
+assert.ok(mainActivity.includes('novelWv.evaluateJavascript(wmScript) { r ->') &&
           mainActivity.includes('completeRealtimeVisiblePlacement(matched.size, true, "overlay_success")') &&
-          mainActivity.includes('if (visible)') &&
+          !mainActivity.includes('verifyRealtimeOverlay') &&
           mainActivity.includes('markRealtimeVisiblePlacing("visible_ocr_complete")') &&
           mainActivity.includes('AHEAD_QUEUE_BLOCKED') &&
           mainActivity.includes('queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready, force = true)') &&
           mainActivity.includes('coerceIn(0, 1)'),
-  'realtime advances to one-panel prefetch only after verifyRealtimeOverlay confirms a nonempty visible overlay');
+  'realtime uses the existing renderer response and only starts prefetch after successful nonempty placement');
 
 assert.ok(mainActivity.includes('window.__nsRtVisibleSig=sig') &&
           mainActivity.includes('window.__nsRtVisibleSig=textSig') &&
-          mainActivity.includes('guardedRealtimePlacementScript') &&
-          mainActivity.includes('OVERLAY_SHOW') && mainActivity.includes('OVERLAY_KEEP') &&
-          mainActivity.includes('OVERLAY_CLEAR') && mainActivity.includes('OVERLAY_ATTACHED') &&
-          mainActivity.includes('OVERLAY_VISIBLE'),
-  'realtime overlay must be guarded by the latest viewport signature, persist across state transitions and verify attachment');
+          !mainActivity.includes('guardedRealtimePlacementScript') &&
+          !mainActivity.includes('OVERLAY_ATTACHED') &&
+          !mainActivity.includes('OVERLAY_VISIBLE') &&
+          mainActivity.includes('OVERLAY_PERSIST') &&
+          mainActivity.includes('OVERLAY_CLEAR'),
+  'realtime overlay must use direct renderer evaluation, persist across state transitions and clear without new visibility tracking');
 assert.ok(mainActivity.includes('PLACE_QUEUE_CLEAR') && mainActivity.includes('PLACE_REQUEST') &&
           mainActivity.includes('PLACE_ACCEPT') && mainActivity.includes('PLACE_REJECT') &&
           mainActivity.includes('panelSignature != realtimeCurrentSignature') &&
