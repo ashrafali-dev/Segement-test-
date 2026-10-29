@@ -8574,6 +8574,7 @@ return t.length>=40?'TXT:'+t:'';
         running = ch
         progress = 0
         val tok = ++runToken
+        scanChapterStates.keys.removeAll { it != tok }
         updateProgressUi()
         waitIdle(tok, ch, 0)
     }
@@ -9033,7 +9034,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     return@evaluateJavascript
                 }
                 chapterSummary = responseParts.summary.ifBlank { scanState.summaries.lastOrNull().orEmpty() }
-                rawTranslation = scanState.context.assembleMarkedTranslation(scanState.translations, chapterSummary)
+                rawTranslation = scanState.context.assembleMarkedTranslation(scanState.translations)
                 val translatedCount = scanState.context.entries.count { !scanState.translations[it.markerNumber].isNullOrBlank() }
                 val outputChars = scanState.translations.values.sumOf { it.length }
                 OcrDiag.log(
@@ -9199,6 +9200,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 else shown != null && keyOf(shown) == keyOf(ch)
             if (shown != null && sameTarget) {
                 applyTranslation(shown, rawTranslation, true)
+                if (structuredScan && chapterSummary.isNotBlank()) showChapterSummaryDialog(shown, chapterSummary)
                 // Real-time page scans translate visible bubbles in sequence; don't prefetch a whole
                 // chapter into the same DeepSeek chat session.
                 if (!livePanelBatch) schedulePrefetch(shown)
@@ -9219,6 +9221,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     // on failure: stop the queue, keep the chapter on the clipboard so you can do it by hand
     private fun failJob(tok: Int, ch: Chapter, msg: String, fallback: Boolean = false, autoRetry: Boolean = false) {
         if (tok != runToken) return
+        scanChapterStates.remove(tok)
         NovelStudioAnalytics.track(
             this, "translation_failed",
             mode = analyticsReadMode(),
