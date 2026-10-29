@@ -1785,11 +1785,6 @@ class MainActivity : Activity() {
         updatePill()
     }
 
-    // Bubbles read ahead but not yet sent because fewer than a full chunk were available.        hasTr = true
-        shownTranslated = true
-        updatePill()
-    }
-
     // Bubbles read ahead but not yet sent because fewer than a full chunk were available. They wait for
     // the next OCR round to fill the chunk, and are sent anyway after a short delay (never 1-line requests
     // just because one round found a single new bubble).
@@ -10147,7 +10142,6 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     toast("⚠️ Could not show the translation on this page; it is saved in the library")
                 }
                 if (livePanelBatch) restoreChapterAfterBubbleJob(ch.url)
-                if (livePanelBatch && !deferredLiveRestore) restoreChapterAfterBubbleJob(ch.url)
             }
             return
         }
