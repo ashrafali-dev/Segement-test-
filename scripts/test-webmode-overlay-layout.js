@@ -70,7 +70,9 @@ assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canv
 const forceInfoBlock = extractor.slice(forceInfoAt, forceInfoEnd);
 assert.ok(forceInfoBlock.includes("cands(sc,true,true,true)"), "manual screen OCR must retain actual canvas bounds");
 assert.ok(!forceInfoBlock.includes("c=[]"), "manual screen OCR must not scan unrelated whole-WebView UI text");
-assert.ok(mainActivity.includes("function sliceTag(r,iw,ih)") &&
+assert.ok(mainActivity.includes("var webtoonReader=") &&
+          mainActivity.includes("function sliceTag(r,iw,ih)") &&
+          mainActivity.includes("if(!webtoonReader||!(r.height>vh*1.15&&ih>iw*1.25))return ''") &&
           mainActivity.includes("Math.floor(Math.max(0,-r.top)/Math.max(1,vh*.55))") &&
           mainActivity.includes("readerFrameArea") && mainActivity.includes("@slice="),
   "a tall Webtoon image or large cross-origin reader frame must produce a new signature when its visible slice changes");
@@ -78,7 +80,7 @@ assert.ok(mainActivity.includes("isSameTallImageSlice") &&
           mainActivity.includes('if (!sameTallImageSlice) clearRealtimeOverlay("scroll")') &&
           mainActivity.includes("OVERLAY_KEEP"),
   "changing slices of the same long image must not clear its overlay before the replacement is ready");
-assert.ok(extractor.includes("val maxDriftRecaptures = if (req.visibleOnly) 3 else 1") &&
+assert.ok(extractor.includes("val maxDriftRecaptures = if (req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())) 3 else 1") &&
           extractor.includes("driftRetries < maxDriftRecaptures") &&
           extractor.includes("recapture $driftRetries/$maxDriftRecaptures"),
   "visible-only screenshot OCR must retry scroll drift instead of abandoning a new panel after one retry");
