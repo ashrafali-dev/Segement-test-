@@ -1584,9 +1584,9 @@ internal class WebModeExtractor(
                         candidates.optJSONObject(i)?.optString("s").orEmpty().startsWith("ns-canvas:")
                     }
                 } == true
-                // Always take the screenshot WITHOUT our own translation overlay, otherwise the Bengali text drawn on the
-                // page is read again as if it were lettering (and for a non-Bengali target it is even "translated").
-                // Webtoon visible-capture OCR rejects the Bengali overlay as a script mismatch.
+                // Normally hide our own overlay while capturing so it cannot be OCRed as source lettering.
+                // Webtoon visible-capture has a separate cover-only layer and rejects Bengali text as a script mismatch;
+                // leaving it visible on that route prevents the current translation from flashing away.
                 // Keep the rendered text visible on that route to prevent a noticeable disappear/reappear flash.
                 val keepWebtoonOverlay = req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())
                 val hideOverlayForShot = req.visibleOnly && !keepWebtoonOverlay
@@ -1649,7 +1649,7 @@ internal class WebModeExtractor(
                                 bmp.recycle()
                                 continue
                             }
-                            OcrDiag.log("FORCE_ABORT", "reason=max_attempts movedBy=${String.format(java.util.Locale.US, "%.1f", movedBy)} recaptures=$driftRetries")
+                            OcrDiag.log("FORCE_ABORT", "reason=max_attempts movedBy=${String.format(java.util.Locale.US, "%.1f", movedBy)} recaptures=$driftRetries/$maxDriftRecaptures")
                             bmp.recycle()
                             forceFail(WebModeError.TIMEOUT, "FORCE_ABORT reason=max_attempts")
                             return
