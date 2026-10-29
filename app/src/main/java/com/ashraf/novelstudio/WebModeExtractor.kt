@@ -2152,9 +2152,10 @@ internal class WebModeExtractor(
                 OcrPanelTiming.finish()
                 return null
             }
-            // Quality must not depend on whether the panel arrived via prefetch or visible scanning.
-            // The engine tiles/enlarges within its own pixel budget; retain native small-letter detail.
-            val sample = when { w > 5000 -> 4; w > 2400 -> 2; else -> 1 }
+            // Scan the full panel once whenever practical. Extremely large/stitched images are sampled
+            // before decode so the whole-panel attempt does not create a multi-megabyte temporary bitmap.
+            val maxDimension = maxOf(w, h)
+            val sample = when { maxDimension > 9600 -> 8; maxDimension > 4800 -> 4; maxDimension > 2400 -> 2; else -> 1 }
             val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
             val texts = ArrayList<String>()
             val bubbles = ArrayList<WmBubble>()
@@ -2245,7 +2246,62 @@ internal class WebModeExtractor(
                 } finally { cropped.recycle() }
                 return finishResult()
             }
-            if (h <= WebModeLogic.SLICE_H) {
+            val scanMode = !req.visibleOnly && req.ahead <= 0
+            if (scanMode) {
+                // Trusted scanning mode tries the complete panel first so one OCR response preserves spatial
+                // and sentence context. Only a genuinely empty whole-panel response is split, and never into
+                // more than two overlapping vertical strips (the hard cap is therefore <=3 Lens calls).
+                val whole = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
+                try {
+                    OcrDiag.log("PANEL_BITMAP", "w=${whole.width} h=${whole.height} source=${src.take(100)} kind=whole_panel fullW=$w fullH=$h sample=$sample")
+                    readSlice(
+                        whole, st, 0, sample, w, h, src, texts, bubbles,
+                        firstSlice = true, lastSlice = true, fastMode = false, forceFresh = forceFresh
+                    )
+                } finally {
+                    whole.recycle()
+                }
+                if (texts.isNotEmpty() && bubbles.isNotEmpty()) {
+                    OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel")
+                    return finishResult()
+                }
+                OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel result=empty")
+                @Suppress("DEPRECATION")
+                val region = try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null }
+                if (region == null) {
+                    OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=1 decision=whole_panel_fallback_unavailable")
+                    return finishResult()
+                }
+                try {
+                    val fallbackHeight = (h * 0.60f).toInt().coerceIn(1, h)
+                    val startSecond = (h - fallbackHeight).coerceAtLeast(0)
+                    val fallbackSlices = listOf(0 to fallbackHeight, startSecond to h).distinct()
+                        .filter { it.second > it.first }
+                    OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=${fallbackSlices.size} decision=fallback_slice")
+                    for ((idx, span) in fallbackSlices.withIndex()) {
+                        if (!alive()) break
+                        val (sliceTop, sliceBottom) = span
+                        val bmp = try { region.decodeRegion(Rect(0, sliceTop, w, sliceBottom), opts) }
+                            catch (_: Throwable) { null } ?: continue
+                        try {
+                            OcrDiag.log(
+                                "PANEL_BITMAP",
+                                "w=${bmp.width} h=${bmp.height} source=${src.take(100)} kind=fallback_slice " +
+                                    "originY=$sliceTop fullW=$w fullH=$h sample=$sample"
+                            )
+                            readSlice(
+                                bmp, st, sliceTop, sample, w, h, src, texts, bubbles,
+                                firstSlice = idx == 0, lastSlice = idx == fallbackSlices.lastIndex,
+                                fastMode = false, forceFresh = forceFresh
+                            )
+                        } finally {
+                            bmp.recycle()
+                        }
+                    }
+                } finally {
+                    region.recycle()
+                }
+            } else if (h <= WebModeLogic.SLICE_H) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
                 try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh) } finally { bmp.recycle() }
             } else {
@@ -2323,6 +2379,10 @@ internal class WebModeExtractor(
             preRecognized: OcrResult? = null, forceFresh: Boolean = false
         ) {
             val tSlice = android.os.SystemClock.elapsedRealtime()
+            OcrDiag.log(
+                "PANEL_BITMAP",
+                "w=${bmp.width} h=${bmp.height} source=${src.take(100)} originY=$y0 fullW=$fullW fullH=$fullH sample=$sample"
+            )
             val outBefore = out.size
             var groupMs = 0L
             var ocrMs = 0L
@@ -2901,7 +2961,7 @@ internal class WebModeExtractor(
                 // This OCR runs on ns-webmode. Job.startUrl was captured on the UI thread, so never read WebView.url here.
                 val currentHost = hostOf(startUrl).lowercase().removePrefix("www.")
                 val canvasReader = currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")
-                if (canvasReader || !Prefs.bool(wv.context, "lensAudit", false) || core.blocks.isEmpty() && fastMode) return core
+                if (scanMode || canvasReader || !Prefs.bool(wv.context, "lensAudit", false) || core.blocks.isEmpty() && fastMode) return core
                 return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
                 catch (_: Exception) { core } catch (_: OutOfMemoryError) { core }
             }
