@@ -256,9 +256,18 @@ internal class WebModeExtractor(
             // the existing Lens OCR on those detected screen regions instead of retrying chapter text.
             // processForce() does not scroll when visibleOnly=true, so this remains safe for realtime mode.
             val visibleNoImages = req.visibleOnly && e == WebModeError.NO_IMAGES
-            // Images downloaded fine but held no readable text (ads / canvas pages): read the screen instead.
+            // A one-panel visible read with no recognized blocks is usually a tiny dialogue panel, not a signal
+            // to start an expensive screenshot re-scan while the page may be moving.
             val visibleEmpty = req.visibleOnly && e == WebModeError.OCR_EMPTY
-            OcrDiag.log("FAIL", "${e.name}: $msg | willFallBack=${!fellBackToForce && (visibleNoImages || visibleEmpty || e == WebModeError.IMAGES_NOT_LOADED || e == WebModeError.DECODE_FAILED)} | ${diag.summary()}")
+            val tinyVisibleEmpty = visibleEmpty && diag.decoded in 1..1 && diag.chars == 0 && !req.forceScreenOcr
+            OcrDiag.log("FAIL", "${e.name}: $msg | willFallBack=${!fellBackToForce && !tinyVisibleEmpty && (visibleNoImages || visibleEmpty || e == WebModeError.IMAGES_NOT_LOADED || e == WebModeError.DECODE_FAILED)} | ${diag.summary()}")
+            if (tinyVisibleEmpty) {
+                OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks<3 decoded=${diag.decoded} chars=${diag.chars}")
+                diag.error = e
+                OcrDiag.jobDone(diag.host, diag.summary(), false, how, elapsed(), "FORCE_SKIP reason=tiny_panel expectedBlocks<3")
+                onMain { req.onDone(WebModeOutcome.Failure(e, msg, diag)) }
+                return
+            }
             if (!fellBackToForce && req.ahead <= 0 && req.forceOcrSrc.isNullOrBlank() &&
                 (visibleNoImages || visibleEmpty || e == WebModeError.IMAGES_NOT_LOADED || e == WebModeError.DECODE_FAILED)) {
                 // Full-chapter Web Mode scan too: when image downloads fail, read what WebView draws.
@@ -1441,6 +1450,34 @@ internal class WebModeExtractor(
             // fallback leaves the reader DOM untouched to avoid on-screen flicker.
             if (!req.visibleOnly) evalWait(wrap(JS_FORCE_HIDE)) { null }
             if (!req.visibleOnly) evalWait(wrap(LIB + JS_FORCE_TOP)) { null }
+
+            // Avoid screenshots during active scrolling: require three consecutive 100 ms probes with dy < 5 px.
+            val settleDeadline = SystemClock.elapsedRealtime() + 1_500L
+            var previousY = Double.NaN
+            var lastDy = Double.NaN
+            var stableSamples = 0
+            while (alive() && stableSamples < 3 && SystemClock.elapsedRealtime() < settleDeadline) {
+                val remainingMs = (settleDeadline - SystemClock.elapsedRealtime()).coerceAtLeast(1L)
+                val probe = evalWait(
+                    wrap(LIB + JS_SCROLL_PROBE),
+                    timeoutMs = minOf(180L, remainingMs)
+                ) { parseJson(it) }
+                val y = probe?.optDouble("y", Double.NaN) ?: Double.NaN
+                if (y.isFinite()) {
+                    if (previousY.isFinite()) {
+                        lastDy = Math.abs(y - previousY)
+                        stableSamples = if (lastDy < 5.0) stableSamples + 1 else 0
+                    }
+                    previousY = y
+                }
+                if (stableSamples < 3) {
+                    try { Thread.sleep(100L) } catch (_: InterruptedException) { return }
+                }
+            }
+            val scrollSettled = stableSamples >= 3
+            val dyLog = if (lastDy.isFinite()) String.format(java.util.Locale.US, "%.1f", lastDy) else "unknown"
+            OcrDiag.log("FORCE_CAPTURE", "unstable=${!scrollSettled} dy=$dyLog stableSamples=$stableSamples timeoutMs=1500")
+
             var stable = 0
             var driftRetries = 0
             var steps = 0
@@ -1499,7 +1536,7 @@ internal class WebModeExtractor(
                 // retries). If the page moved in between, every bubble fraction would be computed against the wrong
                 // image offset and the translation would land on the wrong bubble. Re-measure (one tiny script) and
                 // take the screenshot again instead of placing text from a shifted frame.
-                if (bmp != null && req.visibleOnly && info != null && info.has("sy") && driftRetries < 2) {
+                if (bmp != null && req.visibleOnly && info != null && info.has("sy")) {
                     val probe = evalWait(wrap(LIB + JS_SCROLL_PROBE)) { parseJson(it) }
                     // optDouble() returns NaN for a missing key, and NaN > x is always false — so a reader that
                     // does not report scroll data "detected drift" forever and re-captured in a loop (the log
@@ -1509,10 +1546,17 @@ internal class WebModeExtractor(
                         val before = info.optDouble("sy", Double.NaN)
                         val after = probe.optDouble("y", Double.NaN)
                         if (before.isFinite() && after.isFinite() && Math.abs(after - before) > 1.0) {
-                            driftRetries++
-                            OcrDiag.log("FORCE_STEP", "page moved during capture (dy=${after - before}) -> recapture $driftRetries/2")
+                            val movedBy = after - before
+                            if (driftRetries < 1) {
+                                driftRetries++
+                                OcrDiag.log("FORCE_STEP", "page moved during capture (dy=$movedBy) -> recapture $driftRetries/1")
+                                bmp.recycle()
+                                continue
+                            }
+                            OcrDiag.log("FORCE_ABORT", "reason=max_attempts movedBy=${String.format(java.util.Locale.US, "%.1f", movedBy)} recaptures=$driftRetries")
                             bmp.recycle()
-                            continue
+                            forceFail(WebModeError.TIMEOUT, "FORCE_ABORT reason=max_attempts")
+                            return
                         }
                     }
                 }
