@@ -149,7 +149,6 @@ internal object WebModeTextRemover {
                 WebModeInpainter.warmUpAsync(context)
             }
             val aiStartMs = android.os.SystemClock.elapsedRealtime()
-            val aiStartMs = android.os.SystemClock.elapsedRealtime()
             var aiLastMs = 0L
             // Every bubble whose lettering was really erased (flat AND artwork). The writer only drops its
             // opaque cover box for bubbles in this set; any other bubble keeps the safe box fallback.
