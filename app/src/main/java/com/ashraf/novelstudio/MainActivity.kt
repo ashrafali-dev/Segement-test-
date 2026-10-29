@@ -1189,6 +1189,71 @@ class MainActivity : Activity() {
         realtimeOverlayPanelTop = 0
     }
 
+    private fun showRealtimeTranslatingPill(signature: String) {
+        if (signature.isBlank()) return
+        translatingPillSignature = signature
+        val panelTop = panelTopFromSignature(signature)
+        OcrDiag.log("TRANSLATING_UI", "show=true panelTop=$panelTop")
+        val script = """
+            (function(){
+              var id='__ns_rt_translating',e=document.getElementById(id);
+              if(!e){e=document.createElement('div');e.id=id;e.setAttribute('data-ns-ui','1');
+                e.style.cssText='position:fixed;top:8px;right:8px;z-index:2147483647;pointer-events:none;' +
+                  'padding:5px 9px;border-radius:14px;background:rgba(28,30,44,.82);color:#fff;' +
+                  'font:500 12px sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.25);opacity:.92;transition:opacity .15s;';
+                e.textContent='অনুবাদ হচ্ছে…';(document.body||document.documentElement).appendChild(e);
+              }
+              e.style.display='block';e.style.opacity='.92';return 'shown';
+            })()
+        """.trimIndent()
+        try { novelWv.evaluateJavascript(script, null) } catch (_: Throwable) {}
+    }
+
+    private fun hideRealtimeTranslatingPill(reason: String) {
+        if (translatingPillSignature.isBlank()) return
+        val signature = translatingPillSignature
+        translatingPillSignature = ""
+        OcrDiag.log("TRANSLATING_UI", "hide=true reason=$reason panelTop=${panelTopFromSignature(signature)}")
+        val script = "(function(){var e=document.getElementById('__ns_rt_translating');if(e){e.style.opacity='0';e.style.display='none';}return 'hidden';})()"
+        try { novelWv.evaluateJavascript(script, null) } catch (_: Throwable) {}
+    }
+
+    private fun verifyRealtimeOverlay(panelTop: Int, placed: Int, signature: String) {
+        val script = """
+            (function(){
+              var w=document.getElementById('__ns_wm_overlay');
+              var bs=w?w.querySelectorAll('.__ns_b'):null;
+              var b=bs&&bs.length?bs[0]:null,r=b?b.getBoundingClientRect():null;
+              var st=w?getComputedStyle(w):null;
+              var attached=!!(w&&w.parentNode&&document.contains(w));
+              var visible=!!(attached&&b&&r&&r.width>0&&r.height>0&&b.style.display!=='none'&&
+                st&&st.display!=='none'&&st.visibility!=='hidden'&&parseFloat(st.opacity||'1')>0);
+              var parent=w&&w.parentNode?w.parentNode.nodeName.toLowerCase():'none';
+              return [attached?'1':'0',visible?'1':'0',Math.round(document.documentElement.clientWidth||innerWidth),
+                Math.round(innerHeight||0),parent,bs?bs.length:0,st?parseFloat(st.opacity||'1'):0].join('|');
+            })()
+        """.trimIndent()
+        novelWv.evaluateJavascript(script) { raw ->
+            if (signature != realtimeCurrentSignature) return@evaluateJavascript
+            val p = decode(raw).trim().split("|")
+            if (p.size < 7) return@evaluateJavascript
+            val attached = p[0] == "1"
+            val visible = p[1] == "1"
+            OcrDiag.log(
+                "OVERLAY_ATTACHED",
+                "to=WebView parent=view actualParent=${p[4]} width=${p[2]} height=${p[3]} bubbles=${p[5]}"
+            )
+            OcrDiag.log("OVERLAY_VISIBLE", "alpha=${p[6]} translation=$visible")
+            if (attached && visible) {
+                realtimeOverlayActive = true
+                realtimeOverlaySignature = signature
+                realtimeOverlayPlacedCount = placed
+                realtimeOverlayPanelTop = panelTop
+                OcrDiag.log("OVERLAY_SHOW", "panelTop=$panelTop placed=$placed")
+            }
+        }
+    }
+
     private fun clearRealtimePlacementQueue(nextSignature: String) {
         var dropped = 0
         val pending = rtVisibleOcrBatch
