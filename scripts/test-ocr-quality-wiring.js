@@ -254,12 +254,14 @@ assert.ok(writer.includes('PLACE_UNCLEANED') &&
           writer.includes('placed=true bgAlpha=1.0 script=$scriptLabel') &&
           writer.includes("if(!it.cl)cover.style.opacity='1'"),
   'nonempty translations must have an opaque fallback cover even when pixel cleaning did not erase the source text');
-assert.ok(mainActivity.includes('completeRealtimeVisiblePlacement(matched.size, matched.isNotEmpty(), "overlay_success")') &&
+assert.ok(mainActivity.includes('verifyRealtimeOverlay(panelTop, matched.size, livePanelSignature)') &&
+          mainActivity.includes('completeRealtimeVisiblePlacement(matched.size, true, "overlay_success")') &&
+          mainActivity.includes('if (visible)') &&
           mainActivity.includes('markRealtimeVisiblePlacing("visible_ocr_complete")') &&
           mainActivity.includes('AHEAD_QUEUE_BLOCKED') &&
           mainActivity.includes('queueRealtimeAheadTranslations(novelWv.url.orEmpty(), ready, force = true)') &&
           mainActivity.includes('coerceIn(0, 1)'),
-  'realtime advances to one-panel prefetch only after a nonempty visible overlay has been confirmed');
+  'realtime advances to one-panel prefetch only after verifyRealtimeOverlay confirms a nonempty visible overlay');
 
 assert.ok(mainActivity.includes('window.__nsRtVisibleSig=sig') &&
           mainActivity.includes('window.__nsRtVisibleSig=textSig') &&
