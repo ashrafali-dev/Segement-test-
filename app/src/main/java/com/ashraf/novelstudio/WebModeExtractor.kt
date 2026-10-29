@@ -2331,6 +2331,9 @@ internal class WebModeExtractor(
                         )
                         val cleanMs = SystemClock.elapsedRealtime() - tClean
                         OcrPanelTiming.addClean(cleanMs)
+                        if (!cleaned && bubbles.isNotEmpty()) {
+                            OcrDiag.log("CLEAN_SKIP", "reason=cleaner_returned_false bubbles=${bubbles.size} source=${src.take(80)}")
+                        }
                         val residual = String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)
                         OcrDiag.log("CLEAN", "ms=$cleanMs cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                         OcrDiag.log("CLEAN", "bubbles=${bubbles.size} cleaned=$cleaned residual_max=$residual")
