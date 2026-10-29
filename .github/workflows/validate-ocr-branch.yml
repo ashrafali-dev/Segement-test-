@@ -9,6 +9,9 @@ on:
       - fix/ocr-placement-quality-and-adaptive-bg-20261029
       - fix/webtoon-bubble-mask-cleanup-20261029
       - fix/webtoon-bubble-ocr-stability-20261030
+  pull_request:
+    branches:
+      - fix/webtoon-bubble-mask-cleanup-20261029
   workflow_dispatch:
 
 permissions:
