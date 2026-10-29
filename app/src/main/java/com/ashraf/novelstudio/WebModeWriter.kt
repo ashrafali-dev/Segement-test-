@@ -1300,11 +1300,17 @@ internal object WebModeWriter {
                 !WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))) {
                 val scriptLabel = WebModeTextRemover.scriptLabelForBubble(b.sourceText, b.src, pageId)
                 val residualForBubble = WebModeTextRemover.residualForSource(b.src)
-                if (residualForBubble == null || residualForBubble > 5f) {
+                val cleanStatus = WebModeTextRemover.cleanStatusForSource(b.src)
+                if (cleanStatus == false || residualForBubble == null || residualForBubble > 5f) {
+                    val reason = when {
+                        cleanStatus == false -> "clean_skip_or_failed"
+                        residualForBubble == null -> "clean_skip_or_unmeasured"
+                        else -> "residual_gt_5"
+                    }
                     OcrDiag.log(
                         "PLACE_UNCLEANED",
                         "bubble=${i + 1} residual=${residualForBubble?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
-                            "placed=true bgAlpha=1.0 script=$scriptLabel reason=${if (residualForBubble == null) "clean_skip_or_unmeasured" else "residual_gt_5"}"
+                            "placed=true bgAlpha=1.0 script=$scriptLabel reason=$reason"
                     )
                 }
             }
