@@ -17,6 +17,13 @@ import kotlin.math.min
  * are rejected so the caller can keep its existing safer fallback.
  */
 internal object WebtoonBubbleMaskKit {
+    // Curved Webtoon balloons need finer bands than the legacy Japanese-manga default.
+    internal const val SHAPE_BANDS = 96
+    internal const val DEFAULT_SHAPE_BANDS = 28
+
+    internal fun shapeBandLimit(pageUrl: String): Int =
+        if (shouldHandle(pageUrl)) SHAPE_BANDS else DEFAULT_SHAPE_BANDS
+
     internal data class FillResult(
         val accepted: Boolean,
         val reason: String,
