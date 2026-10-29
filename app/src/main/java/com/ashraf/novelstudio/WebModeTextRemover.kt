@@ -560,6 +560,24 @@ internal object WebModeTextRemover {
                 val bboxArea = innerArea.coerceAtLeast(1L)
                 val scriptLabel = scriptLabelForBubble(bubble.sourceText, sourceUrl, pageUrl)
                 val maskPct = maskArea.toDouble() * 100.0 / bboxArea.toDouble()
+                var unmaskedCandidatePixels = 0
+                var unmaskedProtectedCandidatePixels = 0
+                for (ry in iy0 until iy1) for (rx in ix0 until ix1) {
+                    val at = ry * rw + rx
+                    if (candidate[at].toInt() == 0 || mask[at].toInt() != 0) continue
+                    unmaskedCandidatePixels++
+                    if (protect[at].toInt() != 0) unmaskedProtectedCandidatePixels++
+                }
+                val unmaskedCandidateThreshold = max(12, maskArea / 100)
+                val unmaskedCandidateLikelyInk = scriptLabel != "JAPANESE" &&
+                    unmaskedCandidatePixels > unmaskedCandidateThreshold
+                OcrDiag.log(
+                    "CLEAN_BBOX_AUDIT",
+                    "bubble=$bubbleNo script=$scriptLabel bboxArea=$bboxArea maskArea=$maskArea " +
+                        "unmaskedCandidatePixels=$unmaskedCandidatePixels " +
+                        "protectedCandidates=$unmaskedProtectedCandidatePixels threshold=$unmaskedCandidateThreshold " +
+                        "scope=bbox residualMetric=mask_only likelyInkOutsideMask=$unmaskedCandidateLikelyInk"
+                )
                 val ghostFixCandidate = scriptLabel != "JAPANESE" && maskPct < 25.0
                 OcrDiag.log(
                     "CLEAN_BRANCH",
@@ -596,22 +614,22 @@ internal object WebModeTextRemover {
                 val tier1Region = region.copyOf()
                 val fillPad = grow.coerceIn(1, 8)
                 var fillArea = 0
+                var bboxFillArea = 0
                 if (ghostFixCandidate || (!soft && !bubble.free)) {
                     val coverPad = if (ghostFixCandidate) 3 else fillPad
                     val coverL = (ix0 - coverPad).coerceAtLeast(0)
                     val coverT = (iy0 - coverPad).coerceAtLeast(0)
                     val coverR = (ix1 + coverPad).coerceAtMost(rw)
-                    val coverB = (iy1 + coverPad).coerceAtMost(rh)
+                    val coverB = (iy1 + fillPad).coerceAtMost(rh)
                     if (ghostFixCandidate) {
                         // For Korean/Chinese/Latin text whose detected ink mask is tiny relative to its
                         // OCR box, cover that dilated bbox. Japanese deliberately retains its old mask-only path.
-                        fillRoundedRect(
+                        bboxFillArea = fillRoundedRect(
                             tier1Region, rw, rh, coverL, coverT, coverR, coverB,
                             paper, 1.0f, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                         )
-                        fillArea = (coverR - coverL).coerceAtLeast(0) * (coverB - coverT).coerceAtLeast(0)
                     } else {
-                        fillRoundedRect(
+                        bboxFillArea = fillRoundedRect(
                             tier1Region, rw, rh, coverL, coverT, coverR, coverB,
                             paper, tier1Alpha, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                         )
@@ -621,7 +639,7 @@ internal object WebModeTextRemover {
                     for (at in mask.indices) {
                         if (mask[at].toInt() == 0) continue
                         tier1Region[at] = blendPixel(region[at], paper, tier1Alpha)
-                        if (!ghostFixCandidate) fillArea++
+                        fillArea++
                     }
                 } else {
                     // On artwork/free lettering use the nearest unmasked ring as a lightweight local fill.
@@ -637,8 +655,10 @@ internal object WebModeTextRemover {
                 val tier1CoversMask = maskArea > 0 && fillArea >= maskArea
                 OcrDiag.log(
                     "CLEAN_FILL",
-                    "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea appliedAlpha=$tier1Alpha " +
-                        "largeMask=$largeMask alpha=$tier1Alpha ringSamplePad=${BBOX_DILATION_PX + ringSamplePad}"
+                    "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea bboxFillArea=$bboxFillArea " +
+                        "fillMode=${if (bboxFillArea > 0) "rounded_bbox_plus_mask" else "mask_only"} " +
+                        "appliedAlpha=$tier1Alpha largeMask=$largeMask " +
+                        "ringSamplePad=${BBOX_DILATION_PX + ringSamplePad}"
                 )
                 OcrDiag.log(
                     "CLEAN_ASSERT",
@@ -648,7 +668,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
                     "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
-                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} scope=mask metric=normalized_0_100"
                 )
                 if (realtimeMode) {
                     // Visible realtime is the fast product: persist Tier 1 only. Do not start OpenCV or MI-GAN
@@ -660,9 +680,16 @@ internal object WebModeTextRemover {
                         "CLEAN_TIER",
                         "bubble=$bubbleNo tier=1 realtime=true ms=${android.os.SystemClock.elapsedRealtime() - tier1Start} alpha=$tier1Alpha"
                     )
-                    if (residual1 <= TIER2_RESIDUAL_THRESHOLD) {
+                    if (residual1 <= TIER2_RESIDUAL_THRESHOLD && !unmaskedCandidateLikelyInk) {
                         totalRemoved += selectedCount
                         erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                    } else if (unmaskedCandidateLikelyInk) {
+                        OcrDiag.log(
+                            "CLEAN_WARN",
+                            "bubble=$bubbleNo reason=ink_candidates_outside_mask " +
+                                "unmaskedCandidatePixels=$unmaskedCandidatePixels threshold=$unmaskedCandidateThreshold " +
+                                "action=retain_opaque_cover"
+                        )
                     }
                     OcrDiag.log(
                         "BUBBLE_CLEAN_VERIFY",
@@ -762,7 +789,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
                     "bubble=$bubbleNo tier=2 residual_max=${String.format(java.util.Locale.US, "%.2f", tier2CandidateResidual)} " +
-                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER3_RESIDUAL_THRESHOLD)} scope=mask metric=normalized_0_100"
                 )
                 var residualFinal = tier2CandidateResidual
                 if (tier2CandidateResidual > residual1 * 1.1f) {
@@ -855,7 +882,7 @@ internal object WebModeTextRemover {
                                 OcrDiag.log(
                                     "CLEAN_RESIDUAL",
                                     "bubble=$bubbleNo tier=3 candidate_residual=${String.format(java.util.Locale.US, "%.2f", tier3CandidateResidual)} " +
-                                        "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} metric=normalized_0_100"
+                                        "tier2_residual=${String.format(java.util.Locale.US, "%.2f", tier2Residual)} scope=mask metric=normalized_0_100"
                                 )
                                 if (tier3CandidateResidual > tier2Residual) {
                                     OcrDiag.log(
@@ -890,7 +917,7 @@ internal object WebModeTextRemover {
                     }
                     OcrDiag.log(
                         "CLEAN_RESIDUAL",
-                        "bubble=$bubbleNo tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} metric=normalized_0_100"
+                        "bubble=$bubbleNo tier=3 residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} scope=mask metric=normalized_0_100"
                     )
                 }
                 // One extra pass is permitted only for flat dialogue bubbles. Sound effects/free lettering
@@ -943,7 +970,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
                     "bubble=$bubbleNo tier=final residual_max=${String.format(java.util.Locale.US, "%.2f", residualFinal)} " +
-                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
+                        "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} scope=mask metric=normalized_0_100"
                 )
                 val largeMaskAccepted = largeMask && residualFinal < 20f
                 val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= CLEAN_FAILED_RESIDUAL_THRESHOLD
@@ -960,9 +987,17 @@ internal object WebModeTextRemover {
                 bitmap.setPixels(out, 0, rw, x0, y0, rw, rh)
                 // A large mask below residual 20 is accepted as best-effort; do not restore the original text
                 // merely because realistic artwork residuals cannot reach the flat-bubble <5% target.
-                if (residualFinal <= TIER2_RESIDUAL_THRESHOLD || largeMaskAccepted) {
+                if ((residualFinal <= TIER2_RESIDUAL_THRESHOLD || largeMaskAccepted) &&
+                    !unmaskedCandidateLikelyInk) {
                     totalRemoved += selectedCount
                     erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
+                } else if (unmaskedCandidateLikelyInk) {
+                    OcrDiag.log(
+                        "CLEAN_WARN",
+                        "bubble=$bubbleNo reason=ink_candidates_outside_mask " +
+                            "unmaskedCandidatePixels=$unmaskedCandidatePixels threshold=$unmaskedCandidateThreshold " +
+                            "action=retain_opaque_cover"
+                    )
                 }
             }
             panelRemovedForLog = totalRemoved
@@ -1031,7 +1066,7 @@ internal object WebModeTextRemover {
                 "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count aiExecutionAllowed=$allowAi " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
-                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} residual_metric=normalized_0_100 failedMaskArea>$MIGAN_MAX_MASK_AREA failedResidual>=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
+                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} residual_scope=mask metric=normalized_0_100 failedMaskArea>$MIGAN_MAX_MASK_AREA failedResidual>=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
             )
             val releasedKb = bitmap.byteCount / 1024L
             bitmap.recycle()
@@ -1068,11 +1103,12 @@ internal object WebModeTextRemover {
     private fun fillRoundedRect(
         pixels: IntArray, rw: Int, rh: Int, x0: Int, y0: Int, x1: Int, y1: Int,
         color: Int, alpha: Float, radius: Int
-    ) {
-        if (rw <= 0 || rh <= 0 || x1 <= x0 || y1 <= y0) return
+    ): Int {
+        if (rw <= 0 || rh <= 0 || x1 <= x0 || y1 <= y0) return 0
         val a = alpha.coerceIn(0f, 1f)
         val r = radius.coerceIn(0, min((x1 - x0) / 2, (y1 - y0) / 2))
         val cr = red(color); val cg = green(color); val cb = blue(color)
+        var paintedPixels = 0
         for (y in y0.coerceAtLeast(0) until y1.coerceAtMost(rh)) {
             for (x in x0.coerceAtLeast(0) until x1.coerceAtMost(rw)) {
                 val dx = when {
@@ -1092,8 +1128,10 @@ internal object WebModeTextRemover {
                 val gg = (cg * a + green(old) * (1f - a)).toInt().coerceIn(0, 255)
                 val bb = (cb * a + blue(old) * (1f - a)).toInt().coerceIn(0, 255)
                 pixels[at] = 0xFF000000.toInt() or (rr shl 16) or (gg shl 8) or bb
+                paintedPixels++
             }
         }
+        return paintedPixels
     }
 
     /**
