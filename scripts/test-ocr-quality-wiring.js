@@ -41,10 +41,12 @@ assert.ok(cleaner.includes('medianRingColor(') && cleaner.includes('fillRoundedR
   'cleaner must contain all tiers and residual diagnostics');
 assert.ok(!cleaner.includes('disallowed-by-fast-path'),
   'legacy fast-path AI-deny policy must be removed');
-assert.ok(extractor.includes('allowAi = req.ahead <= 0') &&
+assert.ok(extractor.includes('allowAi = true') &&
+          extractor.includes('prefetchMode = req.ahead > 0') &&
+          extractor.includes('panelNo = panelNo') &&
           extractor.includes('residual_max=') &&
           extractor.includes('BUBBLE_MASK_FALLBACK'),
-  'realtime cleanup, residual summary and missing-bubble fallback must be wired; read-ahead keeps MI-GAN off');
+  'realtime and prefetch cleanup must pass panel context and permit residual-driven MI-GAN');
 assert.ok(!painter.includes('MODEL_URL') &&
           painter.includes('app.assets.open(MODEL_NAME)') &&
           painter.includes('EXPECTED_BYTES'),
@@ -89,5 +91,26 @@ assert.ok(extractor.includes('realtimeMode = req.visibleOnly'),
   'full scan may use unlimited tier-3 budget while realtime mode remains budget-limited');
 assert.ok(!cleaner.includes('bubble.free && !smoothSurround'),
   'MI-GAN unavailability must not bypass Tier 2; verify residual and warn instead');
+assert.ok(cleaner.includes('openCvInpaint(tier1Region, rw, rh, mask)') &&
+          !cleaner.includes('openCvInpaint(region, rw, rh, mask)'),
+  'Tier 2 must inpaint Tier 1 output rather than resurrecting the original panel pixels');
+assert.ok(cleaner.includes('tier2CandidateResidual > residual1 * 1.1f') &&
+          cleaner.includes('tier=2 keptTier1=true') &&
+          cleaner.includes('tier=3 keptTier2=true'),
+  'Tier 2 and Tier 3 worsening results must be rolled back');
+assert.ok(cleaner.includes('CLEAN_FILL') && cleaner.includes('CLEAN_ASSERT') &&
+          cleaner.includes('tier1CoversMask') && cleaner.includes('fillArea++'),
+  'Tier 1 must log alpha, fill coverage and mask coverage assertion');
+assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true reason=residual>8') &&
+          cleaner.includes('tryAcquireGlobalCallBudget') &&
+          painter.includes('GLOBAL_CALL_LIMIT = 20') &&
+          painter.includes('GLOBAL_CALL_WINDOW_MS = 60_000L'),
+  'prefetch MI-GAN must be residual-gated, budgeted per panel and globally rate limited');
+assert.ok(extractor.includes('FORCE_CAPTURE') && extractor.includes('stableSamples < 3') &&
+          extractor.includes('timeoutMs = minOf(180L, remainingMs)') &&
+          extractor.includes('FORCE_ABORT') &&
+          extractor.includes('recapture $driftRetries/1') &&
+          extractor.includes('FORCE_SKIP'),
+  'FORCE capture must wait for scroll settle, skip known tiny panels and cap recaptures');
 
-console.log('PASS: OCR quality wiring (short dialogue, cache telemetry, batch alignment, timing buckets, memory guard, alpha, dilation, residual-driven MI-GAN tiers, Tier-2 fallback, bundled MI-GAN)');
+console.log('PASS: OCR quality wiring (Tier-1 based rollback, uniform fill coverage, budgeted prefetch MI-GAN, settled FORCE capture, existing OCR quality safeguards)');
