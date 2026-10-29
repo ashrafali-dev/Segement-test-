@@ -44,7 +44,9 @@ internal data class WmBubble(
      * True when the bubble/text detector classed this lettering as FREE text (sound effect, narration on artwork), not
      * lettering inside a speech bubble. Such text is only erased when the AI inpainter can do it cleanly.
      */
-    val free: Boolean = false
+    val free: Boolean = false,
+    /** Extra cover-only rectangles; kept separate so overlay safety does not affect pixel inpainting. */
+    val overlayCv: List<Float> = emptyList()
 )
 
 /** The app's own status pill / toasts are never comic lettering. Pure function, shared by every reading mode. */
@@ -75,7 +77,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             .put("fg2", b.fg2).put("sf", b.soft)
             .put("srcText", b.sourceText).put("tr", b.translatedText).put("so", b.stroke)
             .put("tcx", r5(b.tcx)).put("tcy", r5(b.tcy)).put("tbw", r5(b.tbw)).put("tbh", r5(b.tbh))
-            .put("cv", JSONArray().also { arr -> for (v in b.cv) arr.put(r5(v)) }).put("fr", b.free))
+            .put("cv", JSONArray().also { arr -> for (v in b.cv) arr.put(r5(v)) }).put("fr", b.free)
+            .put("ocv", JSONArray().also { arr -> for (v in b.overlayCv) arr.put(r5(v)) }))
         return JSONObject().put("v", 2).put("to", titleOffset).put("b", a).toString()
     }
 
@@ -99,7 +102,8 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
                     b.optDouble("tcx", 0.0).toFloat(), b.optDouble("tcy", 0.0).toFloat(),
                     b.optDouble("tbw", 0.0).toFloat(), b.optDouble("tbh", 0.0).toFloat(),
                     b.optJSONArray("cv")?.let { ja -> List(ja.length()) { k -> ja.optDouble(k, 0.0).toFloat() } } ?: emptyList(),
-                    b.optBoolean("fr", false)
+                    b.optBoolean("fr", false),
+                    b.optJSONArray("ocv")?.let { ja -> List(ja.length()) { k -> ja.optDouble(k, 0.0).toFloat() } } ?: emptyList()
                 ))
             }
             WebModeLayout(o.optInt("to", 1), list)
