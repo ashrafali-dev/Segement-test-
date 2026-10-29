@@ -2090,7 +2090,9 @@ internal class WebModeExtractor(
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles, allowAi = req.ahead <= 0
+                            wv.context, src, bytes, bubbles,
+                            allowAi = req.ahead <= 0,
+                            realtimeMode = req.visibleOnly
                         )
                         val cleanMs = SystemClock.elapsedRealtime() - tClean
                         OcrPanelTiming.addClean(cleanMs)
