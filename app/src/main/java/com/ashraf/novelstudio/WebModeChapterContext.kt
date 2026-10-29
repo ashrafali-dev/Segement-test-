@@ -230,10 +230,12 @@ internal data class WebModeChapterContext(
                 Regex("[!?！？…]{2,}").containsMatchIn(cleaned)
             val onArtwork = bubble?.free == true || bubble?.soft == true
             val outlined = (bubble?.stroke ?: 0) != 0
-            val likelySfx = outlined ||
-                (onArtwork && compact <= 4) ||
-                (onArtwork && latinCaps && compact <= 20) ||
-                (onArtwork && repeated && compact <= 16)
+            val likelySfx = onArtwork && (
+                outlined ||
+                    compact <= 4 ||
+                    (latinCaps && compact <= 20) ||
+                    (repeated && compact <= 16)
+            )
             return when {
                 likelySfx -> WebModeTextRole.SFX
                 onArtwork -> WebModeTextRole.NARRATION
