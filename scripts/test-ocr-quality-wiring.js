@@ -71,5 +71,21 @@ assert.ok(mainActivity.includes('ALIGN_WAIT') && mainActivity.includes('markers_
 assert.ok(cleaner.includes('Semaphore(2, true)') && cleaner.includes('migan_skipped_oom') &&
           cleaner.includes('released panelBitmap freedKB=') && painter.includes('releaseRuntimeForMemoryPressure'),
   'cleaner concurrency and MI-GAN memory guards must be wired');
+assert.ok(cleaner.includes('TIER1_FILL_ALPHA = 0.98f') &&
+          cleaner.includes('TIER2_FILL_ALPHA = 0.98f') &&
+          cleaner.includes('TIER3_FILL_ALPHA = 1.00f'),
+  'all cleaner tiers must use the requested fill alpha');
+assert.ok(cleaner.includes('TIER2_RESIDUAL_THRESHOLD = 5f') &&
+          cleaner.includes('TIER3_RESIDUAL_THRESHOLD = 8f') &&
+          cleaner.includes('CLEAN_FAILED_RESIDUAL_THRESHOLD = 15f') &&
+          cleaner.includes('metric=normalized_0_100'),
+  'all stages must use normalized residual thresholds and the 15% failure rule');
+assert.ok(cleaner.includes('MIGAN_STATUS') && cleaner.includes('migan_unavailable reason=') &&
+          cleaner.includes('CLEAN_ESCALATE') && cleaner.includes('CLEAN_WARN') &&
+          cleaner.includes('scope=bbox pad=$BBOX_DILATION_PX') &&
+          cleaner.includes('kernel=3x3 iterations=1'),
+  'dilation, residual-driven escalation, MI-GAN status and failure diagnostics must be wired');
+assert.ok(extractor.includes('realtimeMode = req.visibleOnly'),
+  'full scan may use unlimited tier-3 budget while realtime mode remains budget-limited');
 
-console.log('PASS: OCR quality wiring (short dialogue, cache telemetry, batch alignment, timing buckets, memory guard, tiered cleaner, bundled MI-GAN)');
+console.log('PASS: OCR quality wiring (short dialogue, cache telemetry, batch alignment, timing buckets, memory guard, alpha, dilation, residual-driven MI-GAN tiers, bundled MI-GAN)');
