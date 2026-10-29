@@ -1774,7 +1774,8 @@ class MainActivity : Activity() {
         val script = WebModeWriter.bubbleScript(
             cumulative,
             cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-            Prefs.fontFile(this), pageKey(pageUrl)
+            Prefs.fontFile(this), pageKey(pageUrl),
+            auditBubbleFingerprints = bubbles.map { WebModeLayout.fingerprint(it) }.toSet()
         )
         val panelTop = panelTopFromSignature(panelSignature)
         bubbles.forEachIndexed { index, bubble ->
@@ -6055,6 +6056,7 @@ return textSig;
         realtimeBatchKeyByChapter.clear()
         realtimeBatchLayouts.clear()
         realtimeBatchCanvasVersions.clear()
+        realtimeBatchSignatureByKey.clear()
         if (running != null) {
             runToken++
             running = null
@@ -10090,7 +10092,8 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 wmScript = WebModeWriter.bubbleScript(
                     cumulative,
                     cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
-                    Prefs.fontFile(this), pageKey(ch.url)
+                    Prefs.fontFile(this), pageKey(ch.url),
+                    auditBubbleFingerprints = wmLayout.bubbles.map { WebModeLayout.fingerprint(it) }.toSet()
                 )
             } else if (wmLayout != null && wmPlaced != null) {
                 val translatedLayout = WebModeLayout.translated(wmLayout, wmPlaced)
