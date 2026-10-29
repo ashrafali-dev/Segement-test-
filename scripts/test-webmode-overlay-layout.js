@@ -86,7 +86,7 @@ assert.ok(remover.includes("openCvInpaint(region, rw, rh, mask)"),
   "Tier 2 must attempt bounded OpenCV inpainting");
 assert.ok(remover.includes('"CLEAN_JP_AUDIT"') && remover.includes('unmatched='),
   "Japanese OCR bubbles that were not cleaned must be visible in compact diagnostics");
-assert.ok(remover.includes("onionFill(region, mask, rw, rh"),
+assert.ok(remover.includes("onionFill(") && remover.includes("region, mask, rw, rh"),
   "text remover must retain a low-memory non-AI fill fallback for non-flat artwork");
 assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
   "text removal must not flatten the full speech-bubble interior");

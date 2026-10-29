@@ -28,7 +28,7 @@ jobs:
         run: bash scripts/prepare-migan-asset.sh
       - name: Test OCR quality wiring
         run: node scripts/test-ocr-quality-wiring.js
-      - name: Test embedded WebView overlay layout
+      - name: Test embedded WebView overlay layout + cleaned-image lifecycle
         run: node scripts/test-webmode-overlay-layout.js
       - name: Configure the existing release signing key required by app/build.gradle
         env:
