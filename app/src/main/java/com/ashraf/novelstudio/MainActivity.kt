@@ -8909,7 +8909,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             .trim()
     }
 
-    private fun finishJob(tok: Int, ch: Chapter) {
+    private fun finishJob(
+        tok: Int, ch: Chapter,
+        alignWaitStartedAtMs: Long = 0L,
+        alignRetryAfterTimeout: Boolean = false
+    ) {
         if (tok != runToken) return
         chatWv.evaluateJavascript(Js.readText()) { raw ->
             if (tok != runToken) return@evaluateJavascript
@@ -8931,6 +8935,38 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 return@evaluateJavascript
             }
             val rawTranslation = cleanReply(decode(raw))
+            // A scanning reply may become visible before marker IDs are exposed in the chatbot DOM.
+            // Re-read up to 2s, then perform one final retry after 500ms before using the fallback.
+            if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
+                val scanLayout = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
+                if (scanLayout != null && scanLayout.bubbles.size > 1) {
+                    val markerCount = Regex("\\[(\\d{3,})\\]").findAll(rawTranslation).count()
+                    if (markerCount == 0) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        val startedAt = if (alignWaitStartedAtMs > 0L) alignWaitStartedAtMs else now
+                        val waitedMs = (now - startedAt).coerceAtLeast(0L)
+                        if (waitedMs < 2_000L) {
+                            OcrDiag.log("ALIGN_WAIT", "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=$waitedMs timeout=false")
+                            handler.postDelayed({
+                                if (tok == runToken) finishJob(tok, ch, startedAt, alignRetryAfterTimeout)
+                            }, minOf(500L, 2_000L - waitedMs))
+                            return@evaluateJavascript
+                        }
+                        if (!alignRetryAfterTimeout) {
+                            OcrDiag.log("ALIGN_WAIT", "bubbles=${scanLayout.bubbles.size} markers=0 waitedMs=2000 timeout=true")
+                            OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived bubbles=${scanLayout.bubbles.size}")
+                            OcrDiag.log("ALIGN_RETRY", "bubbles=${scanLayout.bubbles.size} delayMs=500 attempt=1")
+                            handler.postDelayed({
+                                if (tok == runToken) finishJob(tok, ch, startedAt, true)
+                            }, 500L)
+                            return@evaluateJavascript
+                        }
+                        OcrDiag.log("ALIGN_FAIL", "reason=markers_never_arrived_after_retry bubbles=${scanLayout.bubbles.size}")
+                        failJob(tok, ch, "The chatbot markers did not arrive after retry.", fallback = true)
+                        return@evaluateJavascript
+                    }
+                }
+            }
             if (livePanelBatch && !hasMeaningfulRealtimeReply(rawTranslation)) {
                 failJob(tok, ch, "The chatbot did not send any text. Just wait — the app will try again by itself.", autoRetry = true)
                 return@evaluateJavascript
@@ -8961,9 +8997,15 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (webModeOn() && !livePanelBatch && ch.contentSel.isBlank()) {
                 val lay = WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
                 if (lay != null) {
+                    val markerCount = Regex("\\[(\\d{3,})\\]").findAll(rawTranslation).count()
+                    OcrDiag.log("BATCH_ALIGN_START", "bubbles=${lay.bubbles.size} markers=$markerCount")
                     val placed = WebModeLayout.alignWithFallback(rawTranslation, lay)
-                    if (placed == null || placed.none { !it.isNullOrBlank() }) {
-                        failJob(tok, ch, "The chatbot answer could not be matched to the page.", fallback = true)
+                    val placedCount = placed?.count { !it.isNullOrBlank() } ?: 0
+                    val missingCount = (lay.bubbles.size - placedCount).coerceAtLeast(0)
+                    OcrDiag.log("BATCH_ALIGN_DONE", "placed=$placedCount missing=$missingCount")
+                    if (placed == null || placedCount * 100 < lay.bubbles.size * 90) {
+                        OcrDiag.log("ALIGN_FAIL", "reason=placement_below_90pct bubbles=${lay.bubbles.size} placed=$placedCount")
+                        failJob(tok, ch, "The chatbot answer could not be matched to at least 90% of page bubbles.", fallback = true)
                         return@evaluateJavascript
                     }
                 }

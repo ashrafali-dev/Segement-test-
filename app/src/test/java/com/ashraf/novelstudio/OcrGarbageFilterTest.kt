@@ -10,17 +10,40 @@ class OcrGarbageFilterTest {
         OcrBlock(text, (cy - h / 2).toInt(), (cx - w / 2).toInt(), cx, cy, w, h,
             confidence = confidence)
 
-    @Test fun koreanOnomatopoeiaPasses() {
-        assertNull(OcrGarbageFilter.rejectReason(b("아"), OcrScript.KOREAN, 100, 100, false))
+    @Test fun koreanShortDialoguePassesWithoutNeedingAnAllowlistMatch() {
+        listOf("뭐?", "야.", "응?", "탓", "왜?", "우", "사", "탁", "아", "어", "와!", "네.", "예", "훗", "헤", "후")
+            .forEach { value -> assertNull("$value should pass",
+                OcrGarbageFilter.rejectReason(b(value), OcrScript.KOREAN, 100, 100, false)) }
+    }
+
+    @Test fun twoHangulSyllablesPassAtNormalConfidence() {
+        listOf("토톡", "뭐냐?", "흐음..").forEach { value -> assertNull("$value should pass",
+            OcrGarbageFilter.rejectReason(b(value, confidence = 0.8f), OcrScript.KOREAN, 100, 100, false)) }
+    }
+
+    @Test fun japaneseOneAndTwoCharacterKanaDialoguePasses() {
+        listOf("あ", "う", "え", "お", "ん", "ハ", "ふ", "ぁ", "っ", "あっ")
+            .forEach { value -> assertNull("$value should pass",
+                OcrGarbageFilter.rejectReason(b(value), OcrScript.JAPANESE, 100, 100, false)) }
+    }
+
+    @Test fun shortLatinFragmentsAreRejected() {
+        listOf("Yo", "B", "th").forEach { value -> assertEquals("$value should be rejected", "single_char",
+            OcrGarbageFilter.rejectReason(b(value), OcrScript.KOREAN, 100, 100, false)) }
+    }
+
+    @Test fun punctuationOnlyIsRejected() {
+        listOf("!", "?!", "...").forEach { value -> assertEquals("single_char",
+            OcrGarbageFilter.rejectReason(b(value), OcrScript.KOREAN, 100, 100, false)) }
+    }
+
+    @Test fun lowConfidenceShortDialogueIsRejected() {
+        listOf("뭐?", "가나").forEach { value -> assertEquals("low_conf",
+            OcrGarbageFilter.rejectReason(b(value, confidence = 0.2f), OcrScript.KOREAN, 100, 100, false)) }
     }
 
     @Test fun mixedLatinHangulIsRejected() {
         assertEquals("latin_mixed", OcrGarbageFilter.rejectReason(b("하c"), OcrScript.KOREAN, 100, 100, false))
-    }
-
-    @Test fun shortLatinFragmentsAreRejectedOnKoreanPanels() {
-        assertEquals("single_char", OcrGarbageFilter.rejectReason(b("YO"), OcrScript.KOREAN, 100, 100, false))
-        assertEquals("single_char", OcrGarbageFilter.rejectReason(b("P"), OcrScript.KOREAN, 100, 100, false))
     }
 
     @Test fun observedKoreanGarbageIsRejected() {
@@ -37,17 +60,6 @@ class OcrGarbageFilterTest {
             b("Hemingway Re"), OcrScript.KOREAN, 100, 100, false))
         assertNull(OcrGarbageFilter.rejectReason(
             b("Hemingway Re"), OcrScript.KOREAN, 100, 100, true))
-    }
-
-    @Test fun validKoreanDialoguePasses() {
-        listOf("뭐냐?", "흐음..", "토톡", "넘 맛있었당").forEach { value ->
-            assertNull(value, OcrGarbageFilter.rejectReason(b(value), OcrScript.KOREAN, 100, 100, false))
-        }
-    }
-
-    @Test fun lowConfidenceShortTextIsRejected() {
-        assertEquals("low_conf", OcrGarbageFilter.rejectReason(
-            b("가나", confidence = 0.2f), OcrScript.KOREAN, 100, 100, false))
     }
 
     @Test fun boxMostlyOutsidePanelIsRejected() {

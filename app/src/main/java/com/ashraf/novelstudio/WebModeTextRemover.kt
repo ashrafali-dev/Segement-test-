@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
@@ -25,6 +27,10 @@ internal object WebModeTextRemover {
     private const val RESIDUAL_THRESHOLD = 24f
     @Volatile var lastResidualMax: Float = 0f
         private set
+    private val cleanSemaphore = Semaphore(2, true)
+    private val cleanDurationMs = ThreadLocal<Long>()
+    fun lastCleanMsForThread(): Long = cleanDurationMs.get() ?: 0L
+
     private const val MAX_WIDTH = 4096
     private const val MAX_HEIGHT = 20000
     private const val MAX_PIXELS = 14_000_000L
@@ -36,6 +42,29 @@ internal object WebModeTextRemover {
         encoded: ByteArray,
         bubbles: List<WmBubble>,
         allowAi: Boolean = true
+    ): Boolean {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        var acquired = false
+        try {
+            acquired = try { cleanSemaphore.tryAcquire(1, TimeUnit.SECONDS) }
+                catch (_: InterruptedException) { Thread.currentThread().interrupt(); false }
+            if (!acquired) {
+                OcrDiag.log("MEM_GUARD", "clean_skipped_concurrency activeLimit=2 waitMs=1000")
+                return false
+            }
+            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi)
+        } finally {
+            if (acquired) cleanSemaphore.release()
+            cleanDurationMs.set(android.os.SystemClock.elapsedRealtime() - startedAt)
+        }
+    }
+
+    private fun cleanAndCacheUnlocked(
+        context: Context,
+        sourceUrl: String,
+        encoded: ByteArray,
+        bubbles: List<WmBubble>,
+        allowAi: Boolean
     ): Boolean {
         lastResidualMax = 0f
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
@@ -58,6 +87,14 @@ internal object WebModeTextRemover {
         val height = bounds.outHeight
         if (width !in 1..MAX_WIDTH || height !in 1..MAX_HEIGHT ||
             width.toLong() * height.toLong() > MAX_PIXELS) return earlySkip("image_dimensions_out_of_bounds")
+        val runtime = Runtime.getRuntime()
+        val usedBytes = runtime.totalMemory() - runtime.freeMemory()
+        val freeHeapMb = (runtime.maxMemory() - usedBytes) / 1_048_576L
+        val estimatedBitmapMb = ((width.toLong() * height.toLong() * 4L) + 1_048_575L) / 1_048_576L
+        if (freeHeapMb < 30L || freeHeapMb < estimatedBitmapMb + 12L) {
+            OcrDiag.log("MEM_GUARD", "clean_skipped_oom freeHeapMB=$freeHeapMb estimateMB=$estimatedBitmapMb")
+            return earlySkip("memory_headroom")
+        }
 
         val decoded = BitmapFactory.decodeByteArray(encoded, 0, encoded.size,
             BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
@@ -385,20 +422,33 @@ internal object WebModeTextRemover {
                 if (residualFinal > RESIDUAL_THRESHOLD && cvConfidence < 0.5f && aiWanted &&
                     aiBudget > 0 && WebModeInpainter.isLoaded() &&
                     android.os.SystemClock.elapsedRealtime() - aiStartMs + aiLastMs < 8_000L) {
-                    val t3Start = android.os.SystemClock.elapsedRealtime()
-                    aiCallsAttempted++
-                    val aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
-                    aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
-                    aiTotalMs += aiLastMs
-                    if (aiFill != null) {
-                        aiBudget--
-                        aiCallsSucceeded++
-                        tier3Count++
-                        for (at in mask.indices) if (mask[at].toInt() != 0 && aiFill[at] != 0) out[at] = aiFill[at]
-                        residualFinal = residualEnergy(out, mask, paper, soft, rw)
-                        OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=3 ms=$aiLastMs reason=tier2_failed conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}")
+                    val heap = Runtime.getRuntime()
+                    val freeHeapMb = (heap.maxMemory() - (heap.totalMemory() - heap.freeMemory())) / 1_048_576L
+                    if (freeHeapMb < 30L) {
+                        OcrDiag.log("MEM_GUARD", "migan_skipped_oom bubble=$bubbleNo freeHeapMB=$freeHeapMb")
+                        WebModeInpainter.releaseRuntimeForMemoryPressure()
                     } else {
-                        OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x$rh result=skipped/failed ms=$aiLastMs")
+                        val t3Start = android.os.SystemClock.elapsedRealtime()
+                        aiCallsAttempted++
+                        val aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
+                        aiLastMs = android.os.SystemClock.elapsedRealtime() - t3Start
+                        aiTotalMs += aiLastMs
+                        if (aiFill != null) {
+                            aiBudget--
+                            aiCallsSucceeded++
+                            tier3Count++
+                            for (at in mask.indices) if (mask[at].toInt() != 0 && aiFill[at] != 0) out[at] = aiFill[at]
+                            residualFinal = residualEnergy(out, mask, paper, soft, rw)
+                            OcrDiag.log("CLEAN_TIER", "bubble=$bubbleNo tier=3 ms=$aiLastMs reason=tier2_failed conf=${String.format(java.util.Locale.US, "%.2f", cvConfidence)}")
+                        } else {
+                            OcrDiag.log("AI_PAINT", "region src=${sourceUrl.take(80)} box=${rw}x$rh result=skipped/failed ms=$aiLastMs")
+                        }
+                        val afterHeap = Runtime.getRuntime()
+                        val afterFreeMb = (afterHeap.maxMemory() - (afterHeap.totalMemory() - afterHeap.freeMemory())) / 1_048_576L
+                        if (afterFreeMb < 30L) {
+                            OcrDiag.log("MEM_GUARD", "migan_runtime_release_after_bubble bubble=$bubbleNo freeHeapMB=$afterFreeMb")
+                            WebModeInpainter.releaseRuntimeForMemoryPressure()
+                        }
                     }
                 }
                 panelResidualMax = max(panelResidualMax, residualFinal)
@@ -470,7 +520,9 @@ internal object WebModeTextRemover {
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
                     "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)}"
             )
+            val releasedKb = bitmap.byteCount / 1024L
             bitmap.recycle()
+            OcrDiag.log("MEM_GUARD", "released panelBitmap freedKB=$releasedKb afterClean")
         }
     }
 

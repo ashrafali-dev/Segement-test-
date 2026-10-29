@@ -763,6 +763,8 @@ internal class WebModeExtractor(
                 Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-prefilter-idle").apply { isDaemon = true } }
                     .also { prefilterPoolRef = it }
             }
+            val scanBatchStartedAt = SystemClock.elapsedRealtime()
+            OcrDiag.log("BATCH_START", "panels=$total")
             val futures = arrayOfNulls<java.util.concurrent.Future<ByteArray?>>(total)
             val lensOcrFutures = arrayOfNulls<java.util.concurrent.Future<LensPanelOcrAttempt>>(total)
             val panelFetchStartedAt = LongArray(total)
@@ -896,14 +898,24 @@ internal class WebModeExtractor(
                         try {
                             // Local pre-filter on ITS OWN thread, so ML Kit inference never holds one of the
                             // Lens worker threads (and therefore never delays a network request).
-                            val silent = if (req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false
-                                else prefilterPool.submit(java.util.concurrent.Callable {
-                                    scanPrefilterSaysEmpty(bytes, panelScript)
+                            var prefilterMs = 0L
+                            val silent = if (req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()) false else {
+                                val prefilterStartedAt = SystemClock.elapsedRealtime()
+                                val skip = prefilterPool.submit(java.util.concurrent.Callable {
+                                    scanPrefilterSaysEmpty(bytes, panelScript, i + 1)
                                 }).get()
+                                prefilterMs = SystemClock.elapsedRealtime() - prefilterStartedAt
+                                skip
+                            }
                             if (silent) {
+                                OcrPanelTiming.logNoLens(i + 1, tFetch, prefilterMs, "mlkit_empty_low_edges")
                                 LensPanelOcrAttempt(PanelOcr("", emptyList()), null)
                             } else {
-                                LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
+                                LensPanelOcrAttempt(ocrBytes(
+                                    bytes, panelScript, p.src, fastMode = true,
+                                    forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank(),
+                                    panelNo = i + 1, timingStartedAtMs = tFetch, prefilterMs = prefilterMs
+                                ), null)
                             }
                         } catch (e: OcrUnavailableException) {
                             LensPanelOcrAttempt(null, e)
@@ -927,13 +939,13 @@ internal class WebModeExtractor(
                         // Some Android codecs throw while decoding a selected region. Retry with a
                         // bounded downsampled bitmap rather than aborting manual OCR.
                         try {
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted || req.forceFreshOcr)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, forceFresh = targeted || req.forceFreshOcr, panelNo = i + 1, timingStartedAtMs = tFetch)
                         } catch (cropError: RuntimeException) {
                             Log.w(TAG, "Force OCR crop failed; retrying bitmap crop: ${cropError.javaClass.simpleName}: ${cropError.message}")
-                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true, forceFresh = targeted || req.forceFreshOcr)
+                            ocrBytes(bytes, script, p.src, fastMode = false, crop = req.forceOcrRegion, cropFallback = true, forceFresh = targeted || req.forceFreshOcr, panelNo = i + 1, timingStartedAtMs = tFetch)
                         }
                     } else {
-                        ocrBytes(bytes, script, p.src, fastMode = fastPass, forceFresh = targeted || req.forceFreshOcr)
+                        ocrBytes(bytes, script, p.src, fastMode = fastPass, forceFresh = targeted || req.forceFreshOcr, panelNo = i + 1, timingStartedAtMs = tFetch)
                     }
                     diag.decoded++
                     if (po == null) continue                      // too small to be a panel: ignored, not an error
@@ -1013,6 +1025,7 @@ internal class WebModeExtractor(
                     "batchWaitMs=${SystemClock.elapsedRealtime() - batchStartedAt} decoded=${diag.decoded} " +
                     "chars=${diag.chars} imageHost=${hostOf(meta.url)}")
             }
+            OcrDiag.log("BATCH_OCR_DONE", "ocrOk=${diag.ocrOk} ocrEmpty=${diag.ocrEmpty} elapsedMs=${SystemClock.elapsedRealtime() - scanBatchStartedAt}")
             if (!alive()) { onMain { req.onDone(WebModeOutcome.Failure(WebModeError.NAVIGATION_INVALIDATED, WebModeError.NAVIGATION_INVALIDATED.label, diag)) }; return }
             if (script.locked) SiteLearner.saveScript(wv.context, hostOf(meta.url), script.current.name)
             progress("Collecting recognized text", 99)
@@ -1048,6 +1061,7 @@ internal class WebModeExtractor(
             } else {
                 WebModeLayoutStore.put(wv.context, meta.url, scanLayout)
             }
+            OcrDiag.log("BATCH_FLUSH_DONE", "markersFlushed=${scanLayout.bubbles.count { it.sourceText.isNotBlank() }} bubbles=${scanLayout.bubbles.size}")
             val ch = Chapter(
                 title = title,
                 text = text,
@@ -1974,7 +1988,35 @@ internal class WebModeExtractor(
          * (decode failure, exception, too few pixels) returns false so the panel still goes to Lens — the gate
          * must never lose text, only skip panels that are certainly empty.
          */
-        private fun scanPrefilterSaysEmpty(bytes: ByteArray, st: ScriptState): Boolean {
+        private fun sampledEdgeDensity(bitmap: Bitmap): Float {
+            if (bitmap.width < 3 || bitmap.height < 3) return 0f
+            val stepX = maxOf(1, bitmap.width / 24)
+            val stepY = maxOf(1, bitmap.height / 24)
+            fun gray(pixel: Int): Int =
+                (((pixel ushr 16) and 255) * 299 + ((pixel ushr 8) and 255) * 587 + (pixel and 255) * 114) / 1000
+            var pairs = 0
+            var edges = 0
+            var y = 0
+            while (y < bitmap.height) {
+                var x = 0
+                while (x < bitmap.width) {
+                    val here = gray(bitmap.getPixel(x, y))
+                    if (x + stepX < bitmap.width) {
+                        pairs++
+                        if (kotlin.math.abs(here - gray(bitmap.getPixel(x + stepX, y))) >= 28) edges++
+                    }
+                    if (y + stepY < bitmap.height) {
+                        pairs++
+                        if (kotlin.math.abs(here - gray(bitmap.getPixel(x, y + stepY))) >= 28) edges++
+                    }
+                    x += stepX
+                }
+                y += stepY
+            }
+            return if (pairs == 0) 0f else edges.toFloat() / pairs.toFloat()
+        }
+
+        private fun scanPrefilterSaysEmpty(bytes: ByteArray, st: ScriptState, panelNo: Int = 0): Boolean {
             if (!Prefs.bool(wv.context, "scanLocalPrefilter", true)) return false
             var bmp: Bitmap? = null
             return try {
@@ -1989,8 +2031,19 @@ internal class WebModeExtractor(
                     ?: return false
                 val r = (engine as? RoutingOcrEngine)?.recognizeLocalFast(bmp, st.current) ?: return false
                 val empty = r.blocks.none { it.text.count { c -> c.isLetterOrDigit() } >= 2 }
-                if (empty) OcrDiag.log("PREFILTER", "skip Lens: ML Kit found no text on this panel")
-                empty
+                if (!empty) {
+                    OcrDiag.log("PREFILTER", "panel=$panelNo mlkit=has_text decision=keep_lens")
+                    return false
+                }
+                val edgeDensity = sampledEdgeDensity(bmp)
+                // Only near-blank crops skip the network call; line-art/textured panels remain Lens-eligible.
+                val skipLens = edgeDensity < 0.012f
+                val density = String.format(java.util.Locale.US, "%.4f", edgeDensity)
+                OcrDiag.log("PREFILTER", "panel=$panelNo mlkit=empty edgeDensity=$density decision=${if (skipLens) "skip_lens" else "keep_lens"}")
+                if (skipLens) {
+                    OcrDiag.log("PREFILTER_SKIP_LENS", "panel=$panelNo reason=mlkit_empty_low_edges edgeDensity=$density")
+                }
+                skipLens
             } catch (_: Throwable) {
                 false
             } finally {
@@ -2001,14 +2054,19 @@ internal class WebModeExtractor(
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
-            cropFallback: Boolean = false, forceFresh: Boolean = false
+            cropFallback: Boolean = false, forceFresh: Boolean = false,
+            panelNo: Int = 0, timingStartedAtMs: Long = 0L, prefilterMs: Long = 0L
         ): PanelOcr? {
+            OcrPanelTiming.begin(panelNo, timingStartedAtMs, prefilterMs)
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             val w = bounds.outWidth
             val h = bounds.outHeight
             if (w <= 0 || h <= 0) throw DecodeException()
-            if (w < MIN_W || h < MIN_H) return null
+            if (w < MIN_W || h < MIN_H) {
+                OcrPanelTiming.finish()
+                return null
+            }
             // Quality must not depend on whether the panel arrived via prefetch or visible scanning.
             // The engine tiles/enlarges within its own pixel budget; retain native small-letter detail.
             val sample = when { w > 5000 -> 4; w > 2400 -> 2; else -> 1 }
@@ -2034,7 +2092,9 @@ internal class WebModeExtractor(
                         val cleaned = WebModeTextRemover.cleanAndCache(
                             wv.context, src, bytes, bubbles, allowAi = req.ahead <= 0
                         )
-                        OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
+                        val cleanMs = SystemClock.elapsedRealtime() - tClean
+                        OcrPanelTiming.addClean(cleanMs)
+                        OcrDiag.log("CLEAN", "ms=$cleanMs cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                         OcrDiag.log("CLEAN", "bubbles=${bubbles.size} cleaned=$cleaned residual_max=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
@@ -2042,6 +2102,7 @@ internal class WebModeExtractor(
                         // If cleanup is uncertain, retain the original panel and normal overlay.
                     }
                 }
+                OcrPanelTiming.finish()
                 return PanelOcr(texts.joinToString("\n\n"), bubbles)
             }
             if (crop != null) {
@@ -2650,16 +2711,20 @@ internal class WebModeExtractor(
             val t0 = SystemClock.elapsedRealtime()
             return try {
                 recognizeInner(bmp, st, fastMode, forceFresh).also { r ->
+                    val elapsedMs = SystemClock.elapsedRealtime() - t0
+                    OcrPanelTiming.addOcr(elapsedMs)
                     val letters = r.blocks.sumOf { b -> b.text.count { ch -> ch.isLetterOrDigit() } }
                     // Prefer the label stamped on THIS result by the router; the process-global label may belong
-                    // to a concurrent route and reported "no text found" for frames that did contain text.
+                    // to a concurrent route and reported "no text found" for a frame that actually contained text.
                     val engineLabel = r.engineLabel.ifBlank { OcrEngineStatus.label }
                         .ifBlank { Prefs.get(wv.context, "ocrEngine", "mlkit") }
-                    OcrDiag.log("OCR", "script=${st.current.name} fast=$fastMode img=${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0} " +
+                    OcrDiag.log("OCR", "script=${st.current.name} fast=$fastMode img=${bmp.width}x${bmp.height} ms=$elapsedMs " +
                         "engine=$engineLabel blocks=${r.blocks.size} letters=$letters first=[${OcrDiag.snip(r.blocks.firstOrNull()?.text)}]")
                 }
             } catch (e: Throwable) {
-                OcrDiag.log("OCR_ERR", "script=${st.current.name} ms=${SystemClock.elapsedRealtime() - t0} ${e.javaClass.simpleName}: ${e.message?.take(140)}")
+                val elapsedMs = SystemClock.elapsedRealtime() - t0
+                OcrPanelTiming.addOcr(elapsedMs)
+                OcrDiag.log("OCR_ERR", "script=${st.current.name} ms=$elapsedMs ${e.javaClass.simpleName}: ${e.message?.take(140)}")
                 throw e
             }
         }

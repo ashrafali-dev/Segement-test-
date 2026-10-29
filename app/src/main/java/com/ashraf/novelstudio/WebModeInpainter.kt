@@ -133,6 +133,24 @@ internal object WebModeInpainter {
     fun isDownloading(): Boolean = downloading.get()
     fun isLoaded(): Boolean = engine != null
 
+    /** Close native interpreter/delegate buffers when heap headroom becomes critically low. */
+    fun releaseRuntimeForMemoryPressure() {
+        OnnxHeavyGate.lock.lock()
+        try {
+            synchronized(this) {
+                try { engine?.close() } catch (_: Throwable) {}
+                engine = null
+                try { gpuDelegate?.close() } catch (_: Throwable) {}
+                gpuDelegate = null
+                mappedModel = null
+                lastNote = "released for low heap"
+                OcrDiag.log("MEM_GUARD", "migan_runtime_released reason=low_heap")
+            }
+        } finally {
+            OnnxHeavyGate.lock.unlock()
+        }
+    }
+
     /** Load in the background so the first scanned image does not wait for GPU model compilation. */
     fun warmUpAsync(ctx: Context) {
         if (engine != null || sessionFailed || !isReady(ctx) || !warming.compareAndSet(false, true)) return

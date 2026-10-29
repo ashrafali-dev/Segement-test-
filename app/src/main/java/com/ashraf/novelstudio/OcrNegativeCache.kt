@@ -17,6 +17,10 @@ internal object OcrNegativeCache {
     private const val REPEATED_TTL_MS = 120_000L
     private const val REPEAT_WINDOW_MS = 120_000L
     private const val MAX_ENTRIES = 96
+    private var lookups = 0L
+    private var hits = 0L
+    private var misses = 0L
+    private var expired = 0L
 
     private val negatives = object : LinkedHashMap<Key, Negative>(MAX_ENTRIES + 1, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, Negative>?): Boolean =
@@ -58,16 +62,28 @@ internal object OcrNegativeCache {
     fun hit(bitmap: Bitmap): Boolean {
         if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return false
         val target = key(bitmap)
-        val storedKey = nearKey(target, negatives.keys) ?: return false
-        val entry = negatives[storedKey] ?: return false
-        val now = SystemClock.elapsedRealtime()
-        val age = now - entry.insertedAt
+        lookups++
+        val storedKey = nearKey(target, negatives.keys)
+        if (storedKey == null) { misses++; return false }
+        val entry = negatives[storedKey]
+        if (entry == null) { misses++; return false }
+        val age = SystemClock.elapsedRealtime() - entry.insertedAt
         if (age < 0L || age >= entry.ttlMs) {
             negatives.remove(storedKey)
+            misses++
+            expired++
+            OcrDiag.log("LENS_NEG_CACHE_MISS", "w=${target.width} h=${target.height} ageMs=$age (expired)")
             return false
         }
+        hits++
         OcrDiag.log("LENS_NEG_CACHE_HIT", "w=${target.width} h=${target.height} ageMs=$age savedMs=${entry.savedMs}")
         return true
+    }
+
+    @Synchronized
+    fun statsSummary(): String {
+        val pct = if (lookups == 0L) 0.0 else hits.toDouble() * 100.0 / lookups.toDouble()
+        return "lookups=$lookups hits=$hits misses=$misses expired=$expired hitPct=${String.format(java.util.Locale.US, "%.1f", pct)}"
     }
 
     @Synchronized
@@ -96,5 +112,9 @@ internal object OcrNegativeCache {
     fun clear() {
         negatives.clear()
         history.clear()
+        lookups = 0L
+        hits = 0L
+        misses = 0L
+        expired = 0L
     }
 }

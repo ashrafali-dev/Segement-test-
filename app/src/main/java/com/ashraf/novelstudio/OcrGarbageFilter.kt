@@ -1,26 +1,51 @@
 package com.ashraf.novelstudio
 
-
-/** Rejects high-confidence script mismatches and common recognizer fragments before translation. */
+/** Conservative script/noise filtering. Short dialogue is not garbage merely because it is short. */
 internal object OcrGarbageFilter {
-    private val koreanOnomatopoeia = setOf("아", "어", "흐", "음", "핫", "윽", "헉", "흡")
+    private val koreanShortDialogue = setOf(
+        "아", "어", "응", "와", "야", "왜", "뭐", "네", "예", "헉", "윽", "흡", "훗", "헤", "후",
+        "탓", "우", "사", "탁", "흐", "음", "핫"
+    )
     private val japaneseOnomatopoeia = setOf("あ", "う", "え", "お", "ん", "ハ", "ふ", "ぁ", "っ")
     private val knownKoreanNoise = setOf("려은걱해야하고싶")
+    private fun scriptOf(ch: Char): Character.UnicodeScript = Character.UnicodeScript.of(ch.code)
+    private fun confidenceKnown(confidence: Float): Boolean = confidence > 0f
+
+    private fun shortDialoguePasses(block: OcrBlock, script: OcrScript): Boolean {
+        val compact = block.text.trim().filter(Char::isLetterOrDigit)
+        if (compact.isEmpty() || compact.length > 2) return false
+        if (confidenceKnown(block.confidence) && block.confidence < 0.35f) return false
+        val letters = compact.filter(Char::isLetter)
+        if (letters.isEmpty()) return false
+        return when (script) {
+            OcrScript.KOREAN -> letters.all { scriptOf(it) == Character.UnicodeScript.HANGUL } &&
+                (compact in koreanShortDialogue || letters.size <= 2)
+            OcrScript.JAPANESE -> letters.all {
+                scriptOf(it) == Character.UnicodeScript.HIRAGANA ||
+                    scriptOf(it) == Character.UnicodeScript.KATAKANA
+            } && (compact in japaneseOnomatopoeia || letters.size <= 2)
+            else -> false
+        }
+    }
 
     fun filter(blocks: List<OcrBlock>, script: OcrScript, width: Int, height: Int): List<OcrBlock> {
         if (blocks.isEmpty()) return blocks
         val withLetters = blocks.filter { it.text.any(Char::isLetter) }
         val panelIsLatin = withLetters.isNotEmpty() && withLetters.all { block ->
             val letters = block.text.filter(Char::isLetter)
-            letters.isNotEmpty() && letters.all {
-                Character.UnicodeScript.of(it.code) == Character.UnicodeScript.LATIN
-            }
+            letters.isNotEmpty() && letters.all { scriptOf(it) == Character.UnicodeScript.LATIN }
         }
         return blocks.filter { block ->
             val reason = rejectReason(block, script, width, height, panelIsLatin)
-            if (reason == null) true else {
-                val safeText = block.text.replace("\\", "\\\\")
-                    .replace("\"", "\\\"").replace("\n", " ").replace("\r", " ").take(100)
+            val safeText = block.text.replace("\\", "\\\\")
+                .replace("\"", "\\\"").replace("\n", " ").replace("\r", " ").take(100)
+            if (reason == null) {
+                if (shortDialoguePasses(block, script)) {
+                    val conf = String.format(java.util.Locale.US, "%.2f", block.confidence)
+                    try { OcrDiag.log("FILTER_PASS", "reason=short_dialogue text=\"$safeText\" conf=$conf") } catch (_: Throwable) {}
+                }
+                true
+            } else {
                 try { OcrDiag.log("FILTER_REJECT", "reason=$reason text=\"$safeText\"") } catch (_: Throwable) {}
                 false
             }
@@ -33,33 +58,27 @@ internal object OcrGarbageFilter {
         val text = block.text.trim()
         if (text.isEmpty()) return "low_conf"
         val letters = text.filter(Char::isLetter)
-        if (letters.isEmpty()) return null
-
-        val latin = letters.count { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.LATIN }
-        val hangul = letters.count { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HANGUL }
-        val kana = letters.count {
-            val value = Character.UnicodeScript.of(it.code)
-            value == Character.UnicodeScript.HIRAGANA || value == Character.UnicodeScript.KATAKANA
-        }
-        val han = letters.count { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }
         val compact = text.filter(Char::isLetterOrDigit)
-        val onomatopoeia = compact in (koreanOnomatopoeia + japaneseOnomatopoeia)
-
-        if (letters.length == 1 && latin == 1) return "single_char"
+        if (letters.isEmpty()) return "single_char" // punctuation-only/noise
+        val latin = letters.count { scriptOf(it) == Character.UnicodeScript.LATIN }
+        val hangul = letters.count { scriptOf(it) == Character.UnicodeScript.HANGUL }
+        val kana = letters.count {
+            val s = scriptOf(it)
+            s == Character.UnicodeScript.HIRAGANA || s == Character.UnicodeScript.KATAKANA
+        }
+        val han = letters.count { scriptOf(it) == Character.UnicodeScript.HAN }
 
         if (script == OcrScript.KOREAN) {
             if (compact in knownKoreanNoise) return "latin_mixed"
-            // Reject the observed one-to-one hallucination ("하c"), plus long mixed blocks per the script rule.
             if (hangul > 0 && (latin > 4 || (latin == 1 && hangul == 1))) return "latin_mixed"
-            // Tiny Latin fragments such as YO / P are not dialogue on a Korean panel.
-            if (latin in 1..2 && hangul == 0 && !panelIsLatin) return "single_char"
             if (latin > 4 && !panelIsLatin) return "latin_mixed"
         }
-
-        // A 0.0 confidence means that this OCR engine does not report confidence, not a measured zero.
-        if (block.confidence > 0f && block.confidence < 0.35f && text.length < 4 && !onomatopoeia) {
+        // 0.0 means the OCR engine does not expose confidence, not a measured zero.
+        if (compact.length <= 2 && confidenceKnown(block.confidence) && block.confidence < 0.35f) {
             return "low_conf"
         }
+        val nonLatin = hangul + kana + han
+        if (compact.length <= 2 && latin > 0 && latin >= nonLatin) return "single_char"
 
         val expected = when (script) {
             OcrScript.KOREAN -> if (panelIsLatin) latin else hangul
@@ -67,12 +86,7 @@ internal object OcrGarbageFilter {
             OcrScript.CHINESE -> han
             OcrScript.LATIN -> latin
         }
-        if (letters.isNotEmpty() && (letters.length - expected) * 2 > letters.length) return "script_mismatch"
-
-        if (letters.length == 1 && !onomatopoeia &&
-            (hangul == 1 || script == OcrScript.JAPANESE && (kana + han) == 1)) {
-            return "single_char"
-        }
+        if ((letters.length - expected) * 2 > letters.length) return "script_mismatch"
 
         if (width > 0 && height > 0 && block.w > 0f && block.h > 0f) {
             val area = block.w * block.h

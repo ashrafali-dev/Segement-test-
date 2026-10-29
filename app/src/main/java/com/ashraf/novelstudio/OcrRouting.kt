@@ -347,6 +347,7 @@ internal class RoutingOcrEngine : OcrEngine {
             var lens: OcrResult? = null
             var failure: String? = null
             try {
+                OcrPanelTiming.noteLensCall()
                 lens = run(chosen)
             } catch (e: OcrUnavailableException) {
                 failure = (e.message ?: "unavailable").take(160)

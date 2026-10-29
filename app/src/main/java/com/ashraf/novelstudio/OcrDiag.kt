@@ -107,6 +107,7 @@ internal object OcrDiag {
         sb.append("last engine used: ").append(OcrEngineStatus.label.ifBlank { "(none yet)" }).append('\n')
         sb.append("last router error: ").append(OcrEngineStatus.lastError.ifBlank { "(none)" }).append('\n')
         sb.append("last Lens request: ").append(OcrEngineStatus.lastLensDiagnostic).append('\n')
+        sb.append("LENS_NEG_CACHE_STATS: ").append(OcrNegativeCache.statsSummary()).append('\n')
         sb.append("Lens circuit breaker: ").append(try { LensOcrEngine.breakerStatus() } catch (_: Throwable) { "?" }).append("\n\n")
 
         sb.append("--- PER-SITE STATS (this session) ---\n")
