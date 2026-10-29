@@ -3028,6 +3028,17 @@ return t.length>=40?'TXT:'+t:'';
     private var running: Chapter? = null
     private var runToken = 0
     private var progress = 0
+
+    private data class ScanChapterTranslationState(
+        val context: WebModeChapterContext,
+        val windows: List<WebModeChapterWindow>,
+        val startedAtMs: Long,
+        var windowIndex: Int = 0,
+        val translations: LinkedHashMap<Int, String> = LinkedHashMap(),
+        val summaries: MutableList<String> = mutableListOf()
+    )
+    /** Active scanning jobs only; real-time batch translation deliberately never enters this map. */
+    private val scanChapterStates = HashMap<Int, ScanChapterTranslationState>()
     // Randomized request spacing: normal chapter jobs keep the safer 3.0–4.5 s gap, while
     // real-time OCR uses 0.8–1.4 s so upcoming panels can be pre-translated before the reader reaches them.
     // The gap applies after sends and completed replies; no delay is added once the gate has expired.
