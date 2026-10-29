@@ -2771,6 +2771,14 @@ internal class WebModeExtractor(
                 texts.add(text)
                 out.add(nb)
             }
+            if (scanMode) {
+                val emitted = (out.size - outBefore).coerceAtLeast(0)
+                OcrDiag.log(
+                    "DETECT_MODE",
+                    "mode=scan ran=true masks=$emitted source=${if (dets?.any { it.seg != null } == true) "model+pixel" else "pixel_bbox_fallback"} " +
+                        "bboxPad=5 modelMasks=${dets?.count { it.seg != null } ?: 0}"
+                )
+            }
             } finally {
                 // The detector reads [bmp]; the caller recycles it right after this function, so never leave it running.
                 val pendingDet = detFuture
@@ -2961,7 +2969,7 @@ internal class WebModeExtractor(
                 // This OCR runs on ns-webmode. Job.startUrl was captured on the UI thread, so never read WebView.url here.
                 val currentHost = hostOf(startUrl).lowercase().removePrefix("www.")
                 val canvasReader = currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")
-                if (scanMode || canvasReader || !Prefs.bool(wv.context, "lensAudit", false) || core.blocks.isEmpty() && fastMode) return core
+                if ((!req.visibleOnly && req.ahead <= 0) || canvasReader || !Prefs.bool(wv.context, "lensAudit", false) || core.blocks.isEmpty() && fastMode) return core
                 return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
                 catch (_: Exception) { core } catch (_: OutOfMemoryError) { core }
             }
