@@ -1245,7 +1245,13 @@ internal object WebModeWriter {
      * Draws each translated paragraph on the spot of its original text. [translated] is index-aligned
      * with [WebModeLayout.bubbles]; a null/blank entry leaves that bubble's original text untouched.
      */
-    fun bubbleScript(layout: WebModeLayout, translated: List<String?>, font: String, pageId: String): String {
+    fun bubbleScript(
+        layout: WebModeLayout,
+        translated: List<String?>,
+        font: String,
+        pageId: String,
+        auditBubbleFingerprints: Set<String>? = null
+    ): String {
         val arr = JSONArray()
         // The cleaner records exactly which bubbles it erased (flat and artwork alike). The cleaned image is
         // shown only if every ERASED bubble of that image has a translation; otherwise the original <img>
@@ -1288,14 +1294,19 @@ internal object WebModeWriter {
         for ((i, b) in layout.bubbles.withIndex()) {
             if (i in hidden) continue
             val translatedText = translated.getOrNull(i)?.trim().orEmpty()
-            if (translatedText.isNotBlank() && b.sourceText.isNotBlank() &&
+            val belongsToCurrentRequest = auditBubbleFingerprints == null ||
+                WebModeLayout.fingerprint(b) in auditBubbleFingerprints
+            if (belongsToCurrentRequest && translatedText.isNotBlank() && b.sourceText.isNotBlank() &&
                 !WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))) {
                 val scriptLabel = WebModeTextRemover.scriptLabelForBubble(b.sourceText, b.src, pageId)
-                OcrDiag.log(
-                    "PLACE_UNCLEANED",
-                    "bubble=${i + 1} residual=${String.format(java.util.Locale.US, "%.2f", WebModeTextRemover.lastResidualMax)} " +
-                        "placed=true bgAlpha=1.0 script=$scriptLabel"
-                )
+                val residualForBubble = WebModeTextRemover.residualForSource(b.src)
+                if (residualForBubble == null || residualForBubble > 5f) {
+                    OcrDiag.log(
+                        "PLACE_UNCLEANED",
+                        "bubble=${i + 1} residual=${residualForBubble?.let { String.format(java.util.Locale.US, "%.2f", it) } ?: "unknown"} " +
+                            "placed=true bgAlpha=1.0 script=$scriptLabel reason=${if (residualForBubble == null) "clean_skip_or_unmeasured" else "residual_gt_5"}"
+                    )
+                }
             }
             val t = WmSfx.fix(translatedText)
             if (t.isEmpty()) {
