@@ -50,7 +50,11 @@ class WebModeChapterContextTest {
         assertEquals((19..20).toList(), windows[1].contextEntries
             .filter { it.markerNumber !in windows[1].outputEntries.map { e -> e.markerNumber } }
             .map { it.markerNumber })
-        assertTrue(windows[1].promptBodyContainsContextOnlyInvariant())
+        val secondPrompt = context.promptForWindow(windows[1])
+        assertTrue(secondPrompt.contains("CONTEXT_ONLY"))
+        assertTrue(secondPrompt.contains("CONTEXT_ONLY panel=18"))
+        assertTrue(secondPrompt.contains("[021]"))
+        assertFalse(secondPrompt.contains("[019] panel=18"))
     }
 
     @Test
@@ -79,11 +83,3 @@ class WebModeChapterContextTest {
     }
 }
 
-/** Test-only extension makes the intended window prompt contract explicit without Android or a WebView. */
-private fun WebModeChapterWindow.promptBodyContainsContextOnlyInvariant(): Boolean {
-    val contextMarkers = contextEntries.filter { it.markerNumber !in outputEntries.map { e -> e.markerNumber } }
-    return contextMarkers.all { it.markerNumber.toString().padStart(3, '0') in
-        contextEntries.filter { e -> e.markerNumber == it.markerNumber }.map { e -> e.id }.joinToString() ||
-        contextMarkers.any { it.markerNumber == it.markerNumber } } &&
-        contextEntries.size >= outputEntries.size
-}
