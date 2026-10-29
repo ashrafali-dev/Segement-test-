@@ -149,8 +149,9 @@ assert.ok(lensTransport.includes('LENS_CIRCUIT_OPEN') &&
   'Lens must open a 30s outage circuit and allow exactly one half-open probe, extending to 60s on probe failure');
 assert.ok(routing.includes('BATCH_WAIT_OCR') &&
           routing.includes('reason=circuit_open fallback=mlkit') &&
+          routing.includes('LensOcrEngine.breakerStatus().startsWith("OPEN"') &&
           routing.includes('noteNetworkFallback(failure, fallbackResult.blocks.size)'),
-  'Lens failures must finish synchronous ML Kit fallback before returning to alignment');
+  'Lens failures must finish synchronous ML Kit fallback before returning to alignment and avoid pausing on concurrent circuit-open failures');
 assert.ok(mainActivity.includes('no_markers_after_lens_failure') &&
           mainActivity.includes('-> RETRY_PENDING') &&
           mainActivity.includes('lens_dns_failure -> PARTIAL') &&
