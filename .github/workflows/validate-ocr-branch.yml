@@ -26,6 +26,8 @@ jobs:
           gradle-version: "8.7"
       - name: Prepare pinned MI-GAN model asset (build-time only; APK contains the model)
         run: bash scripts/prepare-migan-asset.sh
+      - name: Test OCR quality wiring
+        run: node scripts/test-ocr-quality-wiring.js
       - name: Test embedded WebView overlay layout
         run: node scripts/test-webmode-overlay-layout.js
       - name: Configure the existing release signing key required by app/build.gradle
