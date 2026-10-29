@@ -49,8 +49,8 @@ internal object OcrGarbageFilter {
 
         if (script == OcrScript.KOREAN) {
             if (compact in knownKoreanNoise) return "latin_mixed"
-            // Mixed Hangul + Latin fragments are a common Lens/ML Kit hallucination, even for a short "하c".
-            if (latin > 0 && hangul > 0) return "latin_mixed"
+            // Reject the observed one-to-one hallucination ("하c"), plus long mixed blocks per the script rule.
+            if (hangul > 0 && (latin > 4 || (latin == 1 && hangul == 1))) return "latin_mixed"
             // Tiny Latin fragments such as YO / P are not dialogue on a Korean panel.
             if (latin in 1..2 && hangul == 0 && !panelIsLatin) return "single_char"
             if (latin > 4 && !panelIsLatin) return "latin_mixed"

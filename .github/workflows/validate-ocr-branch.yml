@@ -26,7 +26,7 @@ jobs:
           gradle-version: "8.7"
       - name: Prepare pinned MI-GAN model asset (build-time only; APK contains the model)
         run: bash scripts/prepare-migan-asset.sh
-      - name: Test OCR report diagnostics and all negative-cache entry paths
+      - name: Test OCR report diagnostics, script filtering and cache bypass
         run: node scripts/test-ocr-quality-wiring.js
       - name: Test embedded WebView overlay layout + cleaned-image lifecycle
         run: node scripts/test-webmode-overlay-layout.js
