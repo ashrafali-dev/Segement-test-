@@ -14,6 +14,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.security.MessageDigest
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -38,6 +39,22 @@ internal object WebModeInpainter {
 
     private val downloading = AtomicBoolean(false)
     private val warming = AtomicBoolean(false)
+
+    // Global MI-GAN inference budget: at most 20 attempted calls in a rolling 60-second window.
+    private const val GLOBAL_CALL_LIMIT = 20
+    private const val GLOBAL_CALL_WINDOW_MS = 60_000L
+    private val recentGlobalCalls = ArrayDeque<Long>()
+
+    @Synchronized
+    fun tryAcquireGlobalCallBudget(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        while (recentGlobalCalls.isNotEmpty() && now - recentGlobalCalls.peekFirst() >= GLOBAL_CALL_WINDOW_MS) {
+            recentGlobalCalls.removeFirst()
+        }
+        if (recentGlobalCalls.size >= GLOBAL_CALL_LIMIT) return false
+        recentGlobalCalls.addLast(now)
+        return true
+    }
 
     @Volatile private var slowUntil = 0L
     private const val SLOW_PAUSE_MS = 180_000L
