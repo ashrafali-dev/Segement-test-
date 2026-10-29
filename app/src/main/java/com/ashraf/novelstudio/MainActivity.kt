@@ -1178,9 +1178,13 @@ class MainActivity : Activity() {
 
     /** Same long reader image, but the user has moved into a different coarse visual slice. */
     private fun isSameTallImageSlice(previous: String, next: String): Boolean {
-        if (!previous.contains("@slice=") || !next.contains("@slice=")) return false
         val marker = Regex("@slice=-?\\d+")
-        return marker.replace(previous, "@slice=*") == marker.replace(next, "@slice=*")
+        val previousSlices = previous.split('|').filter { it.contains("@slice=") }
+            .map { marker.replace(it, "@slice=*") }.toSet()
+        val nextSlices = next.split('|').filter { it.contains("@slice=") }
+            .map { marker.replace(it, "@slice=*") }.toSet()
+        // Other visible thumbnails can appear/disappear while the same tall reader remains mounted.
+        return previousSlices.isNotEmpty() && previousSlices == nextSlices
     }
 
     private fun clearRealtimeOverlay(reason: String) {
@@ -2818,7 +2822,7 @@ if(readerFrame){
  }catch(ignore){}
  scrollOffset=Math.max(scrollOffset,Math.max(0,-readerFrame.rect.top));
  var frameSlice=Math.floor(scrollOffset/Math.max(1,vh*.55));
- v.push('FRAME:'+(readerFrame.src||location.hostname)+'@'+Math.round(readerFrame.rect.width)+'x'+Math.round(readerFrame.rect.height)+'@slice='+frameSlice);
+ v.push('FRAME:'+(readerFrame.src||'unknown')+'#page='+location.origin+location.pathname+'@'+Math.round(readerFrame.rect.width)+'x'+Math.round(readerFrame.rect.height)+'@slice='+frameSlice);
 }
 // SVG images, video posters and canvas readers do not always expose a normal <img>.
 var svgs=document.querySelectorAll('svg image');
