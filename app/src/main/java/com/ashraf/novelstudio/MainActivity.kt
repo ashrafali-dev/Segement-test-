@@ -1310,6 +1310,7 @@ class MainActivity : Activity() {
             transitionRealtimeReadState(RealtimeReadState.IDLE, "visible_read_restart")
         }
         transitionRealtimeReadState(RealtimeReadState.READING_VISIBLE, "visible_panel_changed")
+        showRealtimeTranslatingPill(signature)
     }
 
     private fun markRealtimeVisiblePlacing(reason: String) {
@@ -1325,6 +1326,7 @@ class MainActivity : Activity() {
         realtimeVisiblePlaced = false
         realtimePausedSignature = realtimeCurrentSignature
         OcrDiag.log("REALTIME_PAUSE", "reason=$reason waitingFor=user_scroll")
+        hideRealtimeTranslatingPill("cancelled")
         transitionRealtimeReadState(RealtimeReadState.IDLE, reason)
     }
 
@@ -1336,6 +1338,7 @@ class MainActivity : Activity() {
             realtimeVisiblePlaced = true
             realtimePausedSignature = ""
             OcrDiag.log("REALTIME_PLACE_DONE", "placed=$placedCount reason=$reason")
+            hideRealtimeTranslatingPill("placement_done")
             transitionRealtimeReadState(RealtimeReadState.PREFETCH_NEXT, "visible_placement_complete")
         } else {
             pauseRealtimeVisible("visible_empty")
@@ -5980,6 +5983,8 @@ return t.length>=40?'TXT:'+t:'';
 
     /** Same work the menu's "AI Real-time Translation" row did when turning it off. */
     private fun disableRealtimeMode() {
+        clearRealtimeOverlay("dismiss")
+        hideRealtimeTranslatingPill("cancelled")
         deepSeekPollEvalSeq++
         handler.removeCallbacks(deepSeekVisiblePoll)
         handler.removeCallbacks(overlayGuard)
