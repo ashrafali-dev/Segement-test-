@@ -1758,7 +1758,8 @@ class MainActivity : Activity() {
         bubbles: List<WmBubble>,
         values: List<String>,
         hashes: Set<String>,
-        completesVisiblePlacement: Boolean = false
+        completesVisiblePlacement: Boolean = false,
+        panelSignature: String = realtimeCurrentSignature
     ) {
         synchronized(deepSeekInFlightTextHashes) {
             deepSeekInFlightTextHashes.removeAll(hashes)
@@ -1775,13 +1776,38 @@ class MainActivity : Activity() {
             cumulative.bubbles.map { it.translatedText.takeIf { value -> value.isNotBlank() } },
             Prefs.fontFile(this), pageKey(pageUrl)
         )
-        novelWv.evaluateJavascript(script) { raw ->
+        val panelTop = panelTopFromSignature(panelSignature)
+        bubbles.forEachIndexed { index, bubble ->
+            OcrDiag.log("PLACE_REQUEST", "panelTop=$panelTop bubble=${index + 1}")
+        }
+        if (realtimeOverlayActive && realtimeOverlaySignature == panelSignature) {
+            OcrDiag.log("OVERLAY_CLEAR", "reason=replace panelTop=$panelTop placed=$realtimeOverlayPlacedCount")
+        }
+        novelWv.evaluateJavascript(guardedRealtimePlacementScript(script, panelSignature)) { raw ->
+            if (panelSignature != realtimeCurrentSignature || decode(raw).contains("stale-panel")) {
+                bubbles.forEachIndexed { index, bubble ->
+                    OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=false reason=stale")
+                }
+                if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "stale_cached_placement")
+                return@evaluateJavascript
+            }
+            val success = decode(raw).contains("ok")
+            if (success) {
+                var accepted = 0
+                bubbles.forEachIndexed { index, bubble ->
+                    if (!values.getOrNull(index).isNullOrBlank()) {
+                        accepted++
+                        OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                    }
+                }
+                realtimeOverlayActive = true
+                realtimeOverlaySignature = panelSignature
+                realtimeOverlayPlacedCount = accepted
+                realtimeOverlayPanelTop = panelTop
+                verifyRealtimeOverlay(panelTop, accepted, panelSignature)
+            }
             if (completesVisiblePlacement) {
-                completeRealtimeVisiblePlacement(
-                    values.count { it.isNotBlank() },
-                    decode(raw).contains("ok"),
-                    "cached_visible"
-                )
+                completeRealtimeVisiblePlacement(values.count { it.isNotBlank() }, success, "cached_visible")
             }
         }
         hasTr = true
