@@ -383,7 +383,7 @@ internal object WebModeTextRemover {
                         paper, TIER1_FILL_ALPHA, (fontPx * 0.18f).toInt().coerceIn(1, 12)
                     )
                 }
-                val residual1 = residualEnergy(tier1Region, mask, paper, soft, rw)
+                val residual1 = residualEnergy(tier1Region, mask, paper, soft, rw, baseline = region)
                 OcrDiag.log(
                     "CLEAN_RESIDUAL",
                     "bubble=$bubbleNo tier=1 residual_max=${String.format(java.util.Locale.US, "%.2f", residual1)} " +
@@ -479,7 +479,7 @@ internal object WebModeTextRemover {
                 }
                 tier2Count++
                 val tier2Ms = android.os.SystemClock.elapsedRealtime() - tier2Start
-                var residualFinal = residualEnergy(out, mask, paper, soft, rw)
+                var residualFinal = residualEnergy(out, mask, paper, soft, rw, baseline = region)
                 OcrDiag.log(
                     "CLEAN_TIER",
                     "bubble=$bubbleNo tier=2 ms=$tier2Ms reason=tier1_incomplete alpha=$TIER2_FILL_ALPHA"
@@ -537,7 +537,7 @@ internal object WebModeTextRemover {
                                         out[at] = blendPixel(region[at], aiFill[at], TIER3_FILL_ALPHA)
                                     }
                                 }
-                                residualFinal = residualEnergy(out, mask, paper, soft, rw)
+                                residualFinal = residualEnergy(out, mask, paper, soft, rw, baseline = region)
                                 OcrDiag.log(
                                     "CLEAN_TIER",
                                     "bubble=$bubbleNo tier=3 ms=$aiLastMs result=ok alpha=$TIER3_FILL_ALPHA " +
@@ -708,20 +708,34 @@ internal object WebModeTextRemover {
         }
     }
 
-    /** Mean remaining ink contrast on the text mask; textured panels use a local neighbourhood reference. */
-    private fun residualEnergy(region: IntArray, mask: ByteArray, background: Int, soft: Boolean, width: Int): Float {
-        var sum = 0.0
-        var count = 0
+    /**
+     * Remaining text energy as percent of the original mask energy (0..100).
+     * The same original region supplies the denominator and background reference for every tier.
+     */
+    private fun residualEnergy(
+        candidate: IntArray,
+        mask: ByteArray,
+        background: Int,
+        soft: Boolean,
+        width: Int,
+        baseline: IntArray
+    ): Float {
+        var remainingEnergy = 0.0
+        var originalEnergy = 0.0
         for (at in mask.indices) {
             if (mask[at].toInt() == 0) continue
-            val p = region[at]
-            val sample = if (soft) neighbourMean(region, mask, at, width) else null
+            val sourcePixel = baseline[at]
+            val sample = if (soft) neighbourMean(baseline, mask, at, width) else null
             val reference = sample ?: background
-            sum += (kotlin.math.abs(red(p) - red(reference)) + kotlin.math.abs(green(p) - green(reference)) +
-                kotlin.math.abs(blue(p) - blue(reference))) / 3.0
-            count++
+            remainingEnergy += (kotlin.math.abs(red(candidate[at]) - red(reference)) +
+                kotlin.math.abs(green(candidate[at]) - green(reference)) +
+                kotlin.math.abs(blue(candidate[at]) - blue(reference))) / 3.0
+            originalEnergy += (kotlin.math.abs(red(sourcePixel) - red(reference)) +
+                kotlin.math.abs(green(sourcePixel) - green(reference)) +
+                kotlin.math.abs(blue(sourcePixel) - blue(reference))) / 3.0
         }
-        return if (count == 0) 0f else (sum / count / 255.0 * 100.0).toFloat()
+        if (originalEnergy <= 0.0) return 0f
+        return ((remainingEnergy / originalEnergy) * 100.0).coerceIn(0.0, 100.0).toFloat()
     }
 
     private fun blendPixel(original: Int, fill: Int, alpha: Float): Int {
