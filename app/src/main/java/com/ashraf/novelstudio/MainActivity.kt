@@ -2217,6 +2217,7 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
             dispatchAheadSend(0)
             return
         }
+        finishRealtimePrefetchIfIdle("prefetch_queue_drained")
     }
 
     private fun awaitRealtimeAheadSend(
@@ -2361,7 +2362,10 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
         }
         if (webModeStage == "Pre-translating upcoming panel") clearWebModeProgress()
         updateProgressUi()
-        handler.postDelayed({ pumpRealtimeAheadTranslation() }, 180L)
+        handler.postDelayed({
+            pumpRealtimeAheadTranslation()
+            finishRealtimePrefetchIfIdle("prefetch_translation_failed")
+        }, 180L)
     }
 
     private fun cancelRealtimeAheadWorker(requeue: Boolean) {
@@ -2455,12 +2459,20 @@ Each marker must remain faithful to its own ${Langs.source(this)} text in meanin
         deepSeekLastOcrAtMs = System.currentTimeMillis()
         if (webModeStage == "Pre-translating upcoming panel") clearWebModeProgress()
         updateProgressUi()
-        handler.postDelayed({ pumpRealtimeAheadTranslation() }, 100L)
+        handler.postDelayed({
+            pumpRealtimeAheadTranslation()
+            finishRealtimePrefetchIfIdle("prefetch_translation_done")
+        }, 100L)
     }
 
     private fun clearRealtimeAheadStateForNavigation() {
         clearRealtimeVisibleOcrBatch()
         cancelRealtimeAheadWorker(requeue = false)
+        realtimeVisibleJobActive = false
+        realtimeVisiblePlaced = false
+        realtimeCurrentSignature = ""
+        realtimePausedSignature = ""
+        transitionRealtimeReadState(RealtimeReadState.IDLE, "navigation")
         rtAheadTranslationQueue.clear()
         rtAheadTranslationQueuedIds.clear()
         rtAheadTranslationTasksByJobKey.clear()
