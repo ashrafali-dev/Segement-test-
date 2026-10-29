@@ -1181,8 +1181,12 @@ class MainActivity : Activity() {
         "(function(){if(window.__nsRtVisibleSig!==${org.json.JSONObject.quote(signature)})return 'stale-panel';return $script;})()"
 
     private fun clearRealtimeOverlay(reason: String) {
-        if (!realtimeOverlayActive) return
-        OcrDiag.log("OVERLAY_CLEAR", "reason=$reason panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount")
+        // Always consult/remove the DOM through the overlay manager, even if the previous
+        // visibility probe failed; the manager's flag must not let an untracked overlay go stale.
+        OcrDiag.log(
+            "OVERLAY_CLEAR",
+            "reason=$reason hadOverlay=$realtimeOverlayActive panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount"
+        )
         try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
         realtimeOverlayActive = false
         realtimeOverlaySignature = ""
@@ -1224,11 +1228,14 @@ class MainActivity : Activity() {
             (function(){
               var w=document.getElementById('__ns_wm_overlay');
               var bs=w?w.querySelectorAll('.__ns_b'):null;
-              var b=bs&&bs.length?bs[0]:null,r=b?b.getBoundingClientRect():null;
               var st=w?getComputedStyle(w):null;
               var attached=!!(w&&w.parentNode&&document.contains(w));
-              var visible=!!(attached&&b&&r&&r.width>0&&r.height>0&&b.style.display!=='none'&&
-                st&&st.display!=='none'&&st.visibility!=='hidden'&&parseFloat(st.opacity||'1')>0);
+              var visible=false;
+              for(var i=0;attached&&bs&&i<bs.length;i++){
+                var b=bs[i],r=b.getBoundingClientRect(),cs=getComputedStyle(b);
+                if(r.width>0&&r.height>0&&b.style.display!=='none'&&cs.display!=='none'&&
+                   cs.visibility!=='hidden'&&parseFloat(cs.opacity||'1')>0){visible=true;break;}
+              }
               var parent=w&&w.parentNode?w.parentNode.nodeName.toLowerCase():'none';
               return [attached?'1':'0',visible?'1':'0',Math.round(document.documentElement.clientWidth||innerWidth),
                 Math.round(innerHeight||0),parent,bs?bs.length:0,st?parseFloat(st.opacity||'1'):0].join('|');
@@ -9987,8 +9994,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             if (pending.bubbles.isEmpty()) clearRealtimeVisibleOcrBatch()
         }
 
-        if (realtimeOverlayActive) clearRealtimeOverlay("scroll")
-        else novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null)
+        clearRealtimeOverlay("scroll")
         hasTr = false
         shownTranslated = false
         shownTrRaw = ""
