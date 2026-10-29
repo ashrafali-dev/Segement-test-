@@ -620,7 +620,7 @@ internal object WebModeTextRemover {
                     val coverL = (ix0 - coverPad).coerceAtLeast(0)
                     val coverT = (iy0 - coverPad).coerceAtLeast(0)
                     val coverR = (ix1 + coverPad).coerceAtMost(rw)
-                    val coverB = (iy1 + fillPad).coerceAtMost(rh)
+                    val coverB = (iy1 + coverPad).coerceAtMost(rh)
                     if (ghostFixCandidate) {
                         // For Korean/Chinese/Latin text whose detected ink mask is tiny relative to its
                         // OCR box, cover that dilated bbox. Japanese deliberately retains its old mask-only path.
