@@ -374,12 +374,49 @@ internal object WebModeTextRemover {
                 )
             }
 
-            // Do NOT paint the entire speech-bubble interior from cv: that flattens paper texture/gradients and
-            // can turn the bubble into a visibly boxy patch. cv is contour/placement guidance, not a text mask.
-            // The loop below edits only pixels selected as lettering inside the OCR box plus a small safety margin.
-            // If the local glyph mask is not confident, leave this bubble for the writer's conservative fallback.
+            // First use the actual shape bands when they pass a conservative paper-colour check.
+            // The bands are derived from the segmentation mask or the pixel flood-fill, not from the OCR bbox.
+            // A flat verified bubble can therefore remove OCR-missed glyphs without painting a rectangular patch.
+            val shapeFilled = HashSet<String>()
+            var shapeFillCount = 0
+            for ((shapeIndex, bubble) in boundedBubbles.withIndex()) {
+                val key = WebModeTextRemovalCache.bubbleKey(bubble)
+                val result = if (bubble.free) {
+                    BubbleShapeFillResult(false, "free_art", bands = bubble.cv.size / 4)
+                } else {
+                    fillKnownBubbleShape(bitmap, bubble.cv, width, height, opaque(bubble.bg))
+                }
+                OcrDiag.log(
+                    "BUBBLE_SHAPE_FILL",
+                    "bubble=${shapeIndex + 1} key=${cleanResultKey(sourceUrl, bubble)} bands=${result.bands} " +
+                        "area=${result.area} changed=${result.changed} inkPct=${String.format(java.util.Locale.US, "%.1f", result.inkPct)} " +
+                        "stablePaperPct=${String.format(java.util.Locale.US, "%.1f", result.stablePct)} " +
+                        "accepted=${result.accepted} reason=${result.reason}"
+                )
+                if (result.accepted) {
+                    shapeFilled.add(key)
+                    erased.add(key)
+                    totalRemoved += result.changed
+                    shapeFillCount++
+                    rememberBubbleCleanResult(
+                        sourceUrl, bubble,
+                        BubbleCleanResult(0f, 0f, 100f, true, "shape_interior_fill")
+                    )
+                }
+            }
+
+            // Fallback path: when the bubble shape is missing or its interior is not demonstrably flat,
+            // continue with the existing conservative OCR glyph mask and tiered inpainting.
             for ((bubbleIndex, bubble) in boundedBubbles.withIndex()) {
                 val bubbleNo = bubbleIndex + 1
+                val stableBubbleKey = WebModeTextRemovalCache.bubbleKey(bubble)
+                if (stableBubbleKey in shapeFilled) {
+                    OcrDiag.log(
+                        "CLEAN_SKIP",
+                        "bubble=$bubbleNo key=${cleanResultKey(sourceUrl, bubble)} reason=shape_interior_already_filled"
+                    )
+                    continue
+                }
                 val cx = bubble.cx * width
                 val cy = bubble.cy * height
                 val bw = bubble.w * width
@@ -1291,7 +1328,7 @@ internal object WebModeTextRemover {
                 "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count aiExecutionAllowed=$allowAi " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
-                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} " +
+                    "removedPixels=$panelRemovedForLog shapeFill=$shapeFillCount residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} " +
                         "residual_scope=decision_bbox_except_japanese metric=normalized_0_100 " +
                         "failedMaskArea>$MIGAN_MAX_MASK_AREA failedResidual>=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
             )
@@ -1639,6 +1676,113 @@ internal object WebModeTextRemover {
      * bottom image fractions) that differs from it. Returns the number of pixels changed. If more than ~45 % of the
      * interior is dark/coloured it is not an empty bubble with lettering but artwork: nothing is touched.
      */
+    private data class BubbleShapeFillResult(
+        val accepted: Boolean,
+        val reason: String,
+        val bands: Int = 0,
+        val area: Long = 0L,
+        val changed: Int = 0,
+        val inkPct: Float = 0f,
+        val stablePct: Float = 0f
+    )
+
+    /**
+     * Paint only a known bubble's interior bands, and only when the pixels prove it is a flat paper fill.
+     * Read one scanline at a time to keep peak memory O(width), including on tall comic panels.
+     */
+    private fun fillKnownBubbleShape(
+        bitmap: Bitmap,
+        cv: List<Float>,
+        width: Int,
+        height: Int,
+        background: Int
+    ): BubbleShapeFillResult {
+        if (cv.size < 4 || cv.size % 4 != 0) {
+            return BubbleShapeFillResult(false, "no_shape_bands", bands = cv.size / 4)
+        }
+        val rects = ArrayList<IntArray>(cv.size / 4)
+        var area = 0L
+        var q = 0
+        while (q + 3 < cv.size) {
+            val lf = cv[q]; val tf = cv[q + 1]; val rf = cv[q + 2]; val bf = cv[q + 3]
+            if (!lf.isFinite() || !tf.isFinite() || !rf.isFinite() || !bf.isFinite()) {
+                return BubbleShapeFillResult(false, "invalid_band_geometry", bands = rects.size)
+            }
+            val l = (lf * width).toInt().coerceIn(0, width)
+            val t = (tf * height).toInt().coerceIn(0, height)
+            val r = ceil(rf * width).toInt().coerceIn(l, width)
+            val b = ceil(bf * height).toInt().coerceIn(t, height)
+            if (r - l >= 2 && b - t >= 2) {
+                val bandArea = (r - l).toLong() * (b - t).toLong()
+                if (bandArea > MAX_PIXELS) {
+                    return BubbleShapeFillResult(false, "band_area_guard", bands = rects.size)
+                }
+                area += bandArea
+                if (area > MAX_PIXELS) {
+                    return BubbleShapeFillResult(false, "shape_area_guard", bands = rects.size + 1, area = area)
+                }
+                rects.add(intArrayOf(l, t, r, b))
+            }
+            q += 4
+        }
+        if (rects.isEmpty() || area < 64L) {
+            return BubbleShapeFillResult(false, "no_valid_shape_area", bands = rects.size, area = area)
+        }
+
+        val paper = opaque(background)
+        val row = IntArray(width)
+        var inkPixels = 0L
+        var nonInkPixels = 0L
+        var stablePaperPixels = 0L
+        var changedPixels = 0L
+        for (rc in rects) {
+            val bandW = rc[2] - rc[0]
+            for (y in rc[1] until rc[3]) {
+                bitmap.getPixels(row, 0, width, rc[0], y, bandW, 1)
+                for (x in 0 until bandW) {
+                    val d = distance(row[x], paper)
+                    if (d >= 60f) inkPixels++
+                    else {
+                        nonInkPixels++
+                        if (d <= 32f) stablePaperPixels++
+                    }
+                    if (d >= 4f) changedPixels++
+                }
+            }
+        }
+        val inkPct = inkPixels.toFloat() * 100f / area.toFloat()
+        val stablePct = if (nonInkPixels == 0L) 0f
+            else stablePaperPixels.toFloat() * 100f / nonInkPixels.toFloat()
+        if (inkPct > 45f) {
+            return BubbleShapeFillResult(false, "ink_or_art_too_dense", rects.size, area, changedPixels.toInt(), inkPct, stablePct)
+        }
+        if (stablePct < 82f) {
+            return BubbleShapeFillResult(false, "paper_not_flat_enough", rects.size, area, changedPixels.toInt(), inkPct, stablePct)
+        }
+        if (changedPixels < 8L) {
+            return BubbleShapeFillResult(false, "no_pixels_to_change", rects.size, area, 0, inkPct, stablePct)
+        }
+
+        var actuallyChanged = 0
+        for (rc in rects) {
+            val bandW = rc[2] - rc[0]
+            for (y in rc[1] until rc[3]) {
+                bitmap.getPixels(row, 0, width, rc[0], y, bandW, 1)
+                for (x in 0 until bandW) {
+                    if (distance(row[x], paper) >= 4f) {
+                        row[x] = paper
+                        actuallyChanged++
+                    }
+                }
+                bitmap.setPixels(row, 0, width, rc[0], y, bandW, 1)
+            }
+        }
+        return BubbleShapeFillResult(
+            true, "shape_interior_fill", rects.size, area,
+            actuallyChanged, inkPct, stablePct
+        )
+    }
+
     /**
      * True when the pixels just around the masked lettering are plain (flat colour or a soft gradient). Free lettering
      * on such a background can be erased with the onion fill without smearing any artwork; before, free lettering was

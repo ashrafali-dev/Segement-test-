@@ -146,6 +146,15 @@ assert.ok(cleaner.includes('bboxFillArea=$bboxFillArea') &&
           cleaner.includes('!unmaskedCandidateLikelyInk') &&
           cleaner.includes('action=retain_opaque_cover'),
   'cleaner must distinguish rounded-box fills from mask fills and retain the opaque cover when likely text-colour pixels remain outside the mask');
+assert.ok(cleaner.includes('fillKnownBubbleShape(bitmap, bubble.cv') &&
+           cleaner.includes('BUBBLE_SHAPE_FILL') &&
+           cleaner.includes('shape_interior_already_filled') &&
+           cleaner.includes('ink_or_art_too_dense') &&
+           cleaner.includes('paper_not_flat_enough') &&
+           cleaner.includes('stablePaperPixels') &&
+           cleaner.includes('totalRemoved += result.changed'),
+   'known bubble-shaped bands must clean only a verified flat interior, log the result, and preserve artwork when the paper-colour guard fails');
+
 assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true reason=residual>8') &&
           cleaner.includes('tryAcquireGlobalCallBudget') &&
           painter.includes('GLOBAL_CALL_LIMIT = 20') &&
