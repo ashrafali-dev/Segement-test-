@@ -142,7 +142,7 @@ assert.ok(extractor.includes("val realtimePriority = !scanMode") &&
   extractor.includes("allowAi = true") &&
   extractor.includes("prefetchMode = req.ahead > 0"),
   "scanning mode must be independent of fast Lens dispatch while realtime/read-ahead stay latency-limited");
-assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
+assert.ok(extractor.includes("scanMode && remoteDet && detOk && scanDetect") &&
   extractor.includes("else if (scanMode && scanDetect && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
   "heavy RT-DETR must run only when scan detection is explicitly enabled; the pixel bbox fallback always remains");
 assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
