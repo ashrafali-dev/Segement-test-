@@ -136,6 +136,13 @@ assert.ok(cleaner.includes('tier2CandidateResidual > residual1 * 1.1f') &&
 assert.ok(cleaner.includes('CLEAN_FILL') && cleaner.includes('CLEAN_ASSERT') &&
           cleaner.includes('tier1CoversMask') && cleaner.includes('fillArea++'),
   'Tier 1 must log alpha, fill coverage and mask coverage assertion');
+assert.ok(cleaner.includes('bboxFillArea=$bboxFillArea') &&
+          cleaner.includes('fillMode=') && cleaner.includes('paintedPixels++') &&
+          cleaner.includes('CLEAN_BBOX_AUDIT') && cleaner.includes('unmaskedCandidatePixels=') &&
+          cleaner.includes('scope=mask metric=normalized_0_100') &&
+          cleaner.includes('!unmaskedCandidateLikelyInk') &&
+          cleaner.includes('action=retain_opaque_cover'),
+  'cleaner must distinguish rounded-box fills from mask fills and retain the opaque cover when likely text-colour pixels remain outside the mask');
 assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true reason=residual>8') &&
           cleaner.includes('tryAcquireGlobalCallBudget') &&
           painter.includes('GLOBAL_CALL_LIMIT = 20') &&
