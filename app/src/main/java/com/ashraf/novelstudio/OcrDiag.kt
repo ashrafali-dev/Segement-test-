@@ -65,17 +65,34 @@ internal object OcrDiag {
 
     /** Called once when a Web Mode job finishes (success or failure). */
     fun jobDone(host: String, summary: String, ok: Boolean, how: String, ms: Long, error: String) {
+        val hostKey = host.ifBlank { "?" }
+        val hostForLog = hostKey.lowercase(Locale.US)
+        var snapshotJobs = 0
+        var snapshotAvgMs = 0L
+        var takeSnapshot = false
         synchronized(lock) {
-            val s = sites.getOrPut(host.ifBlank { "?" }) { SiteStat() }
+            val s = sites.getOrPut(hostKey) { SiteStat() }
             s.jobs++
             if (ok) s.ok++ else s.fail++
             when (how) { "canvas" -> s.viaCanvas++; "screen" -> s.viaScreen++; else -> s.viaDom++ }
             s.totalMs += ms
             s.lastSummary = summary
             if (error.isNotBlank()) s.lastError = error
+            if (s.jobs % 10 == 0) {
+                takeSnapshot = true
+                snapshotJobs = s.jobs
+                snapshotAvgMs = if (s.jobs == 0) 0L else s.totalMs / s.jobs
+            }
         }
         BubbleDetector.scanEnd()   // balances scanStart() of a whole-chapter scan job (no-op for live jobs)
         log("JOB_DONE", "ok=$ok via=$how ms=$ms err=$error | $summary")
+        if (takeSnapshot) {
+            val (cold, hot) = OcrPanelTiming.hostBucketCounts(hostForLog)
+            log(
+                "PERF_SNAPSHOT",
+                "host=$hostForLog jobs=$snapshotJobs avgMs=$snapshotAvgMs cold=$cold hot=$hot"
+            )
+        }
     }
 
     @Suppress("DEPRECATION")
