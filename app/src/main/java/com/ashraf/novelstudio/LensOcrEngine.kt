@@ -154,7 +154,12 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
             post(payload, fastMode).also { networkMs = SystemClock.elapsedRealtime() - networkStart }
         } catch (e: OcrUnavailableException) {
             networkMs = SystemClock.elapsedRealtime() - networkStart
-            val diagnostic = "request failed; networkMs=$networkMs; totalMs=${SystemClock.elapsedRealtime() - t0}; http=${currentHttpStatus()}; ${currentHttpMeta()}; error=${e.message ?: e.javaClass.simpleName}"
+            val message = e.message ?: e.javaClass.simpleName
+            // netInfo() can fail fast before the transport-level retry logic sees an offline state.
+            if (message.contains("no internet connection", ignoreCase = true)) {
+                Breaker.transient("no internet connection")
+            }
+            val diagnostic = "request failed; networkMs=$networkMs; totalMs=${SystemClock.elapsedRealtime() - t0}; http=${currentHttpStatus()}; ${currentHttpMeta()}; error=$message"
             OcrEngineStatus.setLensDiagnostic(diagnostic)
             Log.e(TAG, diagnostic)
             throw e
@@ -775,13 +780,31 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         private var openUntil = 0L
         private var reason = ""
         private var transientFails = 0
+        private var halfOpenProbeInFlight = false
 
         @Synchronized fun check() {
-            // Stable text on purpose (no countdown): the router toasts each DISTINCT message only once.
-            if (openUntil - SystemClock.elapsedRealtime() > 0) throw OcrUnavailableException("Google Lens: paused after $reason")
+            val now = SystemClock.elapsedRealtime()
+            if (openUntil > now) {
+                OcrDiag.log("LENS_SKIP", "reason=circuit_open fallback=mlkit remainingMs=${openUntil - now}")
+                throw OcrUnavailableException("Google Lens: paused after $reason")
+            }
+            // After the cooldown, permit one probe only. All concurrent callers continue through ML Kit.
+            if (openUntil > 0L) {
+                if (halfOpenProbeInFlight) {
+                    OcrDiag.log("LENS_SKIP", "reason=circuit_open fallback=mlkit probe=busy")
+                    throw OcrUnavailableException("Google Lens: paused after $reason")
+                }
+                halfOpenProbeInFlight = true
+                OcrDiag.log("LENS_CIRCUIT_PROBE", "reason=$reason halfOpen=true")
+            }
         }
 
-        @Synchronized fun success() { transientFails = 0; openUntil = 0L; reason = "" }
+        @Synchronized fun success() {
+            transientFails = 0
+            openUntil = 0L
+            halfOpenProbeInFlight = false
+            reason = ""
+        }
 
         @Synchronized fun status(): String {
             val left = openUntil - SystemClock.elapsedRealtime()
@@ -790,10 +813,32 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         }
 
         @Synchronized fun transient(why: String) {
+            val now = SystemClock.elapsedRealtime()
+            val wasHalfOpenProbe = halfOpenProbeInFlight
             reason = why
+            halfOpenProbeInFlight = false
+            val low = why.lowercase(Locale.US)
+            val networkReason = when {
+                "dns" in low || "unknownhost" in low || "unknown host" in low -> "dns_failed"
+                "no internet" in low || "offline" in low -> "no_internet"
+                "timeout" in low || "timed out" in low || "sockettimeout" in low -> "timeout"
+                else -> ""
+            }
+            if (networkReason.isNotEmpty()) {
+                val cooldownMs = if (wasHalfOpenProbe) 60_000L else 30_000L
+                openUntil = now + cooldownMs
+                transientFails = 0
+                OcrDiag.log(
+                    "LENS_CIRCUIT_OPEN",
+                    "reason=$networkReason cooldownSec=${cooldownMs / 1000} halfOpenProbeFailed=$wasHalfOpenProbe"
+                )
+                Log.w(TAG, "pausing Lens ${cooldownMs / 1000}s: $networkReason ($why)")
+                return
+            }
             if (++transientFails >= TRANSIENT_TRIP) {
                 transientFails = 0
-                openUntil = SystemClock.elapsedRealtime() + TRANSIENT_PAUSE_MS
+                openUntil = now + TRANSIENT_PAUSE_MS
+                OcrDiag.log("LENS_CIRCUIT_OPEN", "reason=transient_failures cooldownSec=${TRANSIENT_PAUSE_MS / 1000}")
                 Log.w(TAG, "pausing Lens ${TRANSIENT_PAUSE_MS / 1000}s: $why")
             }
         }
@@ -801,6 +846,7 @@ internal class LensOcrEngine(context: Context) : OcrEngine {
         @Synchronized fun permanent(why: String) {
             reason = why
             transientFails = 0
+            halfOpenProbeInFlight = false
             openUntil = SystemClock.elapsedRealtime() + PERMANENT_PAUSE_MS
             Log.w(TAG, "pausing Lens ${PERMANENT_PAUSE_MS / 60000} min: $why")
         }
