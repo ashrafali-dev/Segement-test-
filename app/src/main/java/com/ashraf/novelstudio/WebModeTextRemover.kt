@@ -41,7 +41,9 @@ internal object WebModeTextRemover {
     @Volatile var lastTier1Count: Int = 0
         private set
     private val residualBySource = ConcurrentHashMap<String, Float>()
+    private val cleanedBySource = ConcurrentHashMap<String, Boolean>()
     fun residualForSource(sourceUrl: String): Float? = residualBySource[WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }]
+    fun cleanStatusForSource(sourceUrl: String): Boolean? = cleanedBySource[WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }]
     private val cleanSemaphore = Semaphore(2, true)
     private val cleanDurationMs = ThreadLocal<Long>()
     fun lastCleanMsForThread(): Long = cleanDurationMs.get() ?: 0L
@@ -65,6 +67,9 @@ internal object WebModeTextRemover {
         pageUrl: String = ""
     ): Boolean {
         val startedAt = android.os.SystemClock.elapsedRealtime()
+        val sourceKey = WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }
+        cleanedBySource.remove(sourceKey)
+        residualBySource.remove(sourceKey)
         var acquired = false
         try {
             acquired = try { cleanSemaphore.tryAcquire(1, TimeUnit.SECONDS) }
@@ -75,9 +80,16 @@ internal object WebModeTextRemover {
                     OcrDiag.log("CLEAN_SKIP", "reason=concurrency_limit bubbles=${bubbles.size}")
                     OcrDiag.log("CLEAN_REALTIME", "bubbles=${bubbles.size} tier1=0 residualMax=0.00 ms=1000 cleaned=false")
                 }
+                cleanedBySource[sourceKey] = false
                 return false
             }
-            return cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode, pageUrl)
+            val cleaned = cleanAndCacheUnlocked(context, sourceUrl, encoded, bubbles, allowAi, realtimeMode, prefetchMode, panelNo, scanMode, pageUrl)
+            cleanedBySource[sourceKey] = cleaned
+            if (cleanedBySource.size > 512) {
+                val staleKey = cleanedBySource.keys.firstOrNull { it != sourceKey }
+                if (staleKey != null) cleanedBySource.remove(staleKey)
+            }
+            return cleaned
         } finally {
             if (acquired) cleanSemaphore.release()
             cleanDurationMs.set(android.os.SystemClock.elapsedRealtime() - startedAt)
@@ -99,7 +111,6 @@ internal object WebModeTextRemover {
         lastResidualMax = 0f
         lastTier1Count = 0
         val sourceKey = WebModeLogic.normalizeUrl(sourceUrl).ifBlank { sourceUrl }
-        residualBySource.remove(sourceKey)
         val callStartedMs = android.os.SystemClock.elapsedRealtime()
         fun earlySkip(reason: String): Boolean {
             if (realtimeMode) {
