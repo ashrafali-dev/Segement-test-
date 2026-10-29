@@ -742,6 +742,12 @@ internal class WebModeExtractor(
 
         private fun processInner(panels: List<PanelRef>, meta: PageMeta) {
             val total = panels.size
+            val scanMode = !req.visibleOnly && req.ahead <= 0
+            OcrDiag.log(
+                "MODE_ENGAGED",
+                "mode=${if (scanMode) "scan" else "realtime"} expectations=${if (scanMode) "premium" else "fast"} " +
+                    "panels=$total visibleOnly=${req.visibleOnly} ahead=${req.ahead}"
+            )
             val liveView = req.visibleOnly && req.forceOcrSrc.isNullOrBlank()
             val hasCanvas = panels.any { it.src.startsWith("data:", true) }
             if (hasCanvas) how = "canvas"
@@ -1099,6 +1105,16 @@ internal class WebModeExtractor(
                 WebModeLayoutStore.put(wv.context, meta.url, scanLayout)
             }
             OcrDiag.log("BATCH_FLUSH_DONE", "markersFlushed=${scanLayout.bubbles.count { it.sourceText.isNotBlank() }} bubbles=${scanLayout.bubbles.size}")
+            if (scanLayout.bubbles.isNotEmpty()) {
+                val roles = WebModeChapterContext.sourceRoleCounts(scanLayout.bubbles)
+                val collectedPanels = panels.size.coerceAtLeast(1)
+                OcrDiag.log(
+                    "CHAPTER_COLLECT",
+                    "panels=$collectedPanels bubbles=${scanLayout.bubbles.count { it.sourceText.isNotBlank() }} " +
+                        "dialogue=${roles.first} sfx=${roles.second} narration=${roles.third} " +
+                        "charsIn=${scanLayout.bubbles.sumOf { it.sourceText.length }}"
+                )
+            }
             val ch = Chapter(
                 title = title,
                 text = text,
@@ -2191,6 +2207,13 @@ internal class WebModeExtractor(
                         // If cleanup is uncertain, retain the original panel and normal overlay.
                     }
                 }
+                if (!req.visibleOnly && req.ahead <= 0) {
+                    OcrDiag.log(
+                        "DETECT_MODE",
+                        "mode=scan ran=true masks=${bubbles.size} source=pixel_bbox_fallback bboxPad=5 " +
+                            "reason=${if (bubbles.isEmpty()) "no_ocr_bubbles" else "ocr_bbox_masks_ready"}"
+                    )
+                }
                 OcrPanelTiming.finish()
                 return PanelOcr(texts.joinToString("\n\n"), bubbles)
             }
@@ -2246,7 +2269,6 @@ internal class WebModeExtractor(
                 } finally { cropped.recycle() }
                 return finishResult()
             }
-            val scanMode = !req.visibleOnly && req.ahead <= 0
             if (scanMode) {
                 // Trusted scanning mode tries the complete panel first so one OCR response preserves spatial
                 // and sentence context. Only a genuinely empty whole-panel response is split, and never into
@@ -2270,7 +2292,7 @@ internal class WebModeExtractor(
                 val startSecond = (h - fallbackHeight).coerceAtLeast(0)
                 val fallbackSlices = listOf(0 to fallbackHeight, startSecond to h).distinct()
                     .filter { it.second > it.first }
-                OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=${fallbackSlices.size} decision=fallback_slice")
+                OcrDiag.log("SLICE_STRATEGY", "mode=scan slices=${fallbackSlices.size + 1} decision=fallback_slice")
                 @Suppress("DEPRECATION")
                 val region = try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null }
                 if (region != null) {
