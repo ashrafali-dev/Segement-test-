@@ -1172,6 +1172,53 @@ class MainActivity : Activity() {
     private var realtimeOverlayPanelTop = 0
     private var translatingPillSignature = ""
 
+    private fun panelTopFromSignature(signature: String): Int =
+        Regex("@\\d+x\\d+@-?\\d+,(-?\\d+)").find(signature)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+    private fun guardedRealtimePlacementScript(script: String, signature: String): String =
+        "(function(){if(window.__nsRtVisibleSig!==${org.json.JSONObject.quote(signature)})return 'stale-panel';return $script;})()"
+
+    private fun clearRealtimeOverlay(reason: String) {
+        if (!realtimeOverlayActive) return
+        OcrDiag.log("OVERLAY_CLEAR", "reason=$reason panelTop=$realtimeOverlayPanelTop placed=$realtimeOverlayPlacedCount")
+        try { novelWv.evaluateJavascript(WebModeWriter.clearCanvasOverlayScript(), null) } catch (_: Throwable) {}
+        realtimeOverlayActive = false
+        realtimeOverlaySignature = ""
+        realtimeOverlayPlacedCount = 0
+        realtimeOverlayPanelTop = 0
+    }
+
+    private fun clearRealtimePlacementQueue(nextSignature: String) {
+        var dropped = 0
+        val pending = rtVisibleOcrBatch
+        if (pending != null && pending.panelSignature != nextSignature) {
+            dropped += pending.bubbles.size
+            clearRealtimeVisibleOcrBatch()
+        }
+        val staleQueued = queue.filter { ch ->
+            isRealtimeBubbleBatch(ch) && realtimeBatchSignatureByChapter[ch] != nextSignature
+        }
+        for (ch in staleQueued) {
+            val layout = realtimeBatchLayout(ch)
+            val oldSignature = realtimeBatchSignatureByChapter[ch].orEmpty()
+            val oldTop = panelTopFromSignature(oldSignature)
+            layout?.bubbles?.forEachIndexed { index, bubble ->
+                OcrDiag.log("PLACE_REJECT", "panelTop=$oldTop bubble=${index + 1} current=false reason=stale")
+            }
+            dropped += layout?.bubbles?.size ?: 1
+            queue.remove(ch)
+            releaseDeepSeekHashBatch(ch)
+        }
+        val active = running
+        if (active != null && isRealtimeBubbleBatch(active) &&
+            realtimeBatchSignatureByChapter[active] != nextSignature) {
+            dropped += realtimeBatchLayout(active)?.bubbles?.size ?: 1
+            // Keep its identity until the reply returns; applyTranslation will reject it by the captured signature.
+        }
+        OcrDiag.log("PLACE_QUEUE_CLEAR", "reason=visible_panel_changed dropped=$dropped")
+    }
+
     private fun transitionRealtimeReadState(next: RealtimeReadState, reason: String) {
         val previous = realtimeReadState
         if (previous == next) return
