@@ -1823,21 +1823,42 @@ class MainActivity : Activity() {
             }
             val success = decode(raw).contains("ok")
             if (success) {
-                var accepted = 0
-                bubbles.forEachIndexed { index, bubble ->
-                    if (!values.getOrNull(index).isNullOrBlank()) {
-                        accepted++
-                        OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                val accepted = values.count { it.isNotBlank() }
+                verifyRealtimeOverlay(panelTop, accepted, panelSignature) { visible ->
+                    if (panelSignature != realtimeCurrentSignature) {
+                        bubbles.forEachIndexed { index, bubble ->
+                            if (!values.getOrNull(index).isNullOrBlank()) {
+                                OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=false reason=stale")
+                            }
+                        }
+                        if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "stale_cached_placement")
+                        return@verifyRealtimeOverlay
+                    }
+                    if (visible) {
+                        bubbles.forEachIndexed { index, bubble ->
+                            if (!values.getOrNull(index).isNullOrBlank()) {
+                                OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                            }
+                        }
+                        if (completesVisiblePlacement) {
+                            completeRealtimeVisiblePlacement(accepted, accepted > 0, "cached_visible")
+                        }
+                    } else {
+                        bubbles.forEachIndexed { index, bubble ->
+                            if (!values.getOrNull(index).isNullOrBlank()) {
+                                OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=overlay_not_visible")
+                            }
+                        }
+                        if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "overlay_not_visible")
                     }
                 }
-                realtimeOverlayActive = true
-                realtimeOverlaySignature = panelSignature
-                realtimeOverlayPlacedCount = accepted
-                realtimeOverlayPanelTop = panelTop
-                verifyRealtimeOverlay(panelTop, accepted, panelSignature)
-            }
-            if (completesVisiblePlacement) {
-                completeRealtimeVisiblePlacement(values.count { it.isNotBlank() }, success, "cached_visible")
+            } else {
+                bubbles.forEachIndexed { index, bubble ->
+                    if (!values.getOrNull(index).isNullOrBlank()) {
+                        OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=overlay_script_failed")
+                    }
+                }
+                if (completesVisiblePlacement) completeRealtimeVisiblePlacement(0, false, "overlay_script_failed")
             }
         }
         hasTr = true
