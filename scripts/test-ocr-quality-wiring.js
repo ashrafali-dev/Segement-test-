@@ -162,12 +162,16 @@ assert.ok(cleaner.includes('WebtoonBubbleMaskKit.shouldHandle(pageUrl)') &&
           cleaner.includes('webtoonFit?.accepted == true') &&
           cleaner.includes('else -> fillKnownBubbleShape(bitmap, bubble.cv'),
   'only webtoon pages may use the dedicated shape-paper cleaner; rejected fits must retain the conservative fallback');
+assert.ok(extractor.includes('fit.bands(WebtoonBubbleMaskKit.shapeBandLimit(startUrl))'),
+  'only Webtoon pages may raise the shape-band resolution; manga must retain the established default');
 assert.ok(webtoonKit.includes('fun shouldHandle(pageUrl: String)') &&
           webtoonKit.includes('webtoonPath || webtoonsHost') &&
+          webtoonKit.includes('SHAPE_BANDS = 96') &&
+          webtoonKit.includes('DEFAULT_SHAPE_BANDS = 28') &&
           webtoonKit.includes('inferPaperColour') &&
           webtoonKit.includes('interpolate(leftColour, rightColour') &&
           webtoonKit.includes('dense_ink_or_art'),
-  'the isolated Webtoon kit must scope itself to webtoon URLs, sample bubble paper, preserve mild gradients and reject dense artwork');
+  'the isolated Webtoon kit must use higher shape precision, sample bubble paper, preserve mild gradients and reject dense artwork');
 
 assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true reason=residual>8') &&
           cleaner.includes('tryAcquireGlobalCallBudget') &&
