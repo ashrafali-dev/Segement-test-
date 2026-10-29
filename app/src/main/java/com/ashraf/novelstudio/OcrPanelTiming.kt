@@ -8,6 +8,7 @@ internal object OcrPanelTiming {
     private data class Frame(
         val panel: Int,
         val startedAtMs: Long,
+        val host: String,
         var lensCalls: Int = 0,
         var lensBucket: String = "",
         var ocrMs: Long = 0L,
@@ -20,11 +21,22 @@ internal object OcrPanelTiming {
     private var hotPanels = 0L
     private var coldTotalMs = 0L
     private var hotTotalMs = 0L
+    private data class HostBucketCounts(var cold: Long = 0L, var hot: Long = 0L)
+    private val hostBuckets = HashMap<String, HostBucketCounts>()
 
-    fun begin(panel: Int, startedAtMs: Long, prefilterMs: Long = 0L) {
+    fun begin(panel: Int, startedAtMs: Long, prefilterMs: Long = 0L, host: String = "?") {
         if (panel <= 0) { active.remove(); return }
-        active.set(Frame(panel, if (startedAtMs > 0L) startedAtMs else SystemClock.elapsedRealtime(),
-            ocrMs = prefilterMs.coerceAtLeast(0L)))
+        active.set(Frame(
+            panel = panel,
+            startedAtMs = if (startedAtMs > 0L) startedAtMs else SystemClock.elapsedRealtime(),
+            host = host.lowercase(Locale.US).ifBlank { "?" },
+            ocrMs = prefilterMs.coerceAtLeast(0L)
+        ))
+    }
+
+    fun hostBucketCounts(host: String): Pair<Long, Long> = synchronized(statsLock) {
+        val counts = hostBuckets[host.lowercase(Locale.US).ifBlank { "?" }]
+        (counts?.cold ?: 0L) to (counts?.hot ?: 0L)
     }
 
     fun noteLensCall() {
@@ -47,8 +59,13 @@ internal object OcrPanelTiming {
         if (bucket == "cold" || bucket == "hot") {
             val summary: String
             synchronized(statsLock) {
-                if (bucket == "cold") { coldPanels++; coldTotalMs += totalMs }
-                else { hotPanels++; hotTotalMs += totalMs }
+                if (bucket == "cold") {
+                    coldPanels++; coldTotalMs += totalMs
+                    hostBuckets.getOrPut(frame.host) { HostBucketCounts() }.cold++
+                } else {
+                    hotPanels++; hotTotalMs += totalMs
+                    hostBuckets.getOrPut(frame.host) { HostBucketCounts() }.hot++
+                }
                 val avgCold = if (coldPanels == 0L) 0L else coldTotalMs / coldPanels
                 val avgHot = if (hotPanels == 0L) 0L else hotTotalMs / hotPanels
                 summary = "cold=$coldPanels hot=$hotPanels avgCold=$avgCold avgHot=$avgHot metric=totalMs"
