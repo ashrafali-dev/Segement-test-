@@ -484,7 +484,7 @@ internal object WebModeTextRemover {
                 OcrDiag.log(
                     "CLEAN_FILL",
                     "bubble=$bubbleNo maskArea=$maskArea fillArea=$fillArea appliedAlpha=$tier1Alpha " +
-                        "largeMask=$largeMask alpha=$tier1Alpha ringSamplePad=$ringSamplePad"
+                        "largeMask=$largeMask alpha=$tier1Alpha ringSamplePad=${BBOX_DILATION_PX + ringSamplePad}"
                 )
                 OcrDiag.log(
                     "CLEAN_ASSERT",
