@@ -492,8 +492,11 @@ internal class RoutingOcrEngine : OcrEngine {
      * Local-only fast read, never routed: used as a pre-filter so a silent panel costs no network round trip.
      * The result is only ever used to decide "definitely no text"; nothing it returns is placed on the page.
      */
-    fun recognizeLocalFast(bitmap: Bitmap, script: OcrScript): OcrResult =
-        OcrGate.run { mlKit.recognizeFast(bitmap, script) }
+    fun recognizeLocalFast(bitmap: Bitmap, script: OcrScript): OcrResult {
+        // Chapter-wide local prefilter bypasses the main route(), so it must honour the same negative cache.
+        if (OcrNegativeCache.hit(bitmap)) return OcrResult(emptyList())
+        return OcrGate.run { mlKit.recognizeFast(bitmap, script) }
+    }
 
     /** Never frees an engine while it is reading: the release runs on its own thread, behind OcrGate. */
     override fun close() {

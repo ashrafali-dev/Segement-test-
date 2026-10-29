@@ -14,6 +14,9 @@ const painter = read('app/src/main/java/com/ashraf/novelstudio/WebModeInpainter.
 const assetScript = read('scripts/prepare-migan-asset.sh');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
+const localFastStart = routing.indexOf('fun recognizeLocalFast(');
+assert.ok(localFastStart >= 0 && routing.slice(localFastStart).includes('OcrNegativeCache.hit(bitmap)'),
+  'the chapter prefilter must also bypass ML Kit on negative-cache hit');
 assert.ok(routing.includes('OcrGarbageFilter.filter(raw.blocks, script, bitmap.width, bitmap.height)'),
   'garbage filter must run before OCR output reaches translation');
 assert.ok(negative.includes('DEFAULT_TTL_MS = 30_000L') &&
