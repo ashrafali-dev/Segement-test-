@@ -294,6 +294,28 @@ internal class WebModeExtractor(
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
                 "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
             progress("Discovering chapter panels", 1)
+            if (req.visibleOnly && req.forceScreenOcr) {
+                val knownLayout = WebModeLayoutStore.getScan(startUrl) ?: WebModeLayoutStore.get(wv.context, startUrl)
+                val expectedBlocks = knownLayout?.bubbles?.count { it.sourceText.isNotBlank() }
+                if (expectedBlocks != null && expectedBlocks < 3) {
+                    OcrDiag.log("FORCE_SKIP", "reason=tiny_panel expectedBlocks=$expectedBlocks source=known_layout")
+                    diag.error = WebModeError.OCR_EMPTY
+                    OcrDiag.jobDone(
+                        diag.host, diag.summary(), false, how, elapsed(),
+                        "FORCE_SKIP reason=tiny_panel expectedBlocks=$expectedBlocks"
+                    )
+                    onMain {
+                        req.onDone(
+                            WebModeOutcome.Failure(
+                                WebModeError.OCR_EMPTY,
+                                "Tiny panel; skipped costly FORCE screenshot retry",
+                                diag
+                            )
+                        )
+                    }
+                    return
+                }
+            }
             if ((req.force && !req.visibleOnly) || req.forceScreenOcr) {
                 worker.execute { runCatching { processForce() }.onFailure {
                     Log.w(TAG, "force job $id crashed: ${it.javaClass.simpleName}")
