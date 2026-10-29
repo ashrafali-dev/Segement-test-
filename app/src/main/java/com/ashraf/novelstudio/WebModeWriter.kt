@@ -178,6 +178,11 @@ internal object WebModeWriter {
         t.style.webkitBackgroundClip='text'; t.style.backgroundClip='text';
         t.style.webkitTextFillColor='transparent'; t.style.color='transparent';
       }
+      if(it.sfx){
+        // Distinct lettering treatment, but leave the original art visible under a successful clean image.
+        t.style.fontWeight='800'; t.style.fontStyle='italic'; t.style.opacity='0.98';
+        t.style.webkitTextStroke='0.75px rgba(255,255,255,0.72)';
+      }
       b.appendChild(t);
       var cover=null;
       var hasCv=!!(it.cv&&it.cv.length>=4);
@@ -196,8 +201,8 @@ internal object WebModeWriter {
             cover.appendChild(cd);
           }
         }else{
-          cover.style.borderRadius=it.sf?'12px':'4px';
-          cover.style.boxShadow=it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg;
+          cover.style.borderRadius=it.sfx?'0':(it.sf?'12px':'4px');
+          cover.style.boxShadow=it.sfx?'none':(it.sf?'0 0 7px 5px '+it.bg:'0 0 0 3px '+it.bg);
         }
         cover.__nsWaitClean=!!it.cl&&!hasCv;
         coverLayer.appendChild(cover);
@@ -1272,6 +1277,13 @@ internal object WebModeWriter {
                 }
                 continue
             }
+            val sfx = WebModeChapterContext.classifyRole(b.sourceText, b) == WebModeTextRole.SFX
+            if (sfx) {
+                val original = b.sourceText.replace('\n', ' ').replace('"', '\'').take(36)
+                val result = t.replace('\n', ' ').replace('"', '\'').take(36)
+                OcrDiag.log("SFX_PLACE", "bubble=${i + 1} origText=\"$original\" translated=\"$result\" " +
+                    "style=bold_italic position=original_bbox")
+            }
             arr.put(JSONObject()
                 .put("t", t).put("s", WebModeLogic.normalizeUrl(b.src))
                 .put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
@@ -1288,7 +1300,8 @@ internal object WebModeWriter {
                                 .put(r5(Math.max(0f, mr))).put(r5(Math.max(0f, mb))))
                     }
                 }
-                .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
+                .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("sfx", sfx)
+                .put("o", if (b.stroke != 0) css(b.stroke) else "")
                 // If the source image was cleaned, keep the local text-box cover until the replacement really loads.
                 // The clean image removes only the recognized lettering patch; failed/unsupported sources retain the
                 // small text-box cover instead of flattening the whole speech-bubble interior.
