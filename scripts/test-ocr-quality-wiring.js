@@ -35,10 +35,10 @@ assert.ok(cleaner.includes('medianRingColor(') && cleaner.includes('fillRoundedR
   'cleaner must contain all tiers and residual diagnostics');
 assert.ok(!cleaner.includes('disallowed-by-fast-path'),
   'legacy fast-path AI-deny policy must be removed');
-assert.ok(extractor.includes('allowAi = true') &&
+assert.ok(extractor.includes('allowAi = req.ahead <= 0') &&
           extractor.includes('residual_max=') &&
           extractor.includes('BUBBLE_MASK_FALLBACK'),
-  'realtime cleanup, residual summary and missing-bubble fallback must be wired');
+  'realtime cleanup, residual summary and missing-bubble fallback must be wired; read-ahead keeps MI-GAN off');
 assert.ok(!painter.includes('MODEL_URL') &&
           painter.includes('app.assets.open(MODEL_NAME)') &&
           painter.includes('EXPECTED_BYTES'),
