@@ -145,7 +145,9 @@ assert.ok(lensTransport.includes('LENS_CIRCUIT_OPEN') &&
           lensTransport.includes('LENS_SKIP') &&
           lensTransport.includes('halfOpenProbeInFlight') &&
           lensTransport.includes('cooldownMs = if (wasHalfOpenProbe) 60_000L else 30_000L') &&
-          lensTransport.includes('Google Lens: timeout'),
+          lensTransport.includes('Google Lens: timeout') &&
+          lensTransport.includes('shouldSkipWarmUp()') &&
+          lensTransport.includes('LENS_SKIP", "reason=circuit_open fallback=mlkit warmup=true'),
   'Lens must open a 30s outage circuit and allow exactly one half-open probe, extending to 60s on probe failure');
 assert.ok(routing.includes('BATCH_WAIT_OCR') &&
           routing.includes('reason=circuit_open fallback=mlkit') &&
