@@ -166,7 +166,7 @@ assert.ok(cleaner.includes('LARGE_MASK_THRESHOLD = 15_000') &&
           cleaner.includes('CLEAN_TIER2_TILE') &&
           cleaner.includes('ringSamplePad=') && cleaner.includes('BBOX_DILATION_PX + ringSamplePad') &&
           cleaner.includes('migan_skipped reason=mask_too_large area=$maskArea') &&
-          cleaner.includes('if (residual1 <= TIER2_RESIDUAL_THRESHOLD && !largeMask)'),
+          cleaner.includes('if (residual1 < TIER2_RESIDUAL_THRESHOLD && !largeMask'),
   'every large sound-effect mask must use opaque fill and tiled Tier 2, while MI-GAN is skipped above the area limit');
 assert.ok(cleaner.includes('val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= CLEAN_FAILED_RESIDUAL_THRESHOLD') &&
           cleaner.includes('CLEAN_FAILED_RESIDUAL_THRESHOLD = 20f') &&
