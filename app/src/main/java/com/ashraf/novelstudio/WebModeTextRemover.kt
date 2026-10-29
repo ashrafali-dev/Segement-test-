@@ -27,7 +27,7 @@ internal object WebModeTextRemover {
     // Residual is normalized to a 0..100 percentage of full RGB contrast across the text mask.
     private const val TIER2_RESIDUAL_THRESHOLD = 5f
     private const val TIER3_RESIDUAL_THRESHOLD = 8f
-    private const val CLEAN_FAILED_RESIDUAL_THRESHOLD = 15f
+    private const val CLEAN_FAILED_RESIDUAL_THRESHOLD = 20f
     private const val LARGE_MASK_THRESHOLD = 15_000
     private const val MIGAN_MAX_MASK_AREA = 40_000
     private const val LARGE_MASK_ALPHA = 1.00f
@@ -723,7 +723,7 @@ internal object WebModeTextRemover {
                         "threshold=${String.format(java.util.Locale.US, "%.2f", TIER2_RESIDUAL_THRESHOLD)} metric=normalized_0_100"
                 )
                 val largeMaskAccepted = largeMask && residualFinal < 20f
-                val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= 20f
+                val bubbleHardFailure = maskArea > MIGAN_MAX_MASK_AREA && residualFinal >= CLEAN_FAILED_RESIDUAL_THRESHOLD
                 if (largeMaskAccepted) acceptedLargeMask = true
                 if (bubbleHardFailure) panelHardFailure = true
                 if (residualFinal > TIER2_RESIDUAL_THRESHOLD) {
@@ -802,7 +802,7 @@ internal object WebModeTextRemover {
                 "allowAi=true policy=tiered tier1=$tier1Count tier2=$tier2Count tier3=$tier3Count aiExecutionAllowed=$allowAi " +
                     "calls=$aiCallsAttempted ok=$aiCallsSucceeded aiMs=$aiTotalMs " +
                     "elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
-                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} residual_metric=normalized_0_100 failedThreshold=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
+                    "removedPixels=$panelRemovedForLog residual_max=${String.format(java.util.Locale.US, "%.2f", panelResidualMax)} residual_metric=normalized_0_100 failedMaskArea>$MIGAN_MAX_MASK_AREA failedResidual>=$CLEAN_FAILED_RESIDUAL_THRESHOLD"
             )
             val releasedKb = bitmap.byteCount / 1024L
             bitmap.recycle()
