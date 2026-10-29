@@ -243,9 +243,23 @@ internal class RoutingOcrEngine : OcrEngine {
     private fun useful(result: OcrResult): Boolean =
         result.blocks.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } } >= 2
 
-    private fun route(bitmap: Bitmap, script: OcrScript, run: (OcrEngine) -> OcrResult): OcrResult {
-        val waited = OcrGate.Waited()
+    private fun route(
+        bitmap: Bitmap,
+        script: OcrScript,
+        bypassNegativeCache: Boolean = false,
+        run: (OcrEngine) -> OcrResult
+    ): OcrResult {
         val t0 = android.os.SystemClock.elapsedRealtime()
+        // The negative cache is deliberately checked before OcrGate: a hit must not wait behind ML Kit work.
+        if (!bypassNegativeCache && OcrNegativeCache.hit(bitmap)) {
+            val cached = OcrResult(emptyList())
+            cached.engineLabel = "negative-cache (no OCR run)"
+            OcrDiag.log("ROUTE", "requestedEngine=$selectedMode language=${script.name} activeEngine=negative-cache " +
+                "fallbackUsed=false gateWaitMs=0 totalMs=${android.os.SystemClock.elapsedRealtime() - t0} " +
+                "image=${bitmap.width}x${bitmap.height}")
+            return cached
+        }
+        val waited = OcrGate.Waited()
         val foregroundRoute = !OcrGate.isBackgroundThread()
         val statusTicket = OcrEngineStatus.beginRoute(foregroundRoute)
         lensThread.set(false)
@@ -253,7 +267,15 @@ internal class RoutingOcrEngine : OcrEngine {
         var fellBack = false
         try {
             val routeBlock: () -> OcrResult = {
-                routeInner(bitmap, script, run) { engine, fb -> used = engine; fellBack = fb }
+                val attemptStarted = android.os.SystemClock.elapsedRealtime()
+                val raw = routeInner(bitmap, script, run) { engine, fb -> used = engine; fellBack = fb }
+                val filtered = OcrGarbageFilter.filter(raw.blocks, script, bitmap.width, bitmap.height)
+                val result = if (filtered.size == raw.blocks.size) raw else OcrResult(filtered)
+                if (!Thread.currentThread().isInterrupted) {
+                    OcrNegativeCache.record(bitmap, result.blocks.isEmpty(),
+                        android.os.SystemClock.elapsedRealtime() - attemptStarted)
+                }
+                result
             }
             // Do not queue visible Lens OCR behind a remote read-ahead request. Local model engines
             // and the first Lens activation still use the serialized gate for safe lifecycle changes.
@@ -450,7 +472,7 @@ internal class RoutingOcrEngine : OcrEngine {
 
     /** A user-triggered Extract bypasses the Google Lens result cache. */
     fun recognizeFresh(bitmap: Bitmap, script: OcrScript, fastMode: Boolean = false): OcrResult =
-        route(bitmap, script) {
+        route(bitmap, script, bypassNegativeCache = true) {
             when (it) {
                 is LensOcrEngine -> it.recognizeFresh(bitmap, script, fastMode)
                 else -> if (fastMode) it.recognizeFast(bitmap, script) else it.recognize(bitmap, script)
@@ -464,7 +486,7 @@ internal class RoutingOcrEngine : OcrEngine {
         route(bitmap, script) { it.recognizeFallback(bitmap, script) }
 
     override fun recognizeRegion(bitmap: Bitmap, script: OcrScript): OcrResult =
-        route(bitmap, script) { it.recognizeRegion(bitmap, script) }
+        route(bitmap, script, bypassNegativeCache = true) { it.recognizeRegion(bitmap, script) }
 
     /**
      * Local-only fast read, never routed: used as a pre-filter so a silent panel costs no network round trip.
