@@ -91,6 +91,10 @@ assert.ok(layout.includes("val overlayCv: List<Float> = emptyList()") &&
           writer.includes("coverCv=it.cv") && writer.includes("coverCv.concat(it.ocv)") &&
           writer.includes('put("ocv", ja)'),
   "cover-only glyph-edge geometry must persist separately from the cleaner mask and remain isolated from Japanese cleanup");
+assert.ok(extractor.includes("if (WebtoonBubbleMaskKit.shouldHandle(startUrl))") &&
+          extractor.includes("overlaySafetyBox = intArrayOf") &&
+          !remover.includes("overlayCv"),
+  "only Webtoon routes may add the cover-only glyph box; image-cleaner mask geometry must remain unchanged");
 // Lens completeness audit must retry compact, fully missed labels (e.g. a short "Skip" button),
 // rather than filtering them out with the previous 200x80-pixel floor or inspecting one region only.
 assert.ok(rescan.includes("MIN_REMOTE_AUDIT_WIDTH = 32"), "Lens audit must allow short button labels");
