@@ -16,6 +16,8 @@ const mainActivity = read('app/src/main/java/com/ashraf/novelstudio/MainActivity
 const timing = read('app/src/main/java/com/ashraf/novelstudio/OcrPanelTiming.kt');
 const diag = read('app/src/main/java/com/ashraf/novelstudio/OcrDiag.kt');
 const lensTransport = read('app/src/main/java/com/ashraf/novelstudio/LensOcrEngine.kt');
+const chapterContext = read('app/src/main/java/com/ashraf/novelstudio/WebModeChapterContext.kt');
+const writer = read('app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
 const localFastStart = routing.indexOf('fun recognizeLocalFast(');
@@ -194,4 +196,42 @@ assert.ok(beginForceAt >= 0 && forceDispatchAt > beginForceAt &&
           extractor.slice(beginForceAt, forceDispatchAt).includes('reason=tiny_panel'),
   'known tiny viewport panels must be skipped before FORCE_BEGIN is scheduled');
 
-console.log('PASS: OCR quality wiring (Tier-1 based rollback, uniform fill coverage, budgeted prefetch MI-GAN, settled FORCE capture, existing OCR quality safeguards)');
+assert.ok(cleaner.includes('MAX_CLEAN_W = 1200') &&
+          cleaner.includes('MAX_CLEAN_H = 2400') &&
+          cleaner.includes('CLEAN_GUARD') &&
+          cleaner.includes('CLEAN_DOWNSCALE') &&
+          cleaner.includes('scanMode: Boolean = !realtimeMode && !prefetchMode') &&
+          cleaner.includes('reason=text_bbox_fallback textPresent=true bboxPad=5 mode=scan'),
+  'cleaning must downscale out-of-bounds panels and keep a five-pixel OCR-bbox fallback for scan speech bubbles');
+assert.ok(cleaner.includes('BUBBLE_CLEAN_VERIFY') &&
+          cleaner.includes('dilatePx=2') &&
+          cleaner.includes('extraPass=true accepted='),
+  'every processed dialogue bubble must run the final residual verifier and one guarded extra pass');
+assert.ok(extractor.includes('MODE_ENGAGED') &&
+          extractor.includes('expectations=') &&
+          extractor.includes('val scanMode = !req.visibleOnly && req.ahead <= 0') &&
+          extractor.includes('SLICE_STRATEGY", "mode=scan slices=${fallbackSlices.size + 1} decision=fallback_slice') &&
+          extractor.includes('DETECT_MODE') &&
+          extractor.includes('mode=scan ran=true masks=') &&
+          extractor.includes('CHAPTER_COLLECT'),
+  'scanning must declare its mode, try whole-panel OCR first, cap fallback slices and log pixel-mask detection');
+assert.ok(chapterContext.includes('data class WebModeChapterContext') &&
+          chapterContext.includes('fun windows(maxPanels: Int = 20, overlapPanels: Int = 2') &&
+          chapterContext.includes('CONTEXT_ONLY') &&
+          chapterContext.includes('CHAPTER_SUMMARY') &&
+          chapterContext.includes('classifyRole'),
+  'chapter context must preserve bubble IDs/roles, context overlap and bounded structured windows');
+assert.ok(mainActivity.includes('sendScanTranslationWindow') &&
+          mainActivity.includes('CHAPTER_TRANSLATE') &&
+          mainActivity.includes('CHAPTER_TRANSLATE_DONE') &&
+          mainActivity.includes('CHAPTER_TRANSLATE_SPLIT') &&
+          mainActivity.includes('CHAPTER_APPLY') &&
+          mainActivity.includes('showChapterSummaryDialog'),
+  'scan mode must use a chapter request/window pipeline, apply by chapter markers and show its summary');
+assert.ok(writer.includes('.put("sfx", sfx)') &&
+          writer.includes("if(it.sfx)") &&
+          writer.includes("style=bold_italic position=original_bbox") &&
+          writer.includes("it.sfx?'none'"),
+  'SFX placement must use a distinct outline style without painting a large art-block cover');
+
+console.log('PASS: OCR quality wiring (scan downscale/fallback, whole-panel OCR, chapter-context windows, verified bubble cleaning, art-preserving SFX style, MI-GAN/Lens circuit breakers)');
