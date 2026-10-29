@@ -8634,6 +8634,40 @@ merge, split, or reorder the markers. Return only the translation with the
 markers preserved.
 """.trimIndent()
         val imageMode = webModeOn() && ch.contentSel.isBlank()
+        val scanLayout = if (imageMode && !isRealtimeBubbleBatch(ch)) {
+            WebModeLayoutStore.getScan(ch.url) ?: WebModeLayoutStore.get(this, ch.url)
+        } else null
+        val chapterContext = if (imageMode && !isRealtimeBubbleBatch(ch) &&
+            scanLayout != null && scanLayout.bubbles.isNotEmpty()) {
+            WebModeChapterContext.fromMarkedText(
+                chapterId = keyOf(ch),
+                mangaTitle = ch.novel.ifBlank { ch.title },
+                chapterNumber = ch.number,
+                targetLanguage = Langs.target(this),
+                markedText = marked,
+                layout = scanLayout
+            )
+        } else null
+        if (chapterContext != null) {
+            val windows = chapterContext.windows()
+            if (windows.isNotEmpty()) {
+                val state = ScanChapterTranslationState(
+                    context = chapterContext,
+                    windows = windows,
+                    startedAtMs = android.os.SystemClock.elapsedRealtime()
+                )
+                scanChapterStates[tok] = state
+                if (windows.size > 1) {
+                    val reason = if (chapterContext.panelCount > 20) "panel_count" else "context_limit"
+                    OcrDiag.log(
+                        "CHAPTER_TRANSLATE_SPLIT",
+                        "windows=${windows.size} reason=$reason panels=${chapterContext.panelCount} overlapPanels=2"
+                    )
+                }
+                sendScanTranslationWindow(tok, ch, state, 0)
+                return
+            }
+        }
         val imageRules = if (imageMode) """
 
 [Comic / webtoon page]
@@ -8663,6 +8697,32 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             promptWithGlossary(Prefs.activeTranslationPrompt(this), marked) +
                 markerInstruction + "\n\n" + imageRules + marked
         }
+        dispatchChatJobPrompt(tok, ch, full, jobMarkers)
+    }
+
+    /** Every structured chapter window uses the same editor/send/stream polling path as ordinary jobs. */
+    private fun sendScanTranslationWindow(
+        tok: Int,
+        ch: Chapter,
+        state: ScanChapterTranslationState,
+        windowIndex: Int
+    ) {
+        if (tok != runToken || windowIndex !in state.windows.indices) return
+        state.windowIndex = windowIndex
+        val window = state.windows[windowIndex]
+        val promptBody = state.context.promptForWindow(window, state.translations, state.summaries)
+        val full = promptWithGlossary(Prefs.activeTranslationPrompt(this), promptBody)
+        val expectedMarkers = window.outputEntries.size
+        OcrDiag.log(
+            "CHAPTER_TRANSLATE",
+            "request=${windowIndex + 1} bubbles=$expectedMarkers charsIn=${full.length} " +
+                "window=${windowIndex + 1}/${state.windows.size} panels=${window.firstPanel}-${window.lastPanelInclusive}"
+        )
+        dispatchChatJobPrompt(tok, ch, full, expectedMarkers)
+    }
+
+    private fun dispatchChatJobPrompt(tok: Int, ch: Chapter, full: String, expectedMarkers: Int) {
+        jobMarkers = expectedMarkers
         sendChatRequest(full, true, { tok == runToken }, allowDuringTranslation = true) { raw ->
             if (tok != runToken) return@sendChatRequest
             val r = decode(raw)
@@ -8670,7 +8730,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                 val parts = r.substring(3).split(":")
                 val n0 = parts.getOrNull(0)?.toIntOrNull() ?: 0
                 val baseLen = parts.getOrNull(1)?.toIntOrNull() ?: 0
-                // Real-time mode starts checking almost immediately; normal jobs keep the old startup delay.
+                // Real-time batches remain latency-first; scanning windows still reuse the established sender.
                 awaitChatSend(tok, ch, n0, baseLen, 0, false)
             } else {
                 failJob(tok, ch, "Chat input not found — check that you are logged in to the chatbot")
