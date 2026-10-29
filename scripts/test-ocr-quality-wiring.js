@@ -112,5 +112,11 @@ assert.ok(extractor.includes('FORCE_CAPTURE') && extractor.includes('stableSampl
           extractor.includes('recapture $driftRetries/1') &&
           extractor.includes('FORCE_SKIP'),
   'FORCE capture must wait for scroll settle, skip known tiny panels and cap recaptures');
+const beginForceAt = extractor.indexOf('fun begin()');
+const forceDispatchAt = extractor.indexOf('if ((req.force && !req.visibleOnly) || req.forceScreenOcr)', beginForceAt);
+assert.ok(beginForceAt >= 0 && forceDispatchAt > beginForceAt &&
+          extractor.slice(beginForceAt, forceDispatchAt).includes('expectedBlocks < 3') &&
+          extractor.slice(beginForceAt, forceDispatchAt).includes('reason=tiny_panel'),
+  'known tiny viewport panels must be skipped before FORCE_BEGIN is scheduled');
 
 console.log('PASS: OCR quality wiring (Tier-1 based rollback, uniform fill coverage, budgeted prefetch MI-GAN, settled FORCE capture, existing OCR quality safeguards)');
