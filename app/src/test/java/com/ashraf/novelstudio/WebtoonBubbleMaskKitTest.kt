@@ -20,6 +20,12 @@ class WebtoonBubbleMaskKitTest {
         assertTrue(WebtoonBubbleMaskKit.shapeBandLimit(
             "https://example.com/manga/chapter-12"
         ) == 28)
+        assertTrue(WebtoonBubbleMaskKit.segmentationBandLimit(
+            "https://www.toongood.org/webtoon/the-heavenly-demon"
+        ) == 64)
+        assertTrue(WebtoonBubbleMaskKit.segmentationBandLimit(
+            "https://example.com/manga/chapter-12"
+        ) == 14)
     }
 
     @Test
