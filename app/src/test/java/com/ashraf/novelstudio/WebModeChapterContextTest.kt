@@ -61,6 +61,10 @@ class WebModeChapterContextTest {
     fun sfxAndNarrationRolesAreSeparatedFromDialogue() {
         assertEquals(WebModeTextRole.DIALOGUE,
             WebModeChapterContext.classifyRole("Are you okay?", bubble("p", "Are you okay?")))
+        assertEquals(
+            WebModeTextRole.DIALOGUE,
+            WebModeChapterContext.classifyRole("Hello there.", bubble("p", "Hello there.", stroke = 0xFFFFFFFF.toInt()))
+        )
         assertEquals(WebModeTextRole.SFX,
             WebModeChapterContext.classifyRole("BOOM!", bubble("p", "BOOM!", free = true)))
         assertEquals(WebModeTextRole.SFX,
