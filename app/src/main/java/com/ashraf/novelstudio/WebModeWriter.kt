@@ -198,7 +198,9 @@ internal object WebModeWriter {
       }
       b.appendChild(t);
       var cover=null;
-      var hasCv=!!(it.cv&&it.cv.length>=4);
+      var coverCv=it.cv&&it.cv.length>=4?it.cv.slice(0):[];
+      if(it.ocv&&it.ocv.length>=4)coverCv=coverCv.concat(it.ocv);
+      var hasCv=coverCv.length>=4;
       // Restore the speech-bubble silhouette from the detector's mask rectangles. These are local cover shapes,
       // not text-removal pixels: the cleaner below still erases only the detected glyph mask and its small margin.
       // If no reliable silhouette exists, use the small OCR-box cover as a conservative fallback.
@@ -210,10 +212,10 @@ internal object WebModeWriter {
         // The Japanese box coordinates/size/font fields are still the same serialized values as before.
         if(!it.cl)cover.style.opacity='1';
         if(hasCv){
-          for(var ci=0;ci+3<it.cv.length;ci+=4){
+          for(var ci=0;ci+3<coverCv.length;ci+=4){
             var cd=document.createElement('div');cd.className='__ns_cv';
-            cd.style.cssText='position:absolute;pointer-events:none;margin:0;padding:0;left:'+(it.cv[ci]*100)+'%;top:'+(it.cv[ci+1]*100)+'%;'
-              +'width:'+((it.cv[ci+2]-it.cv[ci])*100)+'%;height:'+((it.cv[ci+3]-it.cv[ci+1])*100)+'%;background:'+it.bg+';';
+            cd.style.cssText='position:absolute;pointer-events:none;margin:0;padding:0;left:'+(coverCv[ci]*100)+'%;top:'+(coverCv[ci+1]*100)+'%;'
+              +'width:'+((coverCv[ci+2]-coverCv[ci])*100)+'%;height:'+((coverCv[ci+3]-coverCv[ci+1])*100)+'%;background:'+it.bg+';';
             cover.appendChild(cd);
           }
         }else{
@@ -1397,6 +1399,18 @@ internal object WebModeWriter {
                             q += 4
                         }
                         put("cv", ja)
+                    }
+                    if (b.overlayCv.size >= 4 && b.w > 0f && b.h > 0f) {
+                        val bl = b.cx - b.w / 2f
+                        val bt = b.cy - b.h / 2f
+                        val ja = JSONArray()
+                        var q = 0
+                        while (q + 3 < b.overlayCv.size) {
+                            ja.put(r5((b.overlayCv[q] - bl) / b.w)).put(r5((b.overlayCv[q + 1] - bt) / b.h))
+                                .put(r5((b.overlayCv[q + 2] - bl) / b.w)).put(r5((b.overlayCv[q + 3] - bt) / b.h))
+                            q += 4
+                        }
+                        put("ocv", ja)
                     }
                 })
         }
