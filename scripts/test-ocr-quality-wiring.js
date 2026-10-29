@@ -18,6 +18,7 @@ const lensTransport = read('app/src/main/java/com/ashraf/novelstudio/LensOcrEngi
 const chapterContext = read('app/src/main/java/com/ashraf/novelstudio/WebModeChapterContext.kt');
 const writer = read('app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt');
 const bubbleSeg = read('app/src/main/java/com/ashraf/novelstudio/BubbleSegCore.kt');
+const webtoonKit = read('app/src/main/java/com/ashraf/novelstudio/WebtoonBubbleMaskKit.kt');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
 const localFastStart = routing.indexOf('fun recognizeLocalFast(');
@@ -155,6 +156,26 @@ assert.ok(cleaner.includes('fillKnownBubbleShape(bitmap, bubble.cv') &&
            cleaner.includes('stablePaperPixels') &&
            cleaner.includes('totalRemoved += result.changed'),
    'known bubble-shaped bands must clean only a verified flat interior, log the result, and preserve artwork when the paper-colour guard fails');
+
+assert.ok(cleaner.includes('WebtoonBubbleMaskKit.shouldHandle(pageUrl)') &&
+          cleaner.includes('WebtoonBubbleMaskKit.fillInterior(bitmap, bubble.cv') &&
+          cleaner.includes('webtoonFit?.accepted == true') &&
+          cleaner.includes('else -> fillKnownBubbleShape(bitmap, bubble.cv'),
+  'only webtoon pages may use the dedicated shape-paper cleaner; rejected fits must retain the conservative fallback');
+assert.ok(extractor.includes('fit.bands(WebtoonBubbleMaskKit.shapeBandLimit(startUrl))') &&
+          extractor.includes('BubbleSegCore.bands(') &&
+          extractor.includes('maxBands = WebtoonBubbleMaskKit.segmentationBandLimit(startUrl)'),
+  'only Webtoon pages may raise the shape and segmentation band resolution; manga must retain established defaults');
+assert.ok(webtoonKit.includes('fun shouldHandle(pageUrl: String)') &&
+          webtoonKit.includes('webtoonPath || webtoonsHost') &&
+          webtoonKit.includes('SHAPE_BANDS = 96') &&
+          webtoonKit.includes('DEFAULT_SHAPE_BANDS = 28') &&
+          webtoonKit.includes('SEGMENTATION_BANDS = 64') &&
+          webtoonKit.includes('DEFAULT_SEGMENTATION_BANDS = 14') &&
+          webtoonKit.includes('inferPaperColour') &&
+          webtoonKit.includes('interpolate(leftColour, rightColour') &&
+          webtoonKit.includes('dense_ink_or_art'),
+  'the isolated Webtoon kit must use higher shape precision, sample bubble paper, preserve mild gradients and reject dense artwork');
 
 assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true reason=residual>8') &&
           cleaner.includes('tryAcquireGlobalCallBudget') &&
