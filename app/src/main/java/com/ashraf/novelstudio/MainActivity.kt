@@ -10179,6 +10179,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     completeRealtimeVisiblePlacement(0, false, "stale_placement_callback")
                     return@evaluateJavascript
                 }
+                var deferredLiveRestore = false
                 if (r != null && r.contains("ok")) {
                     if (livePanelBatch) {
                         val matchedIndices = wmLayout?.bubbles?.mapIndexedNotNull { index, bubble ->
@@ -10188,26 +10189,61 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                             wmLayout?.bubbles?.getOrNull(index)?.let { WebModeLayout.fingerprint(it) }
                         }.toSet()
                         val panelTop = panelTopFromSignature(livePanelSignature)
-                        matchedIndices.forEach { index ->
-                            OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                        if (matched.isEmpty()) {
+                            wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                                OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=no_translation_text")
+                            }
+                            releaseDeepSeekHashBatch(ch)
+                            completeRealtimeVisiblePlacement(0, false, "no_translation_text")
+                        } else {
+                            deferredLiveRestore = true
+                            verifyRealtimeOverlay(panelTop, matched.size, livePanelSignature) { visible ->
+                                if (livePanelSignature != realtimeCurrentSignature) {
+                                    wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                                        OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=false reason=stale")
+                                    }
+                                    releaseDeepSeekHashBatch(ch)
+                                    restoreChapterAfterBubbleJob(ch.url)
+                                    return@verifyRealtimeOverlay
+                                }
+                                if (visible) {
+                                    matchedIndices.forEach { index ->
+                                        OcrDiag.log("PLACE_ACCEPT", "panelTop=$panelTop bubble=${index + 1} current=true")
+                                    }
+                                    completeDeepSeekHashBatch(ch, matched)
+                                    completeRealtimeVisiblePlacement(matched.size, true, "overlay_success")
+                                    hasTr = true
+                                    shownTranslated = true
+                                    updatePill()
+                                } else {
+                                    matchedIndices.forEach { index ->
+                                        OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=overlay_not_visible")
+                                    }
+                                    releaseDeepSeekHashBatch(ch)
+                                    completeRealtimeVisiblePlacement(0, false, "overlay_not_visible")
+                                }
+                                restoreChapterAfterBubbleJob(ch.url)
+                            }
                         }
-                        realtimeOverlayActive = true
-                        realtimeOverlaySignature = livePanelSignature
-                        realtimeOverlayPlacedCount = matched.size
-                        realtimeOverlayPanelTop = panelTop
-                        verifyRealtimeOverlay(panelTop, matched.size, livePanelSignature)
-                        completeDeepSeekHashBatch(ch, matched)
-                        completeRealtimeVisiblePlacement(matched.size, matched.isNotEmpty(), "overlay_success")
+                    } else {
+                        hasTr = true
+                        shownTranslated = true
+                        updatePill()
                     }
-                    hasTr = true
-                    shownTranslated = true
-                    updatePill()
                 } else {
-                    if (livePanelBatch) releaseDeepSeekHashBatch(ch)
-                    if (livePanelBatch) completeRealtimeVisiblePlacement(0, false, "overlay_script_failed")
+                    if (livePanelBatch) {
+                        val panelTop = panelTopFromSignature(livePanelSignature)
+                        wmLayout?.bubbles?.forEachIndexed { index, bubble ->
+                            if (!wmPlaced?.getOrNull(index).isNullOrBlank()) {
+                                OcrDiag.log("PLACE_REJECT", "panelTop=$panelTop bubble=${index + 1} current=true reason=overlay_script_failed")
+                            }
+                        }
+                        releaseDeepSeekHashBatch(ch)
+                        completeRealtimeVisiblePlacement(0, false, "overlay_script_failed")
+                    }
                     toast("⚠️ Could not show the translation on this page; it is saved in the library")
                 }
-                if (livePanelBatch) restoreChapterAfterBubbleJob(ch.url)
+                if (livePanelBatch && !deferredLiveRestore) restoreChapterAfterBubbleJob(ch.url)
             }
             return
         }
