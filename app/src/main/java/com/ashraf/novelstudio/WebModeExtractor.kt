@@ -278,6 +278,7 @@ internal class WebModeExtractor(
 
         fun begin() {
             ensureBridge(wv)
+            if (req.visibleOnly) BubbleDetector.noteActivity() else BubbleDetector.scanStart()
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
                 "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
             progress("Discovering chapter panels", 1)
@@ -320,6 +321,13 @@ internal class WebModeExtractor(
                         val p = arr.optJSONObject(i) ?: continue
                         val s = p.optString("s")
                         if (s.isBlank()) continue
+                        val normalizedSource = s.lowercase()
+                        // Cross-origin iframe image collection can bypass the page-script chrome filter.
+                        // Promo/link-slot images are not upcoming manga panels and must never enter read-ahead OCR.
+                        if (normalizedSource.contains("/link-slot-") || normalizedSource.contains("/link_slot_")) {
+                            OcrDiag.log("AHEAD_FILTER", "skipped promo/link-slot image: ${s.take(100)}")
+                            continue
+                        }
                         val top = p.optInt("t")
                         // Must match the cache key used by processAhead/rememberVisibleRead (URL + offset).
                         val nk = panelKey(s, top)
@@ -327,6 +335,9 @@ internal class WebModeExtractor(
                         refs.add(PanelRef(s, top, p.optInt("l"), p.optInt("w"), p.optInt("h")))
                     }
                     if (req.fullChapterLinks) refs.sortBy { it.top }
+                    // Banners, promo tiles and avatars are not panels: never spend Lens/ML Kit calls on them.
+                    val realRefs = WebModeLogic.dropChromeImages(refs)
+                    if (realRefs.size != refs.size) { refs.clear(); refs.addAll(realRefs) }
                     while (refs.size > aheadN) refs.removeAt(refs.size - 1)
                     if (refs.isEmpty()) { aheadFinished(); return@evaluateJavascript }
                     aheadWorker.execute {
@@ -396,7 +407,8 @@ internal class WebModeExtractor(
                         if ((aheadFails.merge(key, 1) { x, y -> x + y } ?: 1) >= 2) aheadBlank.add(key)
                         null
                     } ?: continue
-                    // Full-quality OCR (not the fast one-pass reading): this runs in the background.
+                    // Read one whole panel at native resolution using the latency-bound path. Cached detections may
+                    // still be reused, but speculative read-ahead never starts new detector or MI-GAN work.
                     progress("Read-ahead OCR: reading text ${index + 1}/$total", index * 99 / total)
                     val po = ocrBytes(bytes, script, p.src, fastMode = true) ?: run { aheadBlank.add(key); null } ?: continue
                     // Do not poison the read-ahead cache with an empty OCR result; the visible scan
@@ -604,7 +616,8 @@ internal class WebModeExtractor(
                     val s = p.optString("s").trim()
                     if (s.isBlank()) continue
                     // Banner/ad slides (e.g. shonenjumpplus /public/link-slot-series) are not manga pages.
-                    if (s.contains("/link-slot-", ignoreCase = true)) continue
+                    if (s.contains("/link-slot-", ignoreCase = true) ||
+                        s.contains("/link_slot_", ignoreCase = true)) continue
                     val panel = PanelRef(s, p.optInt("t"), p.optInt("l"), p.optInt("w"), p.optInt("h"))
                     val key = WebModeLogic.normalizeUrl(s).ifBlank { s }
                     val old = merged[key]
@@ -612,7 +625,8 @@ internal class WebModeExtractor(
                     else if (panel.w * panel.h > old.w * old.h) merged[key] = panel
                 }
                 val refs = merged.values.toList()
-                val allPanels = WebModeLogic.dedupeAndOrder(refs)
+                val allPanels = WebModeLogic.dedupeAndOrder(
+                    if (req.forceOcrSrc.isNullOrBlank()) WebModeLogic.dropChromeImages(refs) else refs)
                 val targetSrc = req.forceOcrSrc
                 val panels = if (targetSrc.isNullOrBlank()) allPanels else allPanels.filter {
                     WebModeLogic.normalizeUrl(it.src) == WebModeLogic.normalizeUrl(targetSrc)
@@ -620,7 +634,7 @@ internal class WebModeExtractor(
                 diag.discovered = panels.size
                 diag.duplicates = (rawPanelCount - allPanels.size).coerceAtLeast(0)
                 OcrDiag.log("PANELS", "raw=$rawPanelCount afterDedupe=${allPanels.size} used=${panels.size} :: " +
-                    panels.take(10).joinToString(" | ") { (if (it.src.startsWith("data:")) "CANVAS" else hostOf(it.src).ifBlank { it.src.take(10) }) + " ${it.w}x${it.h}@${it.top}" })
+                    panels.take(10).joinToString(" | ") { (if (it.src.startsWith("data:")) "CANVAS" else hostOf(it.src).ifBlank { it.src.take(10) }) + " ${it.w}x${it.h}@${it.top}(x=${it.left})" })
                 if (panels.isEmpty()) {
                     if (req.visibleOnly && targetSrc.isNullOrBlank()) {
                         // Some manga readers paint panels in canvas/iframes or expose unusable image URLs.
@@ -695,28 +709,21 @@ internal class WebModeExtractor(
             val total = panels.size
             val liveView = req.visibleOnly && req.forceOcrSrc.isNullOrBlank()
             val hasCanvas = panels.any { it.src.startsWith("data:", true) }
-            // Shonen Jump+ and similar readers expose already-rendered page images as page-owned blob: URLs.
-            // Native HTTP cannot download a WebView blob URL; fetchWithRetry() must use fetchViaPage() while
-            // that blob still exists in the page. A previous failed ad/thumbnail download must not teach the
-            // site learner to skip this valid page-side path on later scans.
-            val hasPageOwnedSources = panels.any {
-                it.src.startsWith("blob:", true) || it.src.startsWith("data:", true)
-            }
             if (hasCanvas) how = "canvas"
-            OcrDiag.log("PROCESS", "panels=$total liveView=$liveView canvasPanels=${panels.count { it.src.startsWith("data:", true) }} " +
-                "blobPanels=${panels.count { it.src.startsWith("blob:", true) }} script=${WebModeLogic.pickScript(meta.lang, meta.url).name} lang='${meta.lang}'")
-            if (liveView && !hasPageOwnedSources && lastDiscoveryDebug.contains("canvasErr=SecurityError") &&
+            OcrDiag.log("PROCESS", "panels=$total liveView=$liveView canvasPanels=${panels.count { it.src.startsWith("data:", true) }} script=${WebModeLogic.pickScript(meta.lang, meta.url).name} lang='${meta.lang}'")
+            if (liveView && !hasCanvas && lastDiscoveryDebug.contains("canvasErr=SecurityError") &&
                 Regex("(\\d+) canvas").find(lastDiscoveryDebug)?.groupValues?.get(1)?.toIntOrNull()?.let { it > 0 } == true) {
-                // Pixel-locked canvas reader with no recoverable image sources: reading the screen is the safe path.
+                // Pixel-locked canvas reader: downloads can only return unrelated images, so go straight to the screen.
                 fail(WebModeError.IMAGES_NOT_LOADED, "Canvas reader: reading the screen directly")
                 return
             }
-            if (liveView && !hasPageOwnedSources) {
-                // This site already refused ordinary image downloads; use screen capture only when no page-owned
-                // blob/data source remains that the WebView itself can export for OCR.
-                if (SiteLearner.preferScreen(wv.context, hostOf(meta.url))) {
+            if (liveView && !hasCanvas) {
+                // This site already refused our image downloads a moment ago: read the screen's own pixels at once
+                // instead of waiting for every panel to time out again.
+                // Icons / notices (e.g. a 130x130 tap hint) are no evidence about the site: the real pages were not loaded yet.
+                if (panels.any { Math.min(it.w, it.h) >= 300 } && SiteLearner.preferScreen(wv.context, hostOf(meta.url))) {
                     progress("Learned: reading this site straight from the screen", 3)
-                    fail(WebModeError.IMAGES_NOT_LOADED, "Learned for this site: no page-owned image source; reading the screen directly")
+                    fail(WebModeError.IMAGES_NOT_LOADED, "Learned for this site: image downloads fail, reading the screen directly")
                     return
                 }
             }
@@ -759,13 +766,27 @@ internal class WebModeExtractor(
             val futures = arrayOfNulls<java.util.concurrent.Future<ByteArray?>>(total)
             val lensOcrFutures = arrayOfNulls<java.util.concurrent.Future<LensPanelOcrAttempt>>(total)
             val panelFetchStartedAt = LongArray(total)
-            fun submitFetch(i: Int) {
+            fun submitFetch(i: Int, skipKnownAhead: Boolean = true) {
                 if (pool == null || i < 0 || i >= total || futures[i] != null) return
+                val panel = panels[i]
+                if (skipKnownAhead && req.visibleOnly && req.forceOcrSrc.isNullOrBlank() && !req.forceFreshOcr) {
+                    val key = panelKey(panel.src, panel.top)
+                    val hasAheadResult = synchronized(aheadCache) { aheadCache.containsKey(key) }
+                    val alreadyReadingAhead = aheadBusyKey == key
+                    val blankAt = blankSeenAt[key]
+                    val recentlyBlank = blankAt != null &&
+                        SystemClock.elapsedRealtime() - blankAt < BLANK_MEMO_MS
+                    // Cached/ahead-owned panels are checked before this function in the main loop.
+                    // Do not speculatively download their bytes while fetching a different visible panel.
+                    if (hasAheadResult || alreadyReadingAhead || recentlyBlank) return
+                }
                 futures[i] = pool.submit(java.util.concurrent.Callable<ByteArray?> {
-                    try { fetchWithRetry(panels[i], meta.url) } catch (_: Throwable) { null }
+                    try { fetchWithRetry(panel, meta.url) } catch (_: Throwable) { null }
                 })
             }
-            for (k in 0 until minOf(FETCH_AHEAD, total)) submitFetch(k)
+            // Do not eagerly prefetch the first N panels here: many real-time viewports are already
+            // populated by read-ahead cache hits. Start the bounded fetch pipeline only after the main
+            // loop confirms that a panel actually needs a fresh download/OCR.
             val texts = arrayOfNulls<String>(total)
             val layouts = arrayOfNulls<List<WmBubble>>(total)
             val seen = HashSet<String>()
@@ -812,7 +833,9 @@ internal class WebModeExtractor(
                 }
                 val tFetch = SystemClock.elapsedRealtime()
                 progress("Loading image ${i + 1}/$total", 10 + i * 89 / total)
-                submitFetch(i)
+                // The current panel passed the cache check above, so fetch it even if its ahead read
+                // only just missed its completion deadline. Future look-ahead slots remain cache-aware.
+                submitFetch(i, skipKnownAhead = false)
                 submitFetch(i + FETCH_AHEAD)
                 val bytes = if (pool != null) {
                     val fetchWaitMs = when {
@@ -832,7 +855,7 @@ internal class WebModeExtractor(
                     // Real-time sees only 1-3 panels, so the old "4 failures" rule never fired and EVERY visible panel
                     // went through the whole timeout ladder (roughly 25 s each) before the screen was read instead.
                     if (diag.downloaded == 0 && (liveView || (fetchFailed >= EARLY_ABORT_FAILS && total > fetchFailed))) {
-                        if (liveView) SiteLearner.recordDownload(wv.context, hostOf(meta.url), false, SystemClock.elapsedRealtime() - tFetch)
+                        if (liveView && Math.min(p.w, p.h) >= 300) SiteLearner.recordDownload(wv.context, hostOf(meta.url), false, SystemClock.elapsedRealtime() - tFetch)
                         if (liveView) {
                             // The WebView can display images that a second HTTP request cannot fetch.
                             // Read its already-rendered viewport instead of giving up on the visible page.
@@ -864,7 +887,10 @@ internal class WebModeExtractor(
                     // Lens is a remote OCR request; submit each panel now and collect in source order below.
                     // Requests overlap (bounded by LENS_SLICE_SLOTS inside the engine), so a full chapter's
                     // network time is shared instead of added up. The downstream chat batch is unchanged.
-                    progress("Google Lens OCR ${i + 1}/$total", 10 + i * 89 / total)
+                    // Submitting is NOT progress: every panel is queued within seconds while Lens is still working,
+                    // which filled the bar to ~99% long before any text had been read. Queueing only moves the bar
+                    // through the first 10 points; the rest is reported as each Lens reply really arrives (below).
+                    progress("Google Lens OCR: queued ${i + 1}/$total", 10 + i * 9 / total)
                     val panelScript = ScriptState(script.current)
                     lensOcrFutures[i] = ocrPool!!.submit(java.util.concurrent.Callable {
                         try {
@@ -936,6 +962,8 @@ internal class WebModeExtractor(
             if (lensParallel) {
                 val batchStartedAt = SystemClock.elapsedRealtime()
                 var submitted = 0
+                val lensTotal = lensOcrFutures.count { it != null }.coerceAtLeast(1)
+                var lensDone = 0
                 for (i in lensOcrFutures.indices) {
                     val future = lensOcrFutures[i] ?: continue
                     submitted++
@@ -955,6 +983,8 @@ internal class WebModeExtractor(
                         LensPanelOcrAttempt(null, e)
                     }
                     val error = attempt.error
+                    lensDone++
+                    progress("Google Lens OCR: read $lensDone/$lensTotal", 20 + lensDone * 79 / lensTotal)
                     when (error) {
                         is OcrUnavailableException -> {
                             fail(WebModeError.OCR_MODEL_UNAVAILABLE, error.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label)
@@ -1371,30 +1401,15 @@ internal class WebModeExtractor(
                 )
             } else JS_COLLECT
             val mo = evalWait(wrap(LIB + collectBody)) { parseJson(it) }
-            // The live canvas can still be perfectly capturable when the large DOM metadata script times out
-            // or returns no JSON. Do not report NO_IMAGES before taking even one screenshot: id=102 on
-            // Shonen Jump+ followed this exact path and never emitted FORCE_STEP.
-            if (mo == null && !req.visibleOnly) { fail(WebModeError.NO_IMAGES); return }
-            val meta = if (mo != null) PageMeta(
+            if (mo == null) { fail(WebModeError.NO_IMAGES); return }
+            val meta = PageMeta(
                 url = mo.optString("url", startUrl),
                 lang = mo.optString("lang"),
                 title = mo.optString("title").trim().take(200),
                 novel = mo.optString("novel").trim().take(120),
                 next = mo.optString("next").takeIf { it.startsWith("http") },
                 prev = mo.optString("prev").takeIf { it.startsWith("http") }
-            ) else {
-                OcrDiag.log("FORCE_META_FALLBACK", "visible DOM metadata unavailable; continuing screen capture url=" + startUrl.take(120))
-                // URL-based script routing remains available; JS_FORCE_INFO gets another chance to provide the
-                // actual canvas geometry. If it also fails, the bounded full-viewport OCR fallback still runs.
-                PageMeta(
-                    url = startUrl,
-                    lang = "",
-                    title = "",
-                    novel = hostOf(startUrl),
-                    next = null,
-                    prev = null
-                )
-            }
+            )
             val script = newScript(meta.lang, meta.url)
             val accs = LinkedHashMap<String, ForceAcc>()
             // In visible-only recovery, collect image candidates exactly once and include CSS
@@ -1785,16 +1800,7 @@ internal class WebModeExtractor(
             val u = p.src
             // Local / page-owned sources never need HTTP retry loops.
             if (u.startsWith("data:", true)) return try { decodeDataUrl(u) } catch (_: Exception) { null }
-            if (u.startsWith("blob:", true)) {
-                return try {
-                    fetchViaPage(u, timeoutMs = 7000L).also {
-                        OcrDiag.log("BLOB_FETCH", "page export OK bytes=${it.size} panel=${p.w}x${p.h}")
-                    }
-                } catch (e: Exception) {
-                    OcrDiag.log("BLOB_FETCH", "page export failed panel=${p.w}x${p.h} reason=${(e.message ?: e.javaClass.simpleName).take(100)}")
-                    null
-                }
-            }
+            if (u.startsWith("blob:", true)) return try { fetchViaPage(u, timeoutMs = 7000L) } catch (_: Exception) { null }
             // The WebView already downloaded this exact image for display (same headers, cookies, TLS):
             // reuse those bytes. No second download, so hotlink/CORS/Cloudflare rules cannot block it.
             ImageTap.get(u)?.let { return it }
@@ -1992,67 +1998,6 @@ internal class WebModeExtractor(
             }
         }
 
-        /**
-         * Cover rectangles for bubbles whose picture could not be cleaned. They are attached to [out] so
-         * the writer paints the balloon's interior instead of one box over it. Bounded and optional: any
-         * failure leaves the existing box cover in place.
-         */
-        private fun shapeCoverBands(
-            encoded: ByteArray, out: ArrayList<WmBubble>, dets: List<BubbleDetectorCore.Det>?
-        ) {
-            if (dets.isNullOrEmpty() || out.isEmpty()) return
-            if (dets.none { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }) return
-            val target = out.filter { it.cv.isEmpty() && !it.free && it.sourceText.isNotBlank() }
-            if (target.isEmpty()) return
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
-            val w = bounds.outWidth
-            val h = bounds.outHeight
-            if (w <= 0 || h <= 0) return
-            val sample = when { w > 5000 -> 4; w > 2400 -> 2; else -> 1 }
-            val bmp = try {
-                BitmapFactory.decodeByteArray(encoded, 0, encoded.size, BitmapFactory.Options().apply {
-                    inSampleSize = sample
-                    inPreferredConfig = Bitmap.Config.ARGB_8888
-                })
-            } catch (_: Throwable) { null } ?: return
-            try {
-                val scaledDets = if (sample == 1) dets else dets.map { d ->
-                    BubbleDetectorCore.Det(
-                        d.label, d.score, d.l / sample, d.t / sample,
-                        maxOf(d.l / sample + 1, d.r / sample), maxOf(d.t / sample + 1, d.b / sample), d.mask
-                    )
-                }
-                val bands = WebModeTextRemover.coverBandsFor(bmp, scaledDets)
-                if (bands.isEmpty()) return
-                // One band belongs to the smallest balloon whose mask covers its centre.
-                var assigned = 0
-                for (b in bands) {
-                    val cx = ((b[0] + b[2]) / 2f) * sample
-                    val cy = ((b[1] + b[3]) / 2f) * sample
-                    val owner = target.minByOrNull { bb ->
-                        Math.abs(bb.cx * w - cx) + Math.abs(bb.cy * h - cy) + (bb.w * bb.h * w * h).toDouble() / 1e9
-                    } ?: continue
-                    val index = out.indexOf(owner)
-                    if (index < 0) continue
-                    val b0 = out[index]
-                    if (b0.cv.size > 4 * 64) continue
-                    val cv = ArrayList<Float>(b0.cv.size + 4).apply { addAll(b0.cv) }
-                    cv.add((b[0] * sample).toFloat() / w)
-                    cv.add((b[1] * sample).toFloat() / h)
-                    cv.add((b[2] * sample).toFloat() / w)
-                    cv.add((b[3] * sample).toFloat() / h)
-                    out[index] = b0.copy(cv = cv)
-                    assigned++
-                }
-                OcrDiag.log("COVER", "shape bands=${bands.size} assigned=$assigned util=${bmp.width}x${bmp.height}")
-            } catch (_: Throwable) {
-                // Cover geometry is an improvement, never a requirement: the box cover is still valid.
-            } finally {
-                try { bmp.recycle() } catch (_: Throwable) {}
-            }
-        }
-
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
@@ -2070,13 +2015,9 @@ internal class WebModeExtractor(
             val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
             val texts = ArrayList<String>()
             val bubbles = ArrayList<WmBubble>()
-            // Preserve OCR text boxes and model detections in native source-image coordinates for cleaning.
-            val recognizedLines = ArrayList<OcrBlock>()
-            val detectionsForClean = ArrayList<BubbleDetectorCore.Det>()
-            val detectorReturned = booleanArrayOf(false)
             fun finishResult(): PanelOcr {
-                // A force-OCR crop is not a replacement bitmap. readSlice maps its OCR/detector boxes
-                // back into full-source coordinates, so cleaning must always use the ORIGINAL full image bytes.
+                // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
+                // coordinate system and must never be used to rewrite the underlying source image.
                 // NOT limited to the slow pass: realtime/visible reads (fastMode) must erase the old lettering too, otherwise every
                 // visible panel keeps its Japanese text and the translation sits on a cover box.
                 // Canvas pages have no image URL (the picture is drawn by JS), so the old http(s)-only test
@@ -2084,34 +2025,16 @@ internal class WebModeExtractor(
                 // translation. The bytes here are the real panel pixels either way, which is all the remover needs.
                 val cleanableSrc = src.startsWith("https://", true) || src.startsWith("http://", true) ||
                     src.startsWith("ns-canvas:", true) || src.startsWith("blob:", true)
-                val fullTextRemoverOn = Prefs.bool(wv.context, "wmTextRemoval2", true)
-                // readSlice may run on several overlapping slices. Merge their native-coordinate
-                // detections here instead of letting the last slice overwrite every earlier mask.
-                // An empty result is meaningful too: it must replace old detections for a reused image URL.
-                val freshDetections = if (detectorReturned[0]) BubbleDetectorCore.merge(detectionsForClean) else null
-                if (freshDetections != null) synchronized(detectBySrc) { detectBySrc[src] = freshDetections }
-                val panelDetections = freshDetections ?: synchronized(detectBySrc) { detectBySrc[src] }
-                val hasBalloonMasks = panelDetections?.any {
-                    it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null
-                } == true
-                // Menu OFF disables the legacy pixel/AI cleaner, not the model's segmentation mask.
-                // The mask-only path is attempted only when the detector actually returned balloon masks.
-                if (cleanableSrc && (fullTextRemoverOn || hasBalloonMasks)) {
+                if (crop == null && Prefs.bool(wv.context, "wmTextRemoval2", true) && cleanableSrc) {
                     try {
-                        // Real-time / visible reads (fastMode) must be quick and must never start the heavy AI painter.
+                        // Real-time AND speculative read-ahead use the same low-latency cleaner. MI-GAN remains
+                        // available to thorough scan mode, but must not consume CPU/RAM while the reader is scrolling
+                        // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles,
-                            allowAi = !fastMode || Thread.currentThread().name == "ns-webmode-ahead",
-                            dets = panelDetections,
-                            recognizedLines = recognizedLines
+                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0
                         )
-                        val cleanerMode = if (fullTextRemoverOn) "full" else "balloon-mask-only"
-                        OcrDiag.log("CLEAN", "mode=$cleanerMode ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} masks=${panelDetections?.count { it.mask != null } ?: 0} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
-                        // Keep safe cover geometry even when SOME pixels were cleaned: a stored cleaned image can
-                        // still contain an untranslated/partially erased bubble, which must retain an opaque fallback.
-                        // Geometry is separate from the per-bubble "all source ink erased" decision.
-                        shapeCoverBands(bytes, bubbles, panelDetections)
+                        OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
                         // Optional cleanup must never turn a successful OCR result into a failed panel.
                     } catch (_: Exception) {
@@ -2120,7 +2043,6 @@ internal class WebModeExtractor(
                 }
                 return PanelOcr(texts.joinToString("\n\n"), bubbles)
             }
-
             if (crop != null) {
                 // Decode the requested rectangle. If the region decoder is unsupported or throws,
                 // use a bounded downsampled bitmap and crop that instead.
@@ -2159,17 +2081,23 @@ internal class WebModeExtractor(
                 try {
                     if (cropped.width < 16 || cropped.height < 16) throw DecodeException()
                     readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
-                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh,
-                        recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
-                        detectorReturned = detectorReturned)
+                        firstSlice = true, lastSlice = true, x0 = originX, fastMode = false, forceFresh = forceFresh)
+                    // The user dragged a frame over this spot: there IS text here. When the normal read found nothing,
+                    // read the crop again the hard way (enlarged, contrast-stretched, every recogniser, every script).
+                    if (bubbles.isEmpty() && forceFresh) {
+                        val hard = hardRecognize(cropped, st)
+                        if (hard != null) {
+                            readSlice(cropped, st, originY, sample, w, h, src, texts, bubbles,
+                                firstSlice = true, lastSlice = true, x0 = originX, fastMode = false,
+                                preRecognized = hard, forceFresh = true)
+                        }
+                    }
                 } finally { cropped.recycle() }
                 return finishResult()
             }
             if (h <= WebModeLogic.SLICE_H) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: throw DecodeException()
-                try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh,
-                    recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
-                    detectorReturned = detectorReturned) } finally { bmp.recycle() }
+                try { readSlice(bmp, st, 0, sample, w, h, src, texts, bubbles, true, true, fastMode = fastMode, forceFresh = forceFresh) } finally { bmp.recycle() }
             } else {
                 @Suppress("DEPRECATION")
                 val region = (try { BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) } catch (_: Exception) { null })
@@ -2209,9 +2137,7 @@ internal class WebModeExtractor(
                                             catch (e: java.util.concurrent.TimeoutException) { throw RuntimeException("Lens slice timeout", e) }
                                         if (rec != null)
                                             readSlice(b, st, sl[j].first, sample, w, h, src, texts, bubbles, j == 0, j == sl.size - 1,
-                                                fastMode = fastMode, forceFresh = forceFresh, preRecognized = rec,
-                                                recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
-                    detectorReturned = detectorReturned)
+                                                fastMode = fastMode, forceFresh = forceFresh, preRecognized = rec)
                                     }
                                 } finally {
                                     for (f in futs) f?.cancel(true)
@@ -2227,9 +2153,7 @@ internal class WebModeExtractor(
                             val bmp = region.decodeRegion(Rect(0, y0, w, y1), opts) ?: throw DecodeException()
                             try {
                                 if (bmp.width >= 32 && bmp.height >= 32)
-                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1,
-                                        fastMode = fastMode, forceFresh = forceFresh, recognizedForClean = recognizedLines, detectedForClean = detectionsForClean,
-                    detectorReturned = detectorReturned)
+                                    readSlice(bmp, st, y0, sample, w, h, src, texts, bubbles, idx == 0, idx == sl.size - 1, fastMode = fastMode, forceFresh = forceFresh)
                             } finally { bmp.recycle() }
                         }
                     }
@@ -2246,10 +2170,7 @@ internal class WebModeExtractor(
             bmp: Bitmap, st: ScriptState, y0: Int, sample: Int, fullW: Int, fullH: Int,
             src: String, texts: MutableList<String>, out: MutableList<WmBubble>,
             firstSlice: Boolean, lastSlice: Boolean, x0: Int = 0, fastMode: Boolean = false,
-            preRecognized: OcrResult? = null, forceFresh: Boolean = false,
-            recognizedForClean: MutableList<OcrBlock>? = null,
-            detectedForClean: MutableList<BubbleDetectorCore.Det>? = null,
-            detectorReturned: BooleanArray? = null
+            preRecognized: OcrResult? = null, forceFresh: Boolean = false
         ) {
             val tSlice = android.os.SystemClock.elapsedRealtime()
             val outBefore = out.size
@@ -2257,33 +2178,38 @@ internal class WebModeExtractor(
             var ocrMs = 0L
             var fitMs = 0L
             var lineCount = 0
-            // Run Koharu alongside OCR for BOTH visible and read-ahead panels. The old gate only started it
-            // on non-fast reads, and then waited after Lens had already returned; most visible Japanese panels
-            // therefore used the pixel fallback and never applied the segmentation masks to their first overlay.
+            // Google Lens is a network wait; the bubble detector only needs the bitmap. Run them side by side
+            // instead of one after the other (the detector used to start only after Lens had answered).
             var detFuture: java.util.concurrent.Future<List<BubbleDetectorCore.Det>?>? = null
-            var detectorKey: String? = null
-            var cachedDetectorResult: List<BubbleDetectorCore.Det>? = null
-            var detectorAttempted = false
             try {
-            val detectorWanted = BubbleDetector.enabled(wv.context)
-            if (detectorWanted) {
-                detectorKey = try { md5Of(bmp) } catch (_: Throwable) { null }
-                detectorKey?.let { key ->
-                    cachedDetectorResult = synchronized(detectCache) { detectCache[key] }
-                }
-                if (cachedDetectorResult == null && detectorKey != null) {
-                    // Only one deep bitmap snapshot may be alive at once on this low-memory phone.
-                    // Key the async result by image content so a timed-out first pass can reuse it later.
-                    detFuture = submitDetectorSnapshot(wv.context, bmp, detectorKey)
-                    detectorAttempted = detFuture != null
-                } else {
-                    detectorAttempted = cachedDetectorResult != null
-                }
-            }
             // Audit raw lines BEFORE joining paragraphs. A merged paragraph rectangle hides skipped
             // middle rows from the ink detector. Never discard an edge reading on the assumption that
             // another slice will find it; the fuller overlapping reading can upgrade it below.
             val tOcr = android.os.SystemClock.elapsedRealtime()
+            // Realtime viewport and speculative read-ahead share the latency-sensitive path. Reuse a completed
+            // detection-cache entry if one exists, but never schedule or wait for RT-DETR/mask inference here:
+            // these models can take several seconds and contend with the Lens request, image cleaning and scrolling.
+            // Their geometry is an optional enhancement, so realtime falls back to OCR-derived bubble grouping.
+            // Thorough scan mode remains separate and can opt into detector inference via wmDetectInScan.
+            val realtimePriority = fastMode || req.ahead > 0
+            if (realtimePriority) BubbleDetector.noteActivity()
+            val detOk = Prefs.bool(wv.context, "wmBubbleFit", true) && BubbleDetector.enabled(wv.context)
+            val cachedDets: List<BubbleDetectorCore.Det>? = if (detOk) BubbleDetector.cached(bmp) else null
+            val remoteDet = (engine as? RoutingOcrEngine)?.usesRemoteTextDetection() == true
+            // A whole-chapter scan (100+ pictures) must finish in about a minute: the two models need 4-10 s PER picture on a
+            // mid-range phone, one after the other, so the scan does not run them unless wmDetectInScan is switched on.
+            val scanDetect = Prefs.bool(wv.context, "wmDetectInScan", false)
+            val detectWanted = preRecognized == null && cachedDets == null && !realtimePriority && remoteDet && detOk && scanDetect
+            if (detectWanted) {
+                detFuture = try {
+                    DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> { BubbleDetector.detect(wv.context, bmp) })
+                } catch (_: Throwable) { null }
+            } else if (realtimePriority && cachedDets == null && remoteDet && detOk) {
+                // A 3-6 s RT-DETR run in a "background" thread still steals CPU and native memory from the reader,
+                // and the model often starts in the quiet gap just before the user scrolls again. Realtime consumes
+                // an already-cached result when available; it must not launch new speculative detector inference.
+                OcrDiag.log("DETECT_SRC", "realtime detector skipped; use cached detections/pixel bubble finder")
+            }
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
             val blocks = OcrPost.mergeNeighbours(
@@ -2295,102 +2221,28 @@ internal class WebModeExtractor(
             if (blocks.isEmpty()) return
             val rects = blocks.map { WmBubbleStyle.rectOf(it, bmp.width, bmp.height) }
             val k = sample.toFloat()
-            // Carry the original OCR boxes forward (not the larger translation/cover rectangles). These are
-            // the text-region inputs that the detector's instance masks validate and the existing eraser cleans.
-            recognizedForClean?.let { target ->
-                for (line in blocks) {
-                    val cx = x0 + line.cx * k
-                    val cy = y0 + line.cy * k
-                    val ww = line.w * k
-                    val hh = line.h * k
-                    target.add(OcrBlock(
-                        text = line.text,
-                        top = (y0 + line.top * k).toInt(),
-                        left = (x0 + line.left * k).toInt(),
-                        cx = cx, cy = cy, w = ww, h = hh,
-                        angle = line.angle, fontPx = line.fontPx * k,
-                        vertical = line.vertical, confidence = line.confidence,
-                        observations = line.observations,
-                        polygon = line.polygon.map { p -> (x0 + p.first * k) to (y0 + p.second * k) }
-                    ))
-                }
-            }
-            // The detector has been running in parallel with OCR. Since Lens can take ~0.8–1.3 s, a short
-            // post-OCR wait usually gives the mask result with little extra latency. Crucially, this wait is on the
-            // OCR worker, never on Main/UI. If the result is late, the async job still fills detectCache by image hash.
+            // Optional bubble / lettering detector (one model run per slice; null when not installed/enabled).
+            // It only adds information: which lines belong to different bubbles and which lettering is free text.
+            // In realtime we never wait on it: an unfinished detection is cancelled so the Lens text is emitted now.
             val earlyDet = detFuture
-            val dets: List<BubbleDetectorCore.Det>? = cachedDetectorResult ?: if (earlyDet != null) {
-                try {
-                    if (fastMode) {
-                        val budget = if (Thread.currentThread().name == "ns-webmode-ahead")
-                            DETECT_AHEAD_WAIT_MS else DETECT_FAST_WAIT_MS
-                        earlyDet.get(budget, TimeUnit.MILLISECONDS)
-                    } else earlyDet.get()
-                } catch (_: java.util.concurrent.TimeoutException) {
-                    null
-                } catch (_: Throwable) {
-                    null
-                }
-            } else {
-                // Another image may own the single-flight inference slot. Recheck cache in case it completed
-                // while Lens was running, instead of reporting a false "detector skipped".
-                detectorKey?.let { key -> synchronized(detectCache) { detectCache[key] } }
-            }
-            detectorAttempted = detectorAttempted || earlyDet != null || dets != null
-            // Keep status truthful: distinguish a model that is pending from a model that truly was disabled.
-            // Preserve the detector's instance masks while mapping each local slice/tile box back to
-            // native source-image pixels. Mask samples are normalized to their box, so the same mask
-            // remains valid when the box is scaled and offset.
-            if (dets != null) {
-                val sourceDets = ArrayList<BubbleDetectorCore.Det>(dets.size)
-                for (d in dets) {
-                    val l = kotlin.math.floor(x0 + d.l * k).toInt()
-                    val t = kotlin.math.floor(y0 + d.t * k).toInt()
-                    val r = kotlin.math.ceil(x0 + d.r * k).toInt()
-                    val b = kotlin.math.ceil(y0 + d.b * k).toInt()
-                    if (r > l && b > t) sourceDets.add(
-                        BubbleDetectorCore.Det(d.label, d.score, l, t, r, b, d.mask)
-                    )
-                }
-                if (detectedForClean != null) {
-                    // Preserve even an empty completed inference so it can replace stale masks for this URL.
-                    detectorReturned?.let { it[0] = true }
-                    detectedForClean.addAll(sourceDets)
-                } else {
-                    // Other viewport/screen OCR callers do not own a whole-image accumulator; keep their
-                    // existing behaviour, but store the boxes in source coordinates rather than slice pixels.
-                    synchronized(detectBySrc) { detectBySrc[src] = BubbleDetectorCore.merge(sourceDets) }
-                }
-            }
-            val detectorState = when {
-                dets != null -> BubbleDetector.lastInfo.ifBlank { "ready" }
-                !detectorWanted -> BubbleDetector.disabledReason(wv.context) ?: "off"
-                earlyDet != null && !earlyDet.isDone -> "pending (cached when finished)"
-                detectorAttempted -> "attempted; no result"
-                else -> "busy: another image owns the single-flight slot"
-            }
+            val dets: List<BubbleDetectorCore.Det>? =
+                if (cachedDets != null) cachedDets
+                else if (earlyDet != null) {
+                    // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
+                    try { if (fastMode) earlyDet.get(9, java.util.concurrent.TimeUnit.SECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
+                } else if (!realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+            // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
+            // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
+            val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true))
             OcrDiag.log("DETECT", "dets=${dets?.size ?: "off"} bubbles=${dets?.count { it.label == BubbleDetectorCore.CLS_BUBBLE } ?: 0} " +
                 "textInBubble=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_BUBBLE } ?: 0} free=${dets?.count { it.label == BubbleDetectorCore.CLS_TEXT_FREE } ?: 0} " +
-                "lines=${blocks.size} status=$detectorState parallel=${earlyDet != null} fast=$fastMode")
+                "masks=${dets?.count { it.seg != null } ?: 0} source=${if (cachedDets != null) "cache" else if (earlyDet != null) "scan-run" else if (realtimePriority && detOk) "skipped-realtime" else "none"} " +
+                "lines=${blocks.size} last=${if (detectRan) BubbleDetector.lastInfo.ifBlank { "-" } else "skipped"} parallel=${earlyDet != null}")
             OcrDiag.log("GROUPS", "blocks=" + blocks.joinToString(" | ") { b ->
                 "${(b.cx / 1f).toInt()},${b.cy.toInt()} f=${(if (b.fontPx > 0f) b.fontPx else b.h).toInt()} \"${b.text.take(12).replace('\n', ' ')}\""
             })
-            fun freeAt(i: Int): Boolean {
-                val current = dets ?: return false
-                val text = rects[i]
-                val x = (text[0] + text[2]) / 2f
-                val y = (text[1] + text[3]) / 2f
-                if (BubbleDetectorCore.isFreeText(current, x, y)) return true
-                // The active YOLO model only exposes balloon masks. A whisper/note can sit just over the
-                // balloon edge, so centre-in-mask alone can falsely absorb it into the main dialogue.
-                val masked = current.asSequence()
-                    .filter { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null && it.contains(x, y) }
-                    .minByOrNull { it.area }
-                if (masked != null) {
-                    return BubbleDetectorCore.maskCoverage(masked, text[0], text[1], text[2], text[3]) < 0.62f
-                }
-                return current.any { it.label == BubbleDetectorCore.CLS_BUBBLE && it.mask != null }
-            }
+            fun freeAt(i: Int): Boolean = dets != null && BubbleDetectorCore.isFreeText(
+                dets, (rects[i][0] + rects[i][2]) / 2f, (rects[i][1] + rects[i][3]) / 2f)
 
             // A flat speech bubble can contain lettering that the first pass missed.
             // Do this check for LONG blocks too: a long partial read is still partial.
@@ -2412,11 +2264,10 @@ internal class WebModeExtractor(
                 val tg = android.os.SystemClock.elapsedRealtime()
                 val grp = BubbleGrouping.groupContaining(blocks, i, pool.filter { !consumed[it] }) { x, y ->
                     // The detector saw two different bubble outlines around the two lines: never one sentence.
-                    val ix = blocks.indexOf(x)
-                    val iy = blocks.indexOf(y)
-                    (ix >= 0 && iy >= 0 && freeAt(ix) != freeAt(iy)) ||
                     BubbleDetectorCore.inDifferentBubbles(dets, x.cx, x.cy, y.cx, y.cy) ||
-                    OcrPost.outlineBetween(bmp, x, y) || run {
+                    OcrPost.outlineBetween(bmp, x, y) ||
+                    // A whisper / note beside or under a bubble: a bubble border crosses the path between the two texts.
+                    OcrPost.outlineCrossing(bmp, x, y, blocks) || run {
                         // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
                         // never one sentence. Unknown shape (null) keeps the geometry decision.
                         val ix = blocks.indexOf(x); val iy = blocks.indexOf(y)
@@ -2459,47 +2310,17 @@ internal class WebModeExtractor(
                 if (b.vertical || Math.abs(OcrPost.usableTilt(b.angle)) >= 6f) continue
 
                 val ownFont = if (b.fontPx > 0f) b.fontPx else b.h
-                // Realtime previously skipped the leftover-ink audit entirely. If Lens missed one row of a
-                // multiline/combined balloon, that row was never sent to the cleaner and stayed visible below
-                // the translated text. Audit only the one unique bubble (members are consumed below), keep the
-                // model mask as the preferred shape, and bound extra OCR retries per bubble.
-                val bands: MutableList<IntArray>? = if (freeAt(i)) null else ArrayList()
+                // The exhaustive leftover-ink scan is only useful during a thorough chapter pass.
+                // In realtime mode, passing a band collector forces bubbleInterior to scan every pixel
+                // again and compare it against every OCR box; a tall panel with many bubbles can stall.
+                // Without a collector the helper returns immediately after finding the bubble's fill.
+                val bands: MutableList<IntArray>? = if (fastMode) null else ArrayList()
+                // Realtime screens optimise for latency: flood-filling up to 1.2M pixels around
+                // every OCR block repeatedly was the dominant freeze on long/mobile Webtoon panels.
+                // Keep this expensive interior/leftover audit only for thorough chapter extraction.
                 var fromDet = false
-                val inter: IntArray? = if (freeAt(i)) {
-                    // Text outside predicted balloon masks is standalone; never grow it into a nearby speech bubble.
-                    null
-                } else if (fastMode) {
-                    val detectedInterior = BubbleDetectorCore.interiorFor(
-                        dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]
-                    )
-                    if (detectedInterior != null) {
-                        fromDet = true
-                        // Model geometry is better for placement, but it has no per-row OCR-gap evidence. Use the
-                        // pixel audit only to discover unread text bands; discard bands if its outline disagrees.
-                        val pixelInterior = try {
-                            WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
-                                bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
-                        } catch (_: Throwable) { null }
-                        val overlap = if (pixelInterior != null) {
-                            val iw = (minOf(detectedInterior[2], pixelInterior[2]) -
-                                maxOf(detectedInterior[0], pixelInterior[0])).coerceAtLeast(0)
-                            val ih = (minOf(detectedInterior[3], pixelInterior[3]) -
-                                maxOf(detectedInterior[1], pixelInterior[1])).coerceAtLeast(0)
-                            val da = (detectedInterior[2] - detectedInterior[0]).toLong() *
-                                (detectedInterior[3] - detectedInterior[1])
-                            val pa = (pixelInterior[2] - pixelInterior[0]).toLong() *
-                                (pixelInterior[3] - pixelInterior[1])
-                            val smaller = minOf(da, pa)
-                            smaller > 0L && iw.toLong() * ih >= smaller * 0.55
-                        } else false
-                        if (!overlap) bands?.clear()
-                        detectedInterior
-                    } else {
-                        try {
-                            WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
-                                bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
-                        } catch (_: Throwable) { null }
-                    }
+                val inter: IntArray? = if (fastMode) {
+                    BubbleDetectorCore.interiorFor(dets, rects[i][0], rects[i][1], rects[i][2], rects[i][3]).also { fromDet = it != null }
                 } else try {
                     WmBubbleStyle.bubbleInterior(bmp, rects[i], rects, requireLeftover = false,
                         bandsOut = bands, minBand = Math.max(6, (ownFont * 0.45f).toInt()))
@@ -2516,9 +2337,18 @@ internal class WebModeExtractor(
                 val inside = blocks.indices.filter { j ->
                     val cxj = blocks[j].cx
                     val cyj = blocks[j].cy
-                    cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3] &&
-                        !freeAt(j) &&
-                        (j == i || !BubbleDetectorCore.inDifferentBubbles(dets, b.cx, b.cy, cxj, cyj))
+                    if (!(cxj >= inter[0] && cxj < inter[2] && cyj >= inter[1] && cyj < inter[3])) return@filter false
+                    if (j == i) return@filter true
+                    if (BubbleDetectorCore.inDifferentBubbles(dets, b.cx, b.cy, cxj, cyj)) return@filter false
+                    // The interior is a bounding RECTANGLE: a whisper written beside / under an oval bubble, or the
+                    // lettering of a second bubble that overlaps this one, has its centre inside that rectangle too.
+                    // A line of THIS bubble lies (almost) completely inside it; the neighbour sticks out.
+                    if (BubbleDetectorCore.shareInside(rects[j][0], rects[j][1], rects[j][2], rects[j][3], inter) < 0.72f) return@filter false
+                    // ...and no bubble border may run between it and the line we started from.
+                    if (OcrPost.outlineCrossing(bmp, b, blocks[j], blocks)) return@filter false
+                    // Lettering of a clearly different size that sits beside (not under) the seed is a note, not a line.
+                    if (BubbleGrouping.sideNote(b, blocks[j])) return@filter false
+                    true
                 }
                 if (i !in inside) continue
                 val members = inside.filter { !consumed[it] }
@@ -2534,40 +2364,11 @@ internal class WebModeExtractor(
                 val fonts = ordered.map { blocks[it].fontPx }.filter { it > 0f }.sorted()
                 val medFont = if (fonts.isEmpty()) ownFont else fonts[fonts.size / 2]
                 val lines = ordered.mapTo(ArrayList<BubbleLine>()) {
-                    val line = blocks[it]
-                    BubbleLine(line.cy, line.text.replace(NEWLINES, " ").trim(),
-                        line.cx, line.w, line.h, line.fontPx)
+                    BubbleLine(blocks[it].cy, blocks[it].text.replace(NEWLINES, " ").trim())
                 }
-                val recovered = if (bands?.isNotEmpty() == true) {
-                    recoverBubbleLines(bmp, st, inter, bands, lines, medFont,
-                        maxRows = if (fastMode) 5 else 3)
-                } else emptyList()
-                // Add recovered OCR boxes to the same native-coordinate cleaner input; otherwise the text might
-                // improve in the chatbot paragraph but the eraser would still know only the originally found rows.
-                if (recovered.isNotEmpty()) {
-                    recognizedForClean?.let { target ->
-                        for (line in recovered) {
-                            val cxSrc = x0 + line.cx * k
-                            val cySrc = y0 + line.cy * k
-                            val wwSrc = line.w * k
-                            val hhSrc = line.h * k
-                            if (wwSrc < 2f || hhSrc < 2f) continue
-                            val lSrc = (cxSrc - wwSrc / 2f).coerceIn(0f, fullW.toFloat())
-                            val tSrc = (cySrc - hhSrc / 2f).coerceIn(0f, fullH.toFloat())
-                            val rSrc = (cxSrc + wwSrc / 2f).coerceIn(lSrc + 1f, fullW.toFloat())
-                            val bSrc = (cySrc + hhSrc / 2f).coerceIn(tSrc + 1f, fullH.toFloat())
-                            target.add(OcrBlock(
-                                text = line.text, top = tSrc.toInt(), left = lSrc.toInt(),
-                                cx = (lSrc + rSrc) / 2f, cy = (tSrc + bSrc) / 2f,
-                                w = rSrc - lSrc, h = bSrc - tSrc, angle = 0f,
-                                fontPx = (line.fontPx.takeIf { it > 0f } ?: line.h) * k,
-                                vertical = false, confidence = 0.85f, observations = 1,
-                                polygon = listOf(lSrc to tSrc, rSrc to tSrc, rSrc to bSrc, lSrc to bSrc)
-                            ))
-                        }
-                    }
-                    OcrDiag.log("BUBBLE_RESCAN", "fast=$fastMode bands=${bands?.size ?: 0} recovered=${recovered.size}")
-                }
+                // Recover missed bubble rows only during a thorough scan; doing up to three extra
+                // OCR inferences for every visible bubble made real-time reading feel frozen.
+                if (bands?.isNotEmpty() == true && !fastMode) recoverBubbleLines(bmp, st, inter, bands, lines, medFont)
                 val joinedText = lines.sortedBy { it.cy }.joinToString(" ") { it.text }
                     .replace(Regex("\\s+"), " ").trim()
                 if (joinedText.isBlank()) continue
@@ -2575,19 +2376,9 @@ internal class WebModeExtractor(
                 refinedBox[i] = inter
                 run {
                     var sl = Int.MAX_VALUE; var st = Int.MAX_VALUE; var sr = Int.MIN_VALUE; var sb = Int.MIN_VALUE
-                    // Include the real boxes of recovered rows, not just the first OCR pass's rows.
-                    for (line in lines) {
-                        if (line.w <= 0f || line.h <= 0f) continue
-                        sl = minOf(sl, (line.cx - line.w / 2f).toInt())
-                        st = minOf(st, (line.cy - line.h / 2f).toInt())
-                        sr = maxOf(sr, kotlin.math.ceil((line.cx + line.w / 2f).toDouble()).toInt())
-                        sb = maxOf(sb, kotlin.math.ceil((line.cy + line.h / 2f).toDouble()).toInt())
-                    }
-                    if (sl == Int.MAX_VALUE) {
-                        for (j in members) {
-                            val rc = rects[j]
-                            sl = Math.min(sl, rc[0]); st = Math.min(st, rc[1]); sr = Math.max(sr, rc[2]); sb = Math.max(sb, rc[3])
-                        }
+                    for (j in members) {
+                        val rc = rects[j]
+                        sl = Math.min(sl, rc[0]); st = Math.min(st, rc[1]); sr = Math.max(sr, rc[2]); sb = Math.max(sb, rc[3])
                     }
                     val sp = Math.max(4, (medFont * 0.2f).toInt())
                     refinedSeed[i] = intArrayOf(
@@ -2630,89 +2421,66 @@ internal class WebModeExtractor(
                     cx = (rb[0] + rb[2]) / 2f; cy = (rb[1] + rb[3]) / 2f
                     bw = (rb[2] - rb[0]) - 4f; bh = (rb[3] - rb[1]) - 4f
                 }
-                // Preserve the actual OCR/refined text rectangle, not WmBubbleStyle's expanded cover bounds.
-                // The text remover adds its own small antialias margin and uses the balloon mask as its hard clip.
-                // Cleaning must never reinterpret the full cover-bubble geometry as the original glyph region.
-                // refinedBox may be the WHOLE bubble interior after line recovery; refinedSeed stays anchored
-                // to the original OCR rows. Cleaning/erase verification must never use the full interior as glyph bounds.
-                val sourceGlyphRect = refinedSeed[i] ?: refinedBox[i] ?: rects[i]
-                val ocrCx = (sourceGlyphRect[0] + sourceGlyphRect[2]) / 2f
-                val ocrCy = (sourceGlyphRect[1] + sourceGlyphRect[3]) / 2f
-                val ocrBw = (sourceGlyphRect[2] - sourceGlyphRect[0]).toFloat()
-                val ocrBh = (sourceGlyphRect[3] - sourceGlyphRect[1]).toFloat()
                 // Speech-bubble SHAPE (the Manga Translator idea): rebuild the bubble around the lettering and write the
                 // translation into the largest rectangle that fits INSIDE it. The cover box only has to hide the old
                 // lettering. Without this the text was fitted into the lettering's own tight box (a long translation got
                 // tiny) or into an oval's bounding box (its corners lie outside the outline: text left the bubble).
                 var tL = 0; var tT = 0; var tR = 0; var tB = 0
                 var coverBands: List<IntArray> = emptyList()
-                var modelMaskFitUsed = false
+                // WEBTOON GUARD: OCR boxes of every OTHER bubble / whisper. A flood-filled bubble interior leaks into an
+                // overlapping bubble (or around a whisper written beside the bubble); the cover and the text area are cut
+                // at the half-way line to these boxes so one bubble can never swallow its neighbour.
+                val seedForGuard = refinedSeed[i] ?: rects[i]
+                val foreign: List<IntArray> = rects.filterIndexed { j, rc ->
+                    if (j == i) return@filterIndexed false
+                    val ix = Math.min(rc[2], seedForGuard[2]) - Math.max(rc[0], seedForGuard[0])
+                    val iy = Math.min(rc[3], seedForGuard[3]) - Math.max(rc[1], seedForGuard[1])
+                    val area = (rc[2] - rc[0]).toLong() * (rc[3] - rc[1])
+                    !(ix > 0 && iy > 0 && ix.toLong() * iy * 100 >= area * 60)   // lines inside this bubble are NOT foreign
+                }
                 // Free lettering (sound effects, narration on artwork) has no bubble to fit into.
                 if (!rotated && !freeAt(i) && Prefs.bool(wv.context, "wmBubbleFit", true)) {
                     val seedBox = refinedSeed[i] ?: rects[i]
-                    // Prefer the actual YOLO instance mask for BOTH text placement and cover shape. The old
-                    // pixel-colour reconstruction is only a fallback; on cloud/oval balloons it sometimes
-                    // inferred a narrow interior and forced a long translation into a thin column.
-                    val modelShape = BubbleDetectorCore.maskGeometryFor(
-                        dets, seedBox[0], seedBox[1], seedBox[2], seedBox[3]
-                    )
-                    if (modelShape != null) {
-                        val d = modelShape.detection
-                        val sf = modelShape.safe
-                        val cL = d.l.coerceIn(0, bmp.width - 1)
-                        val cT = d.t.coerceIn(0, bmp.height - 1)
-                        val cR = d.r.coerceIn(cL + 1, bmp.width)
-                        val cB = d.b.coerceIn(cT + 1, bmp.height)
-                        val coverArea = (cR - cL).toLong() * (cB - cT)
-                        val textArea = (sf[2] - sf[0]).toLong() * (sf[3] - sf[1])
-                        if (sf[2] - sf[0] >= 10 && sf[3] - sf[1] >= 10 &&
-                            coverArea > 0 && textArea * 5 >= coverArea) {
-                            tL = sf[0]; tT = sf[1]; tR = sf[2]; tB = sf[3]
-                            // These are row bands from the MODEL'S mask, not a second image-derived mask.
-                            coverBands = modelShape.bands
-                            modelMaskFitUsed = true
-                            cx = (cL + cR) / 2f; cy = (cT + cB) / 2f
-                            bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
-                            OcrDiag.log("MASK_LAYOUT", "safe=${sf[2] - sf[0]}x${sf[3] - sf[1]} cover=${cR - cL}x${cB - cT} bands=${coverBands.size}")
+                    val tFit = android.os.SystemClock.elapsedRealtime()
+                    val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
+                    fitMs += android.os.SystemClock.elapsedRealtime() - tFit
+                    if (fit != null) {
+                        val sf = WebtoonBubbleGuard.clip(fit.safe, seedBox, foreign)
+                        val aL = Math.floor((cx - bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
+                        val aT = Math.floor((cy - bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
+                        val aR = Math.ceil((cx + bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
+                        val aB = Math.ceil((cy + bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
+                        var cL = aL; var cT = aT; var cR = aR; var cB = aB
+                        // cover = old box + safe rectangle, if that stays inside the bubble; else the lettering + safe rectangle
+                        val uL = Math.min(aL, sf[0]); val uT = Math.min(aT, sf[1])
+                        val uR = Math.max(aR, sf[2]); val uB = Math.max(aB, sf[3])
+                        if (fit.coverage(uL, uT, uR, uB) >= 0.90f) {
+                            cL = uL; cT = uT; cR = uR; cB = uB
+                        } else {
+                            val sL = Math.min(seedBox[0] - 2, sf[0]).coerceAtLeast(0)
+                            val sT = Math.min(seedBox[1] - 2, sf[1]).coerceAtLeast(0)
+                            val sR = Math.max(seedBox[2] + 2, sf[2]).coerceAtMost(bmp.width)
+                            val sB = Math.max(seedBox[3] + 2, sf[3]).coerceAtMost(bmp.height)
+                            if (fit.coverage(sL, sT, sR, sB) >= 0.90f) { cL = sL; cT = sT; cR = sR; cB = sB }
                         }
-                    } else {
-                        val tFit = android.os.SystemClock.elapsedRealtime()
-                        val fit = try { BubbleFit.analyse(bmp, seedBox, rects) } catch (_: Throwable) { null }
-                        fitMs += android.os.SystemClock.elapsedRealtime() - tFit
-                        if (fit != null) {
-                            val sf = fit.safe
-                            val aL = Math.floor((cx - bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
-                            val aT = Math.floor((cy - bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
-                            val aR = Math.ceil((cx + bw / 2f).toDouble()).toInt().coerceIn(0, bmp.width)
-                            val aB = Math.ceil((cy + bh / 2f).toDouble()).toInt().coerceIn(0, bmp.height)
-                            var cL = aL; var cT = aT; var cR = aR; var cB = aB
-                            // cover = old box + safe rectangle, if that stays inside the bubble; else the lettering + safe rectangle
-                            val uL = Math.min(aL, sf[0]); val uT = Math.min(aT, sf[1])
-                            val uR = Math.max(aR, sf[2]); val uB = Math.max(aB, sf[3])
-                            if (fit.coverage(uL, uT, uR, uB) >= 0.90f) {
-                                cL = uL; cT = uT; cR = uR; cB = uB
-                            } else {
-                                val sL = Math.min(seedBox[0] - 2, sf[0]).coerceAtLeast(0)
-                                val sT = Math.min(seedBox[1] - 2, sf[1]).coerceAtLeast(0)
-                                val sR = Math.max(seedBox[2] + 2, sf[2]).coerceAtMost(bmp.width)
-                                val sB = Math.max(seedBox[3] + 2, sf[3]).coerceAtMost(bmp.height)
-                                if (fit.coverage(sL, sT, sR, sB) >= 0.90f) { cL = sL; cT = sT; cR = sR; cB = sB }
-                            }
-                            val xl = Math.max(cL, sf[0]); val xt = Math.max(cT, sf[1])
-                            val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
-                            val coverArea = (cR - cL).toLong() * (cB - cT)
-                            val textArea = (xr - xl).toLong() * (xb - xt)
-                            if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
-                                tL = xl; tT = xt; tR = xr; tB = xb
-                                // The whole interior (not just the lettering box) is what gets painted over when the picture
-                                // itself is not cleaned.
-                                coverBands = try { fit.bands() } catch (_: Throwable) { emptyList() }
-                                cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
-                            }
+                        run {
+                            val cc = WebtoonBubbleGuard.clip(intArrayOf(cL, cT, cR, cB), seedBox, foreign)
+                            cL = cc[0]; cT = cc[1]; cR = cc[2]; cB = cc[3]
+                        }
+                        val xl = Math.max(cL, sf[0]); val xt = Math.max(cT, sf[1])
+                        val xr = Math.min(cR, sf[2]); val xb = Math.min(cB, sf[3])
+                        val coverArea = (cR - cL).toLong() * (cB - cT)
+                        val textArea = (xr - xl).toLong() * (xb - xt)
+                        if (xr - xl >= 10 && xb - xt >= 10 && coverArea > 0 && textArea * 5 >= coverArea) {
+                            tL = xl; tT = xt; tR = xr; tB = xb
+                            // The whole interior (not just the lettering box) is what gets painted over when the picture
+                            // itself is not cleaned.
+                            coverBands = try { WebtoonBubbleGuard.clipAll(fit.bands(), seedBox, foreign) } catch (_: Throwable) { emptyList() }
+                            cx = (cL + cR) / 2f; cy = (cT + cB) / 2f; bw = (cR - cL).toFloat(); bh = (cB - cT).toFloat()
                         }
                     }
                 }
-                val nb = WmBubble(
+                val nb0 = WmBubble(
                     src = src,
                     cx = (x0 + cx * k) / fullW, cy = (y0 + cy * k) / fullH,
                     w = bw * k / fullW, h = bh * k / fullH,
@@ -2729,17 +2497,74 @@ internal class WebModeExtractor(
                             lst.add((x0 + cb[0] * k) / fullW); lst.add((y0 + cb[1] * k) / fullH)
                             lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
                         }
-                    } else emptyList(),
-                    modelMaskFit = modelMaskFitUsed,
-                    ocrCx = (x0 + ocrCx * k) / fullW,
-                    ocrCy = (y0 + ocrCy * k) / fullH,
-                    ocrW = ocrBw * k / fullW,
-                    ocrH = ocrBh * k / fullH
+                    } else emptyList()
                 )
+                // Real balloon outline from the segmentation model: hide the old lettering everywhere inside THIS balloon
+                // (paper colour), and make sure the cover reaches the balloon, not just the tight OCR box.
+                val nb = run {
+                    val seg = if (dets == null || freeAt(i)) null
+                        else BubbleSegCore.balloonAt(dets.mapNotNull { it.seg }, ((rects[i][0] + rects[i][2]) / 2), ((rects[i][1] + rects[i][3]) / 2))
+                    if (seg == null) nb0 else {
+                        val bands = BubbleSegCore.bands(seg)
+                        // Where the translation goes: the largest rectangle inside THIS balloon around the old lettering.
+                        val seedBox = refinedSeed[i] ?: rects[i]
+                        val fit = BubbleSegCore.fitRect(seg, seedBox)
+                        val placed = if (fit == null) nb0 else nb0.copy(
+                            tcx = (x0 + (fit[0] + fit[2]) / 2f * k) / fullW, tcy = (y0 + (fit[1] + fit[3]) / 2f * k) / fullH,
+                            tbw = (fit[2] - fit[0]) * k / fullW, tbh = (fit[3] - fit[1]) * k / fullH
+                        )
+                        if (bands.isEmpty()) placed else placed.copy(cv = ArrayList<Float>(bands.size * 4 + 4).also { lst ->
+                            // The old tight cover box stays covered too: when cv is present it replaces the single
+                            // cover rectangle, and lettering that touches the outline must not be left visible.
+                            lst.add(placed.cx - placed.w / 2f); lst.add(placed.cy - placed.h / 2f)
+                            lst.add(placed.cx + placed.w / 2f); lst.add(placed.cy + placed.h / 2f)
+                            for (cb in bands) {
+                                lst.add((x0 + cb[0] * k) / fullW); lst.add((y0 + cb[1] * k) / fullH)
+                                lst.add((x0 + cb[2] * k) / fullW); lst.add((y0 + cb[3] * k) / fullH)
+                            }
+                        })
+                    }
+                }
+                // WEBTOON: wipe the ends of the old lettering that the OCR box did not reach (see WebtoonInkSweep).
+                val nbS = if (rotated || b.vertical || s.soft || !Prefs.bool(wv.context, "wtInkSweep", true)) nb else run {
+                    val cl = (((nb.cx - nb.w / 2f) * fullW - x0) / k).toInt().coerceIn(0, bmp.width - 1)
+                    val ct = (((nb.cy - nb.h / 2f) * fullH - y0) / k).toInt().coerceIn(0, bmp.height - 1)
+                    val cr = Math.ceil((((nb.cx + nb.w / 2f) * fullW - x0) / k).toDouble()).toInt().coerceIn(cl + 1, bmp.width)
+                    val cb = Math.ceil((((nb.cy + nb.h / 2f) * fullH - y0) / k).toDouble()).toInt().coerceIn(ct + 1, bmp.height)
+                    val fontPx = (refinedFont[i] ?: (if (b.fontPx > 0f) b.fontPx else b.h)).coerceAtLeast(8f)
+                    val extra = WebtoonInkSweep.sweep(bmp, intArrayOf(cl, ct, cr, cb), fontPx, s.bg, foreign)
+                    if (extra.isEmpty()) nb else {
+                        val lst = ArrayList<Float>((nb.cv.size.coerceAtLeast(4)) + extra.size * 4)
+                        if (nb.cv.isEmpty()) {
+                            val m = 3f   // the old cover box had a 3 px soft rim; keep it
+                            lst.add((x0 + (cl - m) * k) / fullW); lst.add((y0 + (ct - m) * k) / fullH)
+                            lst.add((x0 + (cr + m) * k) / fullW); lst.add((y0 + (cb + m) * k) / fullH)
+                        } else lst.addAll(nb.cv)
+                        for (e in extra) {
+                            lst.add((x0 + e[0] * k) / fullW); lst.add((y0 + e[1] * k) / fullH)
+                            lst.add((x0 + e[2] * k) / fullW); lst.add((y0 + e[3] * k) / fullH)
+                        }
+                        nb.copy(cv = lst)
+                    }
+                }
+                val seedPx = refinedSeed[i] ?: rects[i]
+                val seedFrac = floatArrayOf(
+                    (x0 + seedPx[0] * k) / fullW, (y0 + seedPx[1] * k) / fullH,
+                    (x0 + seedPx[2] * k) / fullW, (y0 + seedPx[3] * k) / fullH)
+                val fontFrac = (refinedFont[i] ?: (if (b.fontPx > 0f) b.fontPx else b.h)) * k / fullW
+                val aspect = fullH.toFloat() / Math.max(1, fullW)
                 // Same text seen by two overlapping slices: keep the bigger box once.
                 var dup = -1
                 for (j in out.indices) {
-                    if (out[j].src == src && sameSpot(out[j], nb)) { dup = j; break }
+                    if (out[j].src != src || !sameSpot(out[j], nbS)) continue
+                    // WEBTOON: DIFFERENT text on an overlapping cover is only "two lines of one bubble" when the OCR boxes
+                    // themselves are neighbouring lines. A grown cover (leaked flood fill) or a whisper beside the bubble
+                    // used to be glued into the bubble here.
+                    if (!sameOcrText(texts[j], text)) {
+                        val other = seedOf[out[j]]
+                        if (other != null && !WebtoonBubbleGuard.adjacent(other, seedFrac, fontFrac, aspect)) continue
+                    }
+                    dup = j; break
                 }
                 if (dup >= 0) {
                     if (sameOcrText(texts[dup], text)) {
@@ -2747,8 +2572,8 @@ internal class WebModeExtractor(
                         val freshKey = WebModeLayout.normalizeOcrText(text)
                         // Text completeness wins over box area. A full reading can have a tighter box.
                         if (freshKey.length > priorKey.length ||
-                            (freshKey == priorKey && nb.w * nb.h > out[dup].w * out[dup].h * 1.15f)) {
-                            out[dup] = nb; texts[dup] = text
+                            (freshKey == priorKey && nbS.w * nbS.h > out[dup].w * out[dup].h * 1.15f)) {
+                            out[dup] = nbS; seedOf[nbS] = seedFrac; texts[dup] = text
                         }
                     } else {
                         // DIFFERENT text on the same spot: two lines of one speech bubble that OCR did not
@@ -2757,30 +2582,34 @@ internal class WebModeExtractor(
                         // arrive in reading order, so the new one is the lower line.
                         val merged = OcrLineFusion.joinSliceText(texts[dup], text)
                         val prior = out[dup]
-                        val l = minOf(prior.cx - prior.w / 2, nb.cx - nb.w / 2)
-                        val r = maxOf(prior.cx + prior.w / 2, nb.cx + nb.w / 2)
-                        val t = minOf(prior.cy - prior.h / 2, nb.cy - nb.h / 2)
-                        val bt = maxOf(prior.cy + prior.h / 2, nb.cy + nb.h / 2)
+                        val l = minOf(prior.cx - prior.w / 2, nbS.cx - nbS.w / 2)
+                        val r = maxOf(prior.cx + prior.w / 2, nbS.cx + nbS.w / 2)
+                        val t = minOf(prior.cy - prior.h / 2, nbS.cy - nbS.h / 2)
+                        val bt = maxOf(prior.cy + prior.h / 2, nbS.cy + nbS.h / 2)
                         // A union covers the recovered lower rows too; choosing just the bigger box
                         // can leave the other slice's tail visibly untranslated.
-                        out[dup] = prior.copy(sourceText = merged, cx = (l + r) / 2, cy = (t + bt) / 2,
+                        val union = prior.copy(sourceText = merged, cx = (l + r) / 2, cy = (t + bt) / 2,
                             w = r - l, h = bt - t, tcx = 0f, tcy = 0f, tbw = 0f, tbh = 0f, cv = emptyList())
+                        val ps = seedOf[prior]
+                        seedOf[union] = if (ps == null) seedFrac else floatArrayOf(
+                            Math.min(ps[0], seedFrac[0]), Math.min(ps[1], seedFrac[1]),
+                            Math.max(ps[2], seedFrac[2]), Math.max(ps[3], seedFrac[3]))
+                        out[dup] = union
                         texts[dup] = merged
                     }
                     continue
                 }
                 texts.add(text)
-                out.add(nb)
+                seedOf[nbS] = seedFrac
+                out.add(nbS)
             }
             } finally {
-                // The detector owns a bitmap snapshot, so the caller may recycle [bmp] even if this wait times out.
-                // Do not cancel the FutureTask: cancellation before the callable starts could skip its finally block
-                // and retain both the snapshot and the single-flight gate indefinitely.
+                // The detector reads [bmp]; the caller recycles it right after this function, so never leave it running.
                 val pendingDet = detFuture
                 if (pendingDet != null) {
                     try { pendingDet.get(20, java.util.concurrent.TimeUnit.SECONDS) }
-                    catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-                    catch (_: Throwable) { /* timeout or inference failure; the worker owns its cleanup */ }
+                    catch (_: InterruptedException) { Thread.currentThread().interrupt(); try { pendingDet.cancel(true) } catch (_: Throwable) {} }
+                    catch (_: Throwable) { try { pendingDet.cancel(true) } catch (_: Throwable) {} }
                 }
                 // Structured diagnostics: counts and timings only, never recognised text.
                 Log.i(TAG, "slice job=$id mode=${if (fastMode) "fast" else "full"} ocrMs=$ocrMs groupingMs=$groupMs bubbleFitMs=$fitMs " +
@@ -2797,11 +2626,10 @@ internal class WebModeExtractor(
          */
         private fun recoverBubbleLines(
             bmp: Bitmap, st: ScriptState, inter: IntArray, bands: List<IntArray>,
-            lines: MutableList<BubbleLine>, font: Float, maxRows: Int = 3
-        ): List<BubbleLine> {
+            lines: MutableList<BubbleLine>, font: Float
+        ) {
             fun letters(t: String) = t.count { it.isLetterOrDigit() }
-            val added = ArrayList<BubbleLine>()
-            var budget = maxRows.coerceIn(1, 8)
+            var budget = 3
             for (band in bands) {
                 if (budget <= 0 || !alive()) break
                 budget--
@@ -2822,32 +2650,15 @@ internal class WebModeExtractor(
                     for (g in got) {
                         val text = g.text.replace(NEWLINES, " ").trim()
                         if (letters(text) < 1) continue
-                        val gcx = x0 + g.cx / f
                         val gcy = y0 + g.cy / f
-                        val gw = g.w / f
-                        val gh = g.h / f
-                        val gf = g.fontPx / f
                         val same = lines.firstOrNull { Math.abs(it.cy - gcy) <= Math.max(font, 8f) * 0.7f }
                         if (same != null) {
-                            // Same row: keep the fuller reading and union the box so cleanup reaches its full width.
-                            if (letters(text) > letters(same.text) && OcrLineFusion.agreement(same.text, text) >= 0.8f) {
+                            // same row: keep the fuller reading, never duplicate it
+                            if (letters(text) > letters(same.text) && OcrLineFusion.agreement(same.text, text) >= 0.8f)
                                 same.text = text
-                                if (gw > 0f && gh > 0f) {
-                                    val l = minOf(same.cx - same.w / 2f, gcx - gw / 2f)
-                                    val t = minOf(same.cy - same.h / 2f, gcy - gh / 2f)
-                                    val r = maxOf(same.cx + same.w / 2f, gcx + gw / 2f)
-                                    val b = maxOf(same.cy + same.h / 2f, gcy + gh / 2f)
-                                    same.cx = (l + r) / 2f; same.cy = (t + b) / 2f
-                                    same.w = r - l; same.h = b - t
-                                    same.fontPx = maxOf(same.fontPx, gf)
-                                }
-                            }
                             continue
                         }
-                        if (gw < 2f || gh < 2f) continue
-                        val fresh = BubbleLine(gcy, text, gcx, gw, gh, gf)
-                        lines.add(fresh)
-                        added.add(fresh)
+                        lines.add(BubbleLine(gcy, text))
                     }
                 } catch (_: Exception) {
                 } catch (_: OutOfMemoryError) {
@@ -2856,7 +2667,6 @@ internal class WebModeExtractor(
                     if (strip != null && strip !== bmp && !strip.isRecycled) strip.recycle()
                 }
             }
-            return added
         }
 
         /** True when two OCR readings are (nearly) the same text; false when they are different lines. */
@@ -2873,6 +2683,9 @@ internal class WebModeExtractor(
 
         private fun likelySameBubbleLine(a: OcrBlock, b: OcrBlock, maxGapFonts: Float = 2.0f, loose: Boolean = false): Boolean =
             BubbleGrouping.likelySameBubbleLine(a, b, maxGapFonts, loose)
+
+        /** WEBTOON: the OCR-text box (image fractions l,t,r,b) behind each emitted bubble; used by the duplicate check. */
+        private val seedOf = java.util.IdentityHashMap<WmBubble, FloatArray>()
 
         private fun sameSpot(a: WmBubble, b: WmBubble): Boolean {
             val x = Math.min(a.cx + a.w / 2, b.cx + b.w / 2) - Math.max(a.cx - a.w / 2, b.cx - b.w / 2)
@@ -2902,6 +2715,67 @@ internal class WebModeExtractor(
                 OcrDiag.log("OCR_ERR", "script=${st.current.name} ms=${SystemClock.elapsedRealtime() - t0} ${e.javaClass.simpleName}: ${e.message?.take(140)}")
                 throw e
             }
+        }
+
+        /**
+         * "Hard OCR" for a frame the user marked by hand. Tries, in order: the crop enlarged 2x, enlarged 2x with
+         * stretched contrast, enlarged 3x with stretched contrast; each with the normal engine and then with every
+         * local recogniser for every script. Returns the first reading with real letters (coordinates mapped back to
+         * the crop), or null when nothing at all can be read.
+         */
+        private fun hardRecognize(crop: Bitmap, st: ScriptState): OcrResult? {
+            fun letters(r: OcrResult) = r.text.count { it.isLetterOrDigit() }
+            val longest = maxOf(crop.width, crop.height).coerceAtLeast(1)
+            val plans = listOf(2f to false, 2f to true, 3f to true)
+            for ((want, contrast) in plans) {
+                if (cancelled.get()) return null
+                val u = minOf(want, 3200f / longest).coerceAtLeast(1f)
+                var scaled: Bitmap? = null
+                var prepared: Bitmap? = null
+                try {
+                    scaled = Bitmap.createScaledBitmap(crop, (crop.width * u).toInt().coerceAtLeast(1),
+                        (crop.height * u).toInt().coerceAtLeast(1), true)
+                    prepared = if (contrast) stretchContrast(scaled) else scaled
+                    val first = recognize(prepared, st, false, true)
+                    if (letters(first) >= 2) return scaleBack(first, u)
+                    val scripts = listOf(st.current) + WebModeLogic.fallbackScripts(st.current)
+                    for (script in scripts) {
+                        val alt = try { engine.recognizeFallback(prepared, script) } catch (_: Exception) { OcrResult(emptyList()) }
+                        if (letters(alt) >= 2) { st.current = script; return scaleBack(alt, u) }
+                    }
+                } catch (_: OutOfMemoryError) {
+                } catch (_: Exception) {
+                } finally {
+                    if (prepared != null && prepared !== scaled) prepared.recycle()
+                    scaled?.recycle()
+                }
+            }
+            return null
+        }
+
+        private fun stretchContrast(src: Bitmap): Bitmap {
+            val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+            val paint = android.graphics.Paint()
+            paint.colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix(floatArrayOf(
+                1.7f, 0f, 0f, 0f, -70f,
+                0f, 1.7f, 0f, 0f, -70f,
+                0f, 0f, 1.7f, 0f, -70f,
+                0f, 0f, 0f, 1f, 0f)))
+            android.graphics.Canvas(out).drawBitmap(src, 0f, 0f, paint)
+            return out
+        }
+
+        private fun scaleBack(r: OcrResult, u: Float): OcrResult {
+            if (u == 1f) return r
+            val blocks = r.blocks.map { b ->
+                b.copy(
+                    left = (b.left / u).toInt(), top = (b.top / u).toInt(),
+                    cx = b.cx / u, cy = b.cy / u, w = b.w / u, h = b.h / u,
+                    fontPx = b.fontPx / u,
+                    polygon = b.polygon.map { (x, y) -> Pair(x / u, y / u) }
+                )
+            }
+            return OcrResult(blocks).also { it.engineLabel = r.engineLabel }
         }
 
         private fun recognizeInner(bmp: Bitmap, st: ScriptState, fastMode: Boolean = false, forceFresh: Boolean = false): OcrResult {
@@ -3052,14 +2926,7 @@ internal class WebModeExtractor(
         val fastFallbackScriptsTried = HashSet<OcrScript>()
         var fastFallbackBudget = 3
     }
-    private class BubbleLine(
-        var cy: Float,
-        var text: String,
-        var cx: Float = 0f,
-        var w: Float = 0f,
-        var h: Float = 0f,
-        var fontPx: Float = 0f
-    )
+    private class BubbleLine(var cy: Float, var text: String)
     private class DecodeException : Exception()
     private class ForceAcc { var top = 0; val texts = ArrayList<String>(); val bubbles = ArrayList<WmBubble>() }
     private class PanelOcr(val text: String, val bubbles: List<WmBubble>)
@@ -3095,122 +2962,13 @@ internal class WebModeExtractor(
          */
         private const val SCAN_LENS_DEADLINE_MS = 45_000L
         /** Panels fetched concurrently during a full scan (network-bound, cheap). */
-        private const val SCAN_FETCH_THREADS = 6
+        private const val SCAN_FETCH_THREADS = 8
         /** Lens requests in flight during a full scan; the engine's own slot semaphore bounds the real work. */
-        private const val SCAN_LENS_THREADS = 5
+        private const val SCAN_LENS_THREADS = 7
         // At most this many Lens requests of tall-panel slices in flight at once (all panels together).
         private val LENS_SLICE_SLOTS = java.util.concurrent.Semaphore(5)
         private val DETECT_POOL: java.util.concurrent.ExecutorService =
             java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ns-webmode-detect").apply { isDaemon = true } }
-        // The detector runs for seconds on some phones. Do not queue a bitmap snapshot for every scroll tick:
-        // only one detector snapshot may be queued/running, otherwise the executor's unbounded queue can retain
-        // multiple full-size bitmaps while the previous 1024x1024 inference is still using memory.
-        private val detectorInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
-
-        /** Extra wait after OCR returns; inference starts before the Lens network wait and runs in parallel. */
-        private const val DETECT_FAST_WAIT_MS = 800L
-        // Read-ahead is not blocking the visible UI. Give it more time so cached bubble layouts normally include
-        // Koharu's mask geometry before the panel enters the viewport.
-        private const val DETECT_AHEAD_WAIT_MS = 1_400L
-
-        /** Detector results by image hash, so a panel is analysed once and the next pass is free. */
-        private val detectCache = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>?>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>?>?): Boolean = size > 6
-        }
-
-        /** Latest detector boxes per image source, so the eraser works from real bubbles rather than a guess. */
-        private val detectBySrc = object : LinkedHashMap<String, List<BubbleDetectorCore.Det>>(4, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<BubbleDetectorCore.Det>>?): Boolean = size > 4
-        }
-
-        /** Drop compact instance masks after Android reports memory pressure; next scan can rebuild them at 256px. */
-        fun trimDetectorCaches() {
-            synchronized(detectCache) { detectCache.clear() }
-            synchronized(detectBySrc) { detectBySrc.clear() }
-        }
-
-        /**
-         * Realtime detector call that never stalls the visible panel.
-         *
-         * Returns a cached result immediately when this image was already analysed. Otherwise it starts the run
-         * and waits only [DETECT_FAST_WAIT_MS]; on timeout the caller falls back to pixel geometry for this pass
-         * and the cached result serves the next one (a visible panel is re-read on every scroll tick).
-         */
-        private fun detectWithBudget(
-            ctx: android.content.Context,
-            bmp: Bitmap,
-            waitMs: Long = DETECT_FAST_WAIT_MS
-        ): List<BubbleDetectorCore.Det>? {
-            val key = try { md5Of(bmp) } catch (_: Throwable) { return null }
-            synchronized(detectCache) { detectCache[key]?.let { return it } }
-            // This job may continue after the 450 ms UI budget expires. It owns a bitmap copy and populates the
-            // cache when it completes; the source slice can safely be recycled immediately.
-            val f = submitDetectorSnapshot(ctx, bmp, key) ?: return null
-            return try {
-                val dets = f.get(waitMs, TimeUnit.MILLISECONDS)
-                synchronized(detectCache) { detectCache[key] = dets }
-                dets
-            } catch (_: java.util.concurrent.TimeoutException) {
-                null
-            } catch (_: Throwable) {
-                null
-            }
-        }
-
-        /**
-         * The caller owns source and may recycle it immediately after this returns. The worker owns a deep ARGB copy
-         * and always recycles that copy after detection, preventing recycled-source createBitmap crashes.
-         */
-        private fun submitDetectorSnapshot(
-            ctx: android.content.Context,
-            source: Bitmap,
-            cacheKey: String?
-        ): java.util.concurrent.Future<List<BubbleDetectorCore.Det>?>? {
-            // Executor is single-threaded and otherwise has an unbounded queue. Skipping a new scan while one
-            // is queued/running is safer than retaining another full-page bitmap on a memory-limited phone.
-            if (!detectorInFlight.compareAndSet(false, true)) return null
-            val snapshot = try {
-                if (source.isRecycled) throw IllegalStateException("source already recycled")
-                source.copy(Bitmap.Config.ARGB_8888, false)
-                    ?: throw IllegalStateException("could not copy detector source")
-            } catch (_: Throwable) {
-                detectorInFlight.set(false)
-                return null
-            }
-            return try {
-                DETECT_POOL.submit(java.util.concurrent.Callable<List<BubbleDetectorCore.Det>?> {
-                    try {
-                        val dets = try { BubbleDetector.detect(ctx, snapshot) } catch (_: Throwable) { null }
-                        if (cacheKey != null) synchronized(detectCache) { detectCache[cacheKey] = dets }
-                        dets
-                    } finally {
-                        try { if (!snapshot.isRecycled) snapshot.recycle() } catch (_: Throwable) {}
-                        detectorInFlight.set(false)
-                    }
-                })
-            } catch (_: Throwable) {
-                try { if (!snapshot.isRecycled) snapshot.recycle() } catch (_: Throwable) {}
-                detectorInFlight.set(false)
-                null
-            }
-        }
-
-        /** Cheap content fingerprint for the detector cache (pixels, not file bytes). */
-        private fun md5Of(bmp: Bitmap): String {
-            val stepX = (bmp.width / 16).coerceAtLeast(1)
-            val stepY = (bmp.height / 16).coerceAtLeast(1)
-            val sb = StringBuilder(64)
-            var y = 0
-            while (y < bmp.height) {
-                var x = 0
-                while (x < bmp.width) {
-                    sb.append(Integer.toHexString(bmp.getPixel(x, y)))
-                    x += stepX
-                }
-                y += stepY
-            }
-            return sb.toString()
-        }
         private const val JOB_MAX_MS = 12 * 60_000L
         private const val VALIDITY_CHECK_INTERVAL_MS = 250L
         private const val MIN_W = 120
@@ -3234,7 +2992,7 @@ internal class WebModeExtractor(
         private const val LIB = """
 var BAD=/avatar|logo|sprite|emoji|profile|badge|pixel|tracking|advert|\/ads?|[_\-.]ads?[_\-.]|spinner/i;
 var PH=/placeholder|blank\.|spacer|loading|lazy[-_.]?(img|load)|1x1|transparen|pixel\.gif/i;
-var LAZY=['data-src','data-original','data-lazy-src','data-lazy','data-url','data-echo','data-actualsrc','data-orig-src','data-pc-src','data-original-src','data-src-original','data-image','data-img','data-bg','data-background','data-background-image','data-ks-lazyload','data-cfsrc','data-defer-src'];
+var LAZY=['data-original','data-original-src','data-src-original','data-orig-src','data-full-src','data-full','data-hires','data-hi-res','data-original-image','data-image-url','data-download-url','data-pc-src','data-actualsrc','data-src','data-lazy-src','data-lazy','data-url','data-echo','data-image','data-img','data-bg','data-background','data-background-image','data-ks-lazyload','data-cfsrc','data-defer-src'];
 var de=document.scrollingElement||document.documentElement;
 function absUrl(s){try{return s?new URL(String(s).trim(),document.baseURI).href:'';}catch(e){return '';}}
 function decorativeUrl(s){
@@ -3243,17 +3001,7 @@ function decorativeUrl(s){
     /(?:^|\/)webtoon\/detail$/.test(p)||
     /\/public\/uploaded-content\/link_slo(?:t)?(?:[\/_.-]|$)/.test(p);
 }
-function blockedTrackerUrl(s){
-  s=String(s||'').trim().toLowerCase();
-  var host='',path='';
-  try{var u=new URL(s,document.baseURI);host=u.hostname.toLowerCase();path=u.pathname.toLowerCase();}
-  catch(e){path=s.split('#')[0].split('?')[0].toLowerCase();}
-  // Shonen Jump+ occasionally exposes view-sized tracking beacons as visible IMG candidates.
-  // Reject the known ad/analytics origins before image-size heuristics can mistake their wrappers for manga panels.
-  if(/(^|\.)(?:doubleclick\.net|googleadservices\.com|googlesyndication\.com|amazon-adsystem\.com|adsrvr\.org|criteo\.com|adnxs\.com|scorecardresearch\.com|treasuredata\.com)$/.test(host))return true;
-  return false;
-}
-function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!blockedTrackerUrl(s)&&!decorativeUrl(s);}
+function goodUrl(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!decorativeUrl(s);}
 function pickSrcset(ss){
   if(!ss)return '';
   var best='',bestScore=-1,parts=String(ss).split(',');
@@ -3264,14 +3012,62 @@ function pickSrcset(ss){
   }
   return best;
 }
+function imageUrlQuality(s){
+  s=String(s||'').toLowerCase();
+  var score=0;
+  if(/original|orig|full[-_]?size|full[-_]?res|large|raw|master|download|hires|hi-res|zoom/.test(s))score+=20;
+  if(/thumb|thumbnail|small|preview|tiny|lowres|low-res|resized|resize|medium/.test(s))score-=25;
+  return score;
+}
+function looksLikeImageDownloadUrl(s){
+  var u=absUrl(s);if(!u||!goodUrl(u))return false;
+  try{
+    var z=new URL(u),p=(z.pathname||'').toLowerCase(),q=(z.search||'').toLowerCase();
+    return /\.(?:jpe?g|png|webp|avif|jfif|bmp|tiff?|jxl)$/.test(p)||
+      /\/(?:image|images|img|original|raw|download|fullsize|full-size|fullres|full-res)(?:\/|$)/.test(p)||
+      /[?&](?:format|fm|type|mime)=(?:image\/)?(?:jpe?g|png|webp|avif|jxl)(?:&|$)/.test(q);
+  }catch(e){return false;}
+}
 function imageSrc(im){
-  var primary=im.currentSrc||im.getAttribute('src')||im.src||'';
-  var lazy='';
-  for(var i=0;i<LAZY.length;i++){var v=im.getAttribute&&im.getAttribute(LAZY[i]);if(goodUrl(v)){lazy=v;break;}}
+  // Prefer explicit original/full-size fields or a direct image href over the display thumbnail.
+  // Some readers show a small preview in src/currentSrc while the downloadable panel is in data-original.
+  var best='',bestScore=-Infinity;
+  function add(raw,rank){
+    if(!raw)return;
+    var u=absUrl(raw);if(!u||!goodUrl(u))return;
+    var score=rank+imageUrlQuality(u);
+    if(score>bestScore){best=u;bestScore=score;}
+  }
+  var current=im.currentSrc||'';
+  var srcAttr=(im.getAttribute&&im.getAttribute('src'))||im.src||'';
+  add(current,(im.naturalWidth||0)>=300?88:76);
+  add(srcAttr,58);
+  for(var i=0;i<LAZY.length;i++){
+    var attr=LAZY[i],v=im.getAttribute&&im.getAttribute(attr);
+    if(!v)continue;
+    var rank=(attr==='data-original'||attr==='data-original-src'||attr==='data-src-original'||attr==='data-orig-src')?112:
+      (/full|hires|original|download|image-url/.test(attr)?104:
+      (attr==='data-src'||attr==='data-lazy-src'||attr==='data-actualsrc'||attr==='data-pc-src'?86:78));
+    add(v,rank);
+  }
   var set=pickSrcset((im.getAttribute&&im.getAttribute('data-srcset'))||(im.getAttribute&&im.getAttribute('srcset'))||'');
-  if(lazy&&(!goodUrl(primary)||PH.test(primary)||((im.naturalWidth||0)>0&&(im.naturalWidth||0)<8)))primary=lazy;
-  if(!goodUrl(primary))primary=set||lazy;
-  return absUrl(primary);
+  add(set,80);
+  // <picture> may expose an explicit high-resolution source separate from the fallback <img>.
+  try{
+    var pic=im.parentElement&&String(im.parentElement.tagName||'').toLowerCase()==='picture'?im.parentElement:null;
+    if(pic&&pic.querySelectorAll){
+      var sources=pic.querySelectorAll('source[srcset]');
+      for(var si=0;si<sources.length;si++)add(pickSrcset(sources[si].getAttribute('srcset')||''),82);
+    }
+  }catch(ignore){}
+  // Only accept an anchor as the image itself when it looks like an image/resource endpoint.
+  // A chapter/navigation href must never replace the actual panel image.
+  try{
+    var a=im.closest&&im.closest('a[href]');
+    var href=a&&((a.getAttribute&&a.getAttribute('href'))||a.href||'');
+    if(href&&looksLikeImageDownloadUrl(href))add(href,120);
+  }catch(ignore){}
+  return best||absUrl(current||srcAttr);
 }
 function allNodes(limit){
   var out=[],roots=[document],seenRoots=[];
@@ -3344,6 +3140,52 @@ function scroller(){
   if(chosen)window.__nsWmScroller=chosen;
   return chosen;
 }
+// Non-enumerable DOM references let the viewport-only pass test the actual hit target without leaking
+// DOM objects into JSON passed to Kotlin or increasing the serialized payload.
+function attachNode(panel,node,frame){
+  try{Object.defineProperty(panel,'_node',{value:node});if(frame)Object.defineProperty(panel,'_frame',{value:frame});}catch(e){}
+  return panel;
+}
+function candidateVisibleAt(panel,x,y){
+  var node=panel._node,frame=panel._frame;
+  if(!node)return true;
+  if(frame){
+    try{
+      // A same-origin iframe can have a perfectly visible image in its OWN document while the whole iframe
+      // is covered by another reader layer in the outer document. Validate outer stacking first, or every
+      // recycled/overlapping iframe can pass the inner hit-test and be mistaken for a visible panel.
+      var outerHit=document.elementFromPoint(x,y);
+      if(outerHit!==frame)return false;
+      var fr=frame.getBoundingClientRect(),fd=frame.contentDocument;
+      if(fd&&fd.elementFromPoint){
+        var inner=fd.elementFromPoint(x-fr.left,y-fr.top);
+        return inner===node||!!(inner&&node.contains&&node.contains(inner));
+      }
+    }catch(e){}
+    try{return document.elementFromPoint(x,y)===frame;}catch(e){return false;}
+  }
+  try{
+    var hit=document.elementFromPoint(x,y);
+    return hit===node||!!(hit&&node.contains&&node.contains(hit));
+  }catch(e){return false;}
+}
+function panelContributesVisiblePixels(panel,vw,vh){
+  var pl=Number(panel.vl)||0,pt=Number(panel.vt)||0;
+  var pw=Number(panel.fw)||Number(panel.w)||0,ph=Number(panel.fh)||Number(panel.h)||0;
+  var l=Math.max(0,pl),t=Math.max(0,pt),r=Math.min(vw,pl+pw),b=Math.min(vh,Math.min(Number(panel.vb)||pt+ph,pt+ph));
+  if(r-l<24||b-t<24)return false;
+  // Probe several points inside the clipped rectangle. This keeps partly visible neighboring panels,
+  // but excludes hidden/recycled images stacked at the same viewport coordinates behind the real panel.
+  var points=[
+    [(l+r)/2,(t+b)/2],
+    [l+(r-l)*0.25,t+(b-t)*0.25],
+    [l+(r-l)*0.75,t+(b-t)*0.25],
+    [l+(r-l)*0.25,t+(b-t)*0.75],
+    [l+(r-l)*0.75,t+(b-t)*0.75]
+  ];
+  for(var i=0;i<points.length;i++)if(candidateVisibleAt(panel,points[i][0],points[i][1]))return true;
+  return false;
+}
 function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
   var out=[],seen={},imgs=document.images,wy=window.pageYOffset||de.scrollTop||0,sr=sc?sc.getBoundingClientRect():null;
   // Big on-screen canvases = the page the user is really reading (Shonen Jump+, Comic-Walker...). An <img> that sits
@@ -3402,9 +3244,12 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     // Small thumbnails inside comment/related blocks are not panels, but a big image is one even if the
     // reader sits inside such a container.
     if(im.closest&&im.closest('header,footer,nav,aside,[class*=comment],[class*=recommend],[class*=related],[id*=comment]')&&!(r.width>=360&&r.height>=240))continue;
-    if(seen[src])continue;seen[src]=1;
     var inScroller=!!(sc&&sc.contains(im));var top=inScroller?(r.top-sr.top+sc.scrollTop):(r.top+wy);
-    out.push({s:src,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:(im.complete&&nw>0)?1:0,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom});
+    // Virtualized readers can reuse the exact same URL at several document offsets. Deduplicate cloned
+    // elements at the same geometry, not every occurrence of a source URL across the chapter.
+    var imgKey=src+'@'+Math.round(top)+','+Math.round(r.left)+','+Math.round(r.width)+','+Math.round(r.height);
+    if(seen[imgKey])continue;seen[imgKey]=1;
+    out.push(attachNode({s:src,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:(im.complete&&nw>0)?1:0,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom},im));
   }
   // Readers inside a same-origin <iframe>.
   var frs=document.querySelectorAll('iframe');
@@ -3413,14 +3258,15 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     try{fd=frs[fi].contentDocument;}catch(ignore){fd=null;}
     if(!fd||!fd.images)continue;
     for(var fk=0;fk<fd.images.length;fk++){
-      var fim=fd.images[fk],fsrc=fim.currentSrc||fim.src||'';
-      if(!goodUrl(fsrc)||seen[fsrc])continue;
+      var fim=fd.images[fk],fsrc=imageSrc(fim);
+      if(!goodUrl(fsrc))continue;
       var fr=fim.getBoundingClientRect(),fnw=fim.naturalWidth||0,fnh=fim.naturalHeight||0;
       if(!((fr.width>=100&&fr.height>=60)||(fnw>=300&&fnh>=120)))continue;
-      seen[fsrc]=1;
       var ft=fb.top+fr.top,fl=fb.left+fr.left;
       var fit=sc&&sc.contains(frs[fi])?ft-sr.top+sc.scrollTop:ft+wy;
-      out.push({s:fsrc,t:Math.round(fit),l:Math.round(fl),w:Math.round(fr.width),h:Math.round(fr.height),d:(fim.complete&&fnw>0)?1:0,fw:fr.width,fh:fr.height,vl:fl,vt:ft,vb:ft+fr.height});
+      var iframeKey=fsrc+'@'+Math.round(fit)+','+Math.round(fl)+','+Math.round(fr.width)+','+Math.round(fr.height);
+      if(seen[iframeKey])continue;seen[iframeKey]=1;
+      out.push(attachNode({s:fsrc,t:Math.round(fit),l:Math.round(fl),w:Math.round(fr.width),h:Math.round(fr.height),d:(fim.complete&&fnw>0)?1:0,fw:fr.width,fh:fr.height,vl:fl,vt:ft,vb:ft+fr.height},fim,frs[fi]));
     }
   }
   // Some pages use SVG <image> or videos with posters.
@@ -3430,12 +3276,13 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
     if(xr.width<100||xr.height<60)continue;
     if(String(xe.tagName).toLowerCase()==='video')xs=xe.getAttribute('poster')||'';
     else xs=(xe.href&&xe.href.baseVal)||xe.getAttribute('href')||xe.getAttribute('xlink:href')||'';
-    xs=absUrl(xs);if(!xs||!goodUrl(xs)||seen[xs])continue;
+    xs=absUrl(xs);if(!xs||!goodUrl(xs))continue;
     var xmeta=(xe.className&&xe.className.baseVal!==undefined?xe.className.baseVal:xe.className||'')+' '+(xe.id||'');
     if(BAD.test(xmeta))continue;
-    seen[xs]=1;
     var svgInside=!!(sc&&sc.contains(xe));var xt=svgInside?(xr.top-sr.top+sc.scrollTop):(xr.top+wy);
-    out.push({s:xs,t:Math.round(xt),l:Math.round(xr.left),w:Math.round(xr.width),h:Math.round(xr.height),d:1,fw:xr.width,fh:xr.height,vl:xr.left,vt:xr.top,vb:xr.bottom});
+    var svgKey=xs+'@'+Math.round(xt)+','+Math.round(xr.left)+','+Math.round(xr.width)+','+Math.round(xr.height);
+    if(seen[svgKey])continue;seen[svgKey]=1;
+    out.push(attachNode({s:xs,t:Math.round(xt),l:Math.round(xr.left),w:Math.round(xr.width),h:Math.round(xr.height),d:1,fw:xr.width,fh:xr.height,vl:xr.left,vt:xr.top,vb:xr.bottom},xe));
   }
   // Some readers mix normal IMG panels with CSS-background panels. Rate-limit the expensive
   // style sweep for callers that do not specify a mode; full-chapter final collection opts in.
@@ -3476,15 +3323,15 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
           if(!seen[pkey]){
             seen[pkey]=1;cvDone++;
             var pin=!!(sc&&sc.contains(cv));var ptop=pin?(cr.top-sr.top+sc.scrollTop):(cr.top+wy);
-            out.push({s:'ns-canvas:'+Math.round(cr.left)+','+Math.round(ptop)+','+Math.round(cr.width)+'x'+Math.round(cr.height),t:Math.round(ptop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:2});
+            out.push(attachNode({s:'ns-canvas:'+Math.round(cr.left)+','+Math.round(ptop)+','+Math.round(cr.width)+'x'+Math.round(cr.height),t:Math.round(ptop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:2},cv));
           }
         }
       }
       if(!cu||cu.length<2500)continue;
-      var ckey=cu.length+':'+cu.slice(-48)+cu.slice(2000,2048);
-      if(seen[ckey])continue;seen[ckey]=1;cvDone++;
       var cin=!!(sc&&sc.contains(cv));var ctop=cin?(cr.top-sr.top+sc.scrollTop):(cr.top+wy);
-      out.push({s:cu,t:Math.round(ctop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:1});
+      var ckey=cu.length+':'+cu.slice(-48)+cu.slice(2000,2048)+'@'+Math.round(ctop)+','+Math.round(cr.left)+','+Math.round(cr.width)+','+Math.round(cr.height);
+      if(seen[ckey])continue;seen[ckey]=1;cvDone++;
+      out.push(attachNode({s:cu,t:Math.round(ctop),l:Math.round(cr.left),w:Math.round(cr.width),h:Math.round(cr.height),d:1,fw:cr.width,fh:cr.height,vl:cr.left,vt:cr.top,vb:cr.bottom,cv:1},cv));
     }
   }
   if(doBackgrounds===true){
@@ -3508,10 +3355,11 @@ function cands(sc, includeBackgrounds, forceCanvas, canvasPlaceholders){
       var rx=/url\((?:"|')?([^"')]+)(?:"|')?\)/g,m;
       while((m=rx.exec(bg))!==null){
         var s=absUrl((m[1]||'').trim());
-        if(!s||!goodUrl(s)||seen[s])continue;
-        seen[s]=1;
+        if(!s||!goodUrl(s))continue;
         var inScroller=!!(sc&&sc.contains(el));var top=inScroller?(r.top-sr.top+sc.scrollTop):(r.top+wy);
-        out.push({s:s,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:1,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom});
+        var bgKey=s+'@'+Math.round(top)+','+Math.round(r.left)+','+Math.round(r.width)+','+Math.round(r.height);
+        if(seen[bgKey])continue;seen[bgKey]=1;
+        out.push(attachNode({s:s,t:Math.round(top),l:Math.round(r.left),w:Math.round(r.width),h:Math.round(r.height),d:1,fw:r.width,fh:r.height,vl:r.left,vt:r.top,vb:r.bottom},el));
       }
     }
   
@@ -3695,7 +3543,9 @@ var sc=scroller(),c=cands(sc,undefined,true);
 var top=sc?(sc.scrollTop||0):(window.pageYOffset||de.scrollTop||0);
 var height=sc?(sc.clientHeight||window.innerHeight||800):(window.innerHeight||800);
 var bottom=top+height;
-var vpH=window.innerHeight||800;c=c.filter(function(p){return p.vb>0&&p.vt<vpH;});
+var vpW=window.innerWidth||800,vpH=window.innerHeight||800,rawVisibleCandidates=c.length;
+c=c.filter(function(p){return panelContributesVisiblePixels(p,vpW,vpH);});
+
 function q(s){var e=document.querySelector(s);return e?(e.textContent||'').trim():'';}
 function link(kind){
   var re=kind==='next'?/next|\\u4e0b\\u4e00|\\ub2e4\\uc74c|\\u6b21\\u306e|\\u6b21\\u3078|\\u6b21\\u7ae0/i:/prev(?!iew)|\\u4e0a\\u4e00|\\uc774\\uc804|\\u524d\\u306e|\\u524d\\u3078|\\u524d\\u7ae0/i;
@@ -3712,8 +3562,8 @@ var title=q('.subj_episode')||q('h1')||(og&&og.content)||document.title||'';
 var novel=q('.detail_header .subj')||q('a.subj')||q('.series-title')||q('.comic-title')||'';
 var xf=0,ifs=document.querySelectorAll('iframe');for(var xi=0;xi<ifs.length;xi++){try{if(!ifs[xi].contentDocument)xf++;}catch(e0){xf++;}}
 var ncv=0,cvl=[];var cvs0=document.querySelectorAll('canvas');for(var cj=0;cj<cvs0.length&&cj<8;cj++){var rr=cvs0[cj].getBoundingClientRect();cvl.push(cvs0[cj].width+'x'+cvs0[cj].height+'@'+Math.round(rr.top)+'/'+Math.round(rr.width)+'x'+Math.round(rr.height));}
-var cands2=c.map(function(x){return (x.cv?'CANVAS ':'')+x.w+'x'+x.h+' '+String(x.s).slice(0,60);}).slice(0,12);
-var dbg=document.images.length+' img, '+ifs.length+' iframe('+xf+' cross-origin), '+cvs0.length+' canvas, '+c.length+' found | canvasErr='+(window.__nsWmCanvasErr||'-')+' | canvases=['+cvl.join(', ')+'] | cands=['+cands2.join(' ;; ')+'] | vp='+(window.innerWidth||0)+'x'+(window.innerHeight||0)+' | ready='+document.readyState;
+var cands2=c.map(function(x){return (x.cv?'CANVAS ':'')+x.w+'x'+x.h+'@x'+Math.round(Number(x.vl)||0)+',y'+Math.round(Number(x.vt)||0)+' '+String(x.s).slice(0,60);}).slice(0,12);
+var dbg=document.images.length+' img, '+ifs.length+' iframe('+xf+' cross-origin), '+cvs0.length+' canvas, visibleHit='+rawVisibleCandidates+'->'+c.length+' found | canvasErr='+(window.__nsWmCanvasErr||'-')+' | canvases=['+cvl.join(', ')+'] | cands=['+cands2.join(' ;; ')+'] | vp='+(window.innerWidth||0)+'x'+(window.innerHeight||0)+' | ready='+document.readyState;
 return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,title:title,novel:novel,next:link('next'),prev:link('prev'),imgs:c.slice(0,600),dbg:dbg});
 """
 
