@@ -136,9 +136,11 @@ assert.ok(writer.includes("b.setAttribute('data-cl',it.cl?'1':'')"),
   "bubble JSON should carry only a small cleaned-image flag");
 assert.ok(writer.includes('put("cv", ja)'),
   "detector speech-bubble mask rectangles must be passed to the overlay");
-assert.ok(writer.includes("var hasCv=!!(it.cv&&it.cv.length>=4)") &&
+assert.ok(writer.includes("var coverCv=it.cv&&it.cv.length>=4?it.cv.slice(0):[]") &&
+  writer.includes("if(it.ocv&&it.ocv.length>=4)coverCv=coverCv.concat(it.ocv)") &&
+  writer.includes("var hasCv=coverCv.length>=4") &&
   writer.includes("className='__ns_cv'") && writer.includes("cover.appendChild(cd)"),
-  "the overlay must reconstruct the detected speech-bubble silhouette from cv rectangles");
+  "the overlay must reconstruct its silhouette from cleaner cv plus the separate Webtoon-only ocv rectangles");
 assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl&&!hasCv"),
   "the small OCR-box fallback should wait for cleaned image only when no bubble mask exists");
 assert.ok(writer.includes("if(!it.cl)cover.style.opacity='1'") &&
