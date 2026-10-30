@@ -182,15 +182,20 @@ assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true r
           painter.includes('GLOBAL_CALL_LIMIT = 20') &&
           painter.includes('GLOBAL_CALL_WINDOW_MS = 60_000L'),
   'prefetch MI-GAN must be residual-gated, budgeted per panel and globally rate limited');
-assert.ok(extractor.includes('FORCE_CAPTURE') && extractor.includes('stableSamples < 3') &&
+// The Webtoon foreground path deliberately permits up to three bounded scroll-drift
+// recaptures; other reader paths retain the single-recapture limit. Do not pin this guard
+// to the old "/1" log format or it will reject the intended Webtoon-only retry policy.
+assert.ok(extractor.includes('FORCE_CAPTURE') &&
+          extractor.includes('stableSamples < 3') &&
           extractor.includes('timeoutMs = minOf(if (forceCrossOriginCanvas) 100L else 180L, remainingMs)') &&
           extractor.includes('FORCE_ABORT') &&
-          extractor.includes('recapture $driftRetries/1') &&
+          extractor.includes('val maxDriftRecaptures = if (req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())) 3 else 1') &&
+          extractor.includes('recapture $driftRetries/$maxDriftRecaptures') &&
+          extractor.includes('val maxBlankRetries = if (forceCrossOriginCanvas) 1 else 3') &&
           extractor.includes('FORCE_SKIP') &&
           extractor.includes('FORCE_MODE') &&
-          extractor.includes('reason=cross_origin_canvas') &&
-          extractor.includes('maxBlankRetries = if (forceCrossOriginCanvas) 1 else 3'),
-  'FORCE capture must settle, reduce screenshot retries for cross-origin canvas, and retain diagnostics');
+          extractor.includes('reason=cross_origin_canvas'),
+  'FORCE capture must settle, use bounded Webtoon-only drift recaptures, reduce blank retries for cross-origin canvas, and retain diagnostics');
 assert.ok(cleaner.includes('LARGE_MASK_THRESHOLD = 15_000') &&
           cleaner.includes('LARGE_MASK_ALPHA = 1.00f') &&
           cleaner.includes('openCvInpaintTiled(tier1Region, rw, rh, mask)') &&
