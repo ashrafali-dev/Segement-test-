@@ -930,7 +930,12 @@ internal class WebModeExtractor(
                             if (silent) {
                                 LensPanelOcrAttempt(PanelOcr("", emptyList()), null)
                             } else {
-                                LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
+                                // Full-chapter scan and next-chapter prefetch (scanAccurate) read with the FULL pipeline:
+                                // fastMode=true skipped the bubble detector / masks / AI cleaning, which is why a prefetched
+                                // chapter came back with no bubble regions and un-cleaned lettering. Lens requests still run in
+                                // parallel in this pool; only the local detector is serialised (OnnxHeavyGate), so the network
+                                // wait of the other panels overlaps with it. Real-time (liveView) keeps the fast pass.
+                                LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = liveView || !scanAccurate, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank(), allowAiClean = false), null)
                             }
                         } catch (e: OcrUnavailableException) {
                             LensPanelOcrAttempt(null, e)
@@ -1051,7 +1056,7 @@ internal class WebModeExtractor(
                             val bytes2 = try { fetchWithRetry(panels[i], meta.url) } catch (_: Throwable) { null }
                             if (bytes2 == null) { stillBad.add(i); continue }
                             try {
-                                val po = ocrBytes(bytes2, ScriptState(script.current), panels[i].src, fastMode = true, forceFresh = true)
+                                val po = ocrBytes(bytes2, ScriptState(script.current), panels[i].src, fastMode = liveView || !scanAccurate, forceFresh = true, allowAiClean = false)
                                 if (po == null) continue
                                 diag.decoded++
                                 val t = po.text
@@ -1443,6 +1448,12 @@ internal class WebModeExtractor(
         private val screenSeen = HashSet<String>()
         @Volatile private var forceShots = 0
 
+        /** JPEG copy of a page screenshot (quality 97, text edges stay sharp); null when it cannot be encoded. */
+        private fun encodeScanShot(bmp: Bitmap): ByteArray? = try {
+            val out = java.io.ByteArrayOutputStream(256 * 1024)
+            if (bmp.compress(Bitmap.CompressFormat.JPEG, 97, out)) out.toByteArray() else null
+        } catch (_: Throwable) { null }
+
         private fun forceFail(e: WebModeError, msg: String = e.label) {
             evalWait(wrap(LIB + JS_RESTORE)) { null }
             // Visible-only recovery must not toggle the translation overlay. Hiding it
@@ -1512,6 +1523,10 @@ internal class WebModeExtractor(
             var stable = 0
             var driftRetries = 0
             var steps = 0
+            // Page-by-page scan: captured pages wait here (JPEG) until the last page is reached; see the capture block below.
+            val shots = ArrayList<ScanShot>()
+            var pagesAdvanced = 0
+            val scanStartedAt = SystemClock.elapsedRealtime()
             while (true) {
                 if (!alive()) { forceFail(WebModeError.NAVIGATION_INVALIDATED); return }
                 if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; forceFail(WebModeError.TIMEOUT); return }
@@ -1597,16 +1612,38 @@ internal class WebModeExtractor(
                         JSONObject().put("vw", bmp.width.toFloat()).put("imgs", JSONArray())
                     } else null
                     if (scanHorizontal) shotKey = ScanMode.quickKey(bmp)
-                    if (scanInfo != null) {
+                    if (scanHorizontal) {
+                        // Page-by-page scan = capture ONLY while turning pages. Reading each page right after its capture made the
+                        // phone wait for OCR + detector (about 6 s/page) before it could turn to the next one. The pages are kept
+                        // as JPEG bytes and all read together after the last page, in page order.
+                        val repeatOfPrev = shotKey != 0L && shotKey == lastShotKey
+                        if (!repeatOfPrev && steps > 0) pagesAdvanced++
+                        if (scanInfo != null && !repeatOfPrev) {
+                            val jpg = encodeScanShot(bmp)
+                            if (jpg != null) shots.add(ScanShot(steps, jpg, scanInfo))
+                            else {
+                                // Cannot keep it in memory: read it right now rather than lose the page.
+                                forceStepNo = steps
+                                screenSeen.clear()
+                                try { forceOcr(bmp, scanInfo, script, accs) }
+                                catch (e: OcrUnavailableException) {
+                                    forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
+                                }
+                            }
+                        }
+                        bmp.recycle()
+                    } else if (scanInfo != null) {
                         try { forceOcr(bmp, scanInfo, script, accs) }
                         catch (e: OcrUnavailableException) {
                             forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
                         } finally { bmp.recycle() }
                     } else bmp.recycle()
                 }
-                progress("Reading screen ${steps + 1} (${accs.size} images)", 5 + minOf(90, steps * 3))
+                if (scanHorizontal) progress("Scanning page ${steps + 1} (${shots.size} captured)", 5 + minOf(40, steps * 2))
+                else progress("Reading screen ${steps + 1} (${accs.size} images)", 5 + minOf(90, steps * 3))
                 if (req.visibleOnly) break
                 if (scanHorizontal) {
+                    if (shots.size >= MAX_SCAN_PAGES) { OcrDiag.log("SCAN_PAGE", "page limit $MAX_SCAN_PAGES reached; stopping capture"); break }
                     // Page-by-page reader: turn the page sideways, then compare screenshots. The same picture three
                     // times in a row = last page reached (the DOM cannot tell us that on a canvas reader).
                     val same = shotKey != 0L && shotKey == lastShotKey
@@ -1624,9 +1661,43 @@ internal class WebModeExtractor(
                 if (stable >= 2) break
                 steps++
             }
-            evalWait(wrap(LIB + JS_RESTORE)) { null }
-            if (!req.visibleOnly) evalWait(wrap(JS_FORCE_SHOW)) { null }
-            if (!alive()) { fail(WebModeError.NAVIGATION_INVALIDATED); return }
+            if (scanHorizontal) {
+                OcrDiag.log("SCAN_PAGE", "capture done: pages=${shots.size} advanced=$pagesAdvanced ms=${SystemClock.elapsedRealtime() - scanStartedAt}")
+                // 1) Put the reader back on the page it was on when the scan started (the webtoon scan already does this with
+                //    JS_RESTORE). The scan used to leave the user on the LAST page. One turn back per turn that really moved.
+                val back = pagesAdvanced.coerceIn(0, MAX_SCAN_PAGES + 20)
+                for (k in 0 until back) {
+                    if (!alive()) break
+                    progress("Returning to your page ${k + 1}/$back", 46)
+                    evalWait(wrap(LIB + ScanMode.jsPageTurn(scanDir != ScanDirection.RTL))) { null }
+                    try { Thread.sleep(450L) } catch (_: InterruptedException) { return }
+                }
+                if (back > 0) OcrDiag.log("SCAN_PAGE", "returned $back pages to the starting page")
+                evalWait(wrap(LIB + JS_RESTORE)) { null }
+                if (!req.visibleOnly) evalWait(wrap(JS_FORCE_SHOW)) { null }
+                if (!alive()) { fail(WebModeError.NAVIGATION_INVALIDATED); return }
+                // 2) Read all captured pages in page order. Every page has its own accumulator (see forceOcr), so one page's
+                //    lettering can no longer end up on another page.
+                val totalShots = shots.size
+                for ((n, shot) in shots.withIndex()) {
+                    if (!alive()) { fail(WebModeError.NAVIGATION_INVALIDATED); return }
+                    if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
+                    progress("Reading page ${n + 1}/$totalShots", 46 + (n * 52) / totalShots.coerceAtLeast(1))
+                    val pageBmp = try { BitmapFactory.decodeByteArray(shot.jpg, 0, shot.jpg.size) } catch (_: Throwable) { null }
+                    if (pageBmp == null) { OcrDiag.log("SCAN_PAGE", "page ${shot.index} could not be decoded again; skipped"); continue }
+                    forceStepNo = shot.index
+                    screenSeen.clear()
+                    try { forceOcr(pageBmp, shot.info, script, accs) }
+                    catch (e: OcrUnavailableException) {
+                        forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
+                    } finally { try { pageBmp.recycle() } catch (_: Throwable) {} }
+                }
+                shots.clear()
+            } else {
+                evalWait(wrap(LIB + JS_RESTORE)) { null }
+                if (!req.visibleOnly) evalWait(wrap(JS_FORCE_SHOW)) { null }
+                if (!alive()) { fail(WebModeError.NAVIGATION_INVALIDATED); return }
+            }
 
             val panels = accs.values.sortedBy { it.top }
             diag.discovered = accs.size
@@ -1730,10 +1801,13 @@ internal class WebModeExtractor(
                     // Full-chapter Force: keep every screen, but skip lines already read on the part that
                     // overlaps the previous screen.
                     screenModeOn = true
+                    // A page-by-page scan reads each page once from its own screenshot, so a short line repeated on a later
+                    // page ("...", an SFX, "Yes.") is real text, not overlap: only scrolling scans de-duplicate across screens.
+                    if (scanHorizontal) screenSeen.clear()
                     val fresh = texts.filter { t -> screenSeen.add(t.filter { ch -> ch.isLetterOrDigit() }) }
                     if (fresh.isNotEmpty()) {
                         val acc = ForceAcc()
-                        acc.top = forceStepNo * 10_000
+                        acc.top = forceStepNo * (if (scanHorizontal) 100_000 else 10_000)
                         acc.texts.addAll(fresh)
                         accs[SCREEN_OCR_SOURCE + "#" + forceStepNo] = acc
                     }
@@ -1774,8 +1848,13 @@ internal class WebModeExtractor(
                 if (x1 - x0 < 40 || y1 - y0 < 40) continue
                 val crop = try { Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0) }
                     catch (_: Throwable) { continue }
-                val acc = accs.getOrPut(src) { ForceAcc() }
-                acc.top = p.optInt("t")
+                // Page-by-page readers (Japanese manga, canvas): every page shows the same canvas rectangle, so the source id
+                // "ns-canvas:left,top,WxH" is IDENTICAL on every page. Keyed by it, page 1 and page 2 shared one accumulator
+                // and their lines were mixed or dropped. Each captured page gets its own accumulator and its own sort slot
+                // (page index * 100000 + offset), so text always stays on the page it was read from and in reading order.
+                val accKey = if (scanHorizontal) "$src#p$forceStepNo" else src
+                val acc = accs.getOrPut(accKey) { ForceAcc() }
+                acc.top = (if (scanHorizontal) forceStepNo * 100_000 else 0) + p.optInt("t")
                 if (isCanvasPage) canvasCrops++
                 pending.add(
                     PendingCrop(
@@ -2107,7 +2186,8 @@ internal class WebModeExtractor(
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
-            cropFallback: Boolean = false, forceFresh: Boolean = false
+            cropFallback: Boolean = false, forceFresh: Boolean = false,
+            allowAiClean: Boolean = true
         ): PanelOcr? {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -2138,7 +2218,7 @@ internal class WebModeExtractor(
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0
+                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0 && allowAiClean
                         )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
@@ -2976,6 +3056,8 @@ internal class WebModeExtractor(
     private class BubbleLine(var cy: Float, var text: String)
     private class DecodeException : Exception()
     private class ForceAcc { var top = 0; val texts = ArrayList<String>(); val bubbles = ArrayList<WmBubble>() }
+    /** One captured page of a page-by-page scan: its index, the screenshot (JPEG) and the DOM crop info measured with it. */
+    private class ScanShot(val index: Int, val jpg: ByteArray, val info: JSONObject)
     private class PanelOcr(val text: String, val bubbles: List<WmBubble>)
     private class LensPanelOcrAttempt(val panel: PanelOcr?, val error: Throwable?)
     private class PageMeta(val url: String, val lang: String, val title: String, val novel: String, val next: String?, val prev: String?)
@@ -2987,6 +3069,8 @@ internal class WebModeExtractor(
         private val NEWLINES = Regex("\\s*\\n\\s*")
         private const val MAX_PANELS = 400
         private const val MAX_TICKS = 400
+        /** Captured pages are held as JPEG (about 150-250 KB each) until the scan reaches the last page. */
+        private const val MAX_SCAN_PAGES = 150
         private const val MAX_BYTES = 25 * 1024 * 1024
         private const val FETCH_THREADS = 4
         private const val FETCH_AHEAD = 4
