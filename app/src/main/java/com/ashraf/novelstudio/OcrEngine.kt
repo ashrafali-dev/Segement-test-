@@ -215,7 +215,7 @@ internal object OcrPost {
                     if (hasBlockBetween(work, a, b)) continue
                     // Two stacked speech bubbles are close enough to look like one paragraph by geometry alone.
                     // If the picture shows a bubble outline / artwork between the two texts they are separate.
-                    if (image != null && !a.vertical && outlineBetween(image, a, b)) {
+                    if (image != null && !a.vertical && outlineBetween(image, a, b, work)) {
                         vetoed.getOrPut(a) { java.util.IdentityHashMap() }[b] = true
                         continue
                     }
@@ -236,7 +236,7 @@ internal object OcrPost {
      * strip differs from the strip's own typical brightness. Returns false (= keep the geometry decision)
      * whenever the strip cannot be sampled.
      */
-    fun outlineBetween(img: Bitmap, a: OcrBlock, b: OcrBlock): Boolean {
+    fun outlineBetween(img: Bitmap, a: OcrBlock, b: OcrBlock, others: List<OcrBlock> = emptyList()): Boolean {
         try {
             val top = if (a.cy <= b.cy) a else b
             val bot = if (top === a) b else a
@@ -285,7 +285,8 @@ internal object OcrPost {
                 if (n >= 6 && off * 100 >= n * 60) return true
                 y++
             }
-            return false
+            // No straight dark row: curved / touching outlines are found by walking the fill (flood fill).
+            return ScanMode.closedOff(img, a, b, others)
         } catch (_: Exception) {
             return false
         }
