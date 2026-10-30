@@ -79,12 +79,139 @@ internal object ScanMode {
             val prev = ordered[k - 1]
             val next = ordered[k]
             val cut = try {
-                differentBubbles(prev, next) || OcrPost.outlineBetween(bmp, blocks[prev], blocks[next])
+                differentBubbles(prev, next) || OcrPost.outlineBetween(bmp, blocks[prev], blocks[next], blocks)
             } catch (_: Throwable) { false }
             if (cut) { out.add(cur); cur = ArrayList() }
             cur.add(next)
         }
         out.add(cur)
+        return out
+    }
+
+
+    private fun fontOf(b: OcrBlock): Float = if (b.fontPx > 0f) b.fontPx else minOf(b.w, b.h)
+
+    /**
+     * Flood-fill test: can you walk from line [a] to line [b] over bubble fill without crossing a dark outline?
+     * Two speech bubbles, even when they touch or the outlines are curved, are closed off from each other.
+     * (The old test looked for ONE straight dark row between the lines, so curved outlines were never found and
+     * two bubbles were read and translated as one.)
+     * Conservative: dark artwork, a leak in an outline, or any doubt = "not closed off" (keeps the lines together).
+     */
+    fun closedOff(img: Bitmap, a: OcrBlock, b: OcrBlock, others: List<OcrBlock> = emptyList()): Boolean {
+        try {
+            val font = maxOf(fontOf(a), fontOf(b)).coerceAtLeast(8f)
+            val m = (font * 0.8f).toInt().coerceAtLeast(10)
+            val l = (minOf(a.cx - a.w / 2f, b.cx - b.w / 2f).toInt() - m).coerceIn(0, img.width - 2)
+            val t = (minOf(a.cy - a.h / 2f, b.cy - b.h / 2f).toInt() - m).coerceIn(0, img.height - 2)
+            val r = (maxOf(a.cx + a.w / 2f, b.cx + b.w / 2f).toInt() + m).coerceIn(l + 2, img.width)
+            val bo = (maxOf(a.cy + a.h / 2f, b.cy + b.h / 2f).toInt() + m).coerceIn(t + 2, img.height)
+            val w = r - l
+            val h = bo - t
+            if (w < 12 || h < 12 || w.toLong() * h > 2_500_000L) return false
+            val px = IntArray(w * h)
+            img.getPixels(px, 0, w, l, t, w, h)
+            val f = Math.max(1, Math.ceil(Math.max(w, h) / 240.0).toInt())
+            val gw = (w + f - 1) / f
+            val gh = (h + f - 1) / f
+            val cellMin = IntArray(gw * gh)
+            val cellMax = IntArray(gw * gh)
+            for (cy in 0 until gh) for (cx in 0 until gw) {
+                var mn = 255; var mx = 0
+                var y = cy * f
+                val ye = minOf(h, y + f)
+                while (y < ye) {
+                    var x = cx * f
+                    val xe = minOf(w, x + f)
+                    while (x < xe) {
+                        val p = px[y * w + x]
+                        val lu = (((p shr 16) and 255) * 3 + ((p shr 8) and 255) * 6 + (p and 255)) / 10
+                        if (lu < mn) mn = lu
+                        if (lu > mx) mx = lu
+                        x++
+                    }
+                    y++
+                }
+                cellMin[cy * gw + cx] = mn
+                cellMax[cy * gw + cx] = mx
+            }
+            val sortedMax = cellMax.sortedArray()
+            if (sortedMax[sortedMax.size / 2] < 150) return false       // dark bubble / dark artwork: not judged here
+            val barrier = BooleanArray(gw * gh) { cellMin[it] < 105 }
+            fun markText(bl: OcrBlock) {
+                val c0 = ((bl.cx - bl.w / 2f - 3f - l) / f).toInt().coerceIn(0, gw - 1)
+                val c1 = ((bl.cx + bl.w / 2f + 3f - l) / f).toInt().coerceIn(0, gw - 1)
+                val r0 = ((bl.cy - bl.h / 2f - 3f - t) / f).toInt().coerceIn(0, gh - 1)
+                val r1 = ((bl.cy + bl.h / 2f + 3f - t) / f).toInt().coerceIn(0, gh - 1)
+                for (yy in r0..r1) for (xx in c0..c1) barrier[yy * gw + xx] = false
+            }
+            for (o in others) markText(o)
+            markText(a); markText(b)
+            var dark = 0
+            for (v in barrier) if (v) dark++
+            if (dark * 100 > barrier.size * 40) return false           // hatching / art everywhere
+            val sx = ((a.cx - l) / f).toInt().coerceIn(0, gw - 1)
+            val sy = ((a.cy - t) / f).toInt().coerceIn(0, gh - 1)
+            val tx0 = ((b.cx - b.w / 2f - l) / f).toInt().coerceIn(0, gw - 1)
+            val tx1 = ((b.cx + b.w / 2f - l) / f).toInt().coerceIn(0, gw - 1)
+            val ty0 = ((b.cy - b.h / 2f - t) / f).toInt().coerceIn(0, gh - 1)
+            val ty1 = ((b.cy + b.h / 2f - t) / f).toInt().coerceIn(0, gh - 1)
+            val seen = BooleanArray(gw * gh)
+            val q = IntArray(gw * gh)
+            var qh = 0; var qt = 0
+            q[qt++] = sy * gw + sx; seen[sy * gw + sx] = true
+            while (qh < qt) {
+                val cur = q[qh++]
+                val cxx = cur % gw
+                val cyy = cur / gw
+                if (cxx in tx0..tx1 && cyy in ty0..ty1) return false      // reached the other line: same bubble
+                if (cxx > 0) { val n = cur - 1; if (!seen[n] && !barrier[n]) { seen[n] = true; q[qt++] = n } }
+                if (cxx < gw - 1) { val n = cur + 1; if (!seen[n] && !barrier[n]) { seen[n] = true; q[qt++] = n } }
+                if (cyy > 0) { val n = cur - gw; if (!seen[n] && !barrier[n]) { seen[n] = true; q[qt++] = n } }
+                if (cyy < gh - 1) { val n = cur + gw; if (!seen[n] && !barrier[n]) { seen[n] = true; q[qt++] = n } }
+            }
+            return true
+        } catch (_: Throwable) {
+            return false
+        }
+    }
+
+    /**
+     * A chat/message box: the sender's name sits INSIDE the same grey box as the message, so "one closed outline =
+     * one bubble" glued them together. A header line is told apart by its size (bigger or smaller than the body),
+     * a clearly larger gap to the body than between the body's own lines, and a shorter width.
+     * Returns the member indices (sorted top to bottom) cut into pieces; one piece = nothing to split.
+     */
+    fun splitHeader(blocks: List<OcrBlock>, ordered: List<Int>): List<List<Int>> {
+        if (ordered.size < 2) return listOf(ordered)
+        fun med(v: List<Float>): Float = v.sorted().let { it[it.size / 2] }
+        fun isOdd(line: Int, rest: List<Int>, lineIsFirst: Boolean): Boolean {
+            val restFont = med(rest.map { fontOf(blocks[it]) })
+            val lf = fontOf(blocks[line])
+            if (restFont <= 0f || lf <= 0f) return false
+            val ratio = lf / restFont
+            if (ratio > 0.89f && ratio < 1.12f) return false
+            val near = if (lineIsFirst) rest.first() else rest.last()
+            val gap = Math.abs(blocks[near].cy - blocks[line].cy)
+            val typical = if (rest.size >= 2) {
+                med(rest.zipWithNext { x, y -> Math.abs(blocks[y].cy - blocks[x].cy) })
+            } else restFont * 1.3f
+            if (typical <= 0f || gap < typical * 1.45f) return false
+            val maxW = rest.maxOf { blocks[it].w }
+            return blocks[line].w < maxW * 0.85f
+        }
+        var from = 0
+        var to = ordered.size
+        val out = ArrayList<List<Int>>()
+        if (to - from >= 2 && isOdd(ordered[from], ordered.subList(from + 1, to), true)) {
+            out.add(listOf(ordered[from])); from++
+        }
+        var tail: List<Int>? = null
+        if (to - from >= 2 && isOdd(ordered[to - 1], ordered.subList(from, to - 1), false)) {
+            tail = listOf(ordered[to - 1]); to--
+        }
+        out.add(ordered.subList(from, to))
+        if (tail != null) out.add(tail)
         return out
     }
 

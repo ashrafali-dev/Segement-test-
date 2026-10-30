@@ -5985,6 +5985,29 @@ return t.length>=40?'TXT:'+t:'';
             else -> "Auto (guess from page)"
         }
 
+    private fun menuScanDirLabel(): String {
+        val d = ScanMode.direction(this)
+        val short = when (d) { ScanDirection.SCROLL -> "Top → Bottom"; ScanDirection.RTL -> "Right → Left"; ScanDirection.LTR -> "Left → Right" }
+        return "🧭 Scan direction: $short" + if (ScanMode.askBefore(this)) " (asks on ⚡)" else " (no question)"
+    }
+
+    /** Menu: pick the scan direction for good and decide whether ⚡ asks before every scan. */
+    private fun scanDirectionDialog(onDone: () -> Unit) {
+        val dirs = ScanDirection.values()
+        var sel = dirs.indexOf(ScanMode.direction(this)).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Scanning direction")
+            .setSingleChoiceItems(dirs.map { it.label }.toTypedArray(), sel) { _, which -> sel = which }
+            .setPositiveButton("Save & ask each time") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel]); Prefs.putBool(this, ScanMode.PREF_ASK, true); d.dismiss(); onDone()
+            }
+            .setNeutralButton("Save, don't ask") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel]); Prefs.putBool(this, ScanMode.PREF_ASK, false); d.dismiss(); onDone()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun menuRealtimeAutoOcrLabel(): String =
         if (Prefs.bool(this, "rtAutoOcrEnabled", true)) "✅ ⚡ Auto Real-time OCR"
         else "⬜ ⚡ Auto Real-time OCR — off (manual tap mode)"
@@ -7363,6 +7386,7 @@ return t.length>=40?'TXT:'+t:'';
             webView = prefetchWv,
             // The next chapter ("Ahead") is read the same way as the one on screen: same direction, same accuracy.
             scanDirection = ScanMode.direction(this).key,
+            forceAccurate = true,
             isValid = { prefetchLoading && token == prefetchToken },
             onProgress = { stage, pct ->
                 webModePrefetchStage = stage
@@ -7771,7 +7795,13 @@ return t.length>=40?'TXT:'+t:'';
                     val cur = cleanUrl(novelWv.url.orEmpty())
                     if (cur != oldUrl && novelWv.progress >= 100) {
                         hideNavLoading()
-                        if (autoExtract) handler.postDelayed({ if (token == navToken) extractCopy() }, 700L)
+                        if (autoExtract) handler.postDelayed({
+                            if (token == navToken) {
+                                // Auto-scan of the next chapter: use the saved direction, never pop the question.
+                                skipScanAsk = true
+                                try { extractCopy() } finally { skipScanAsk = false }
+                            }
+                        }, 700L)
                     } else if (n < 50) {
                         waitUrl(n + 1)
                     } else {
@@ -10152,7 +10182,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
             "🧹 Clear OCR Log (then reproduce the problem)",
-            menuDetectorLabel(), menuRealtimeAutoOcrLabel()
+            menuDetectorLabel(), menuRealtimeAutoOcrLabel(), menuScanDirLabel()
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -10161,14 +10191,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
             27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT,
-            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH, 61 to Ic.BOLT
+            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH, 61 to Ic.BOLT, 62 to Ic.BOLT
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
             "COMMUNITY" to listOf(56),
             "LIBRARY" to listOf(0, 4, 1, 3),
             "TRANSLATE" to listOf(5, 33, 54, 7),
-            "OCR" to listOf(53, 50, 57, 58, 59, 60),
+            "OCR" to listOf(62, 53, 50, 57, 58, 59, 60),
             "READER" to listOf(9, 20, 23),
             "APP" to listOf(55)
         )
@@ -10375,6 +10405,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
                 60 -> { detectorDialog { refresh(i, menuDetectorLabel()) } }
+                62 -> { scanDirectionDialog { refresh(i, menuScanDirLabel()) } }
                 61 -> { setRealtimeAutoOcrEnabled(!Prefs.bool(this, "rtAutoOcrEnabled", true)); refresh(i, menuRealtimeAutoOcrLabel()) }
                 59 -> {
                     OcrDiag.clear()

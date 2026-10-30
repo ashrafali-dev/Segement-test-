@@ -112,7 +112,9 @@ internal class WebModeRequest(
     /** True while another pane (full-screen chatbot) is drawn over this WebView: capture from the view itself. */
     val isOccluded: () -> Boolean = { false },
     /** Scanning mode only: "scroll" (default), "rtl" or "ltr" (page-by-page canvas readers, see ScanMode). */
-    val scanDirection: String = "scroll"
+    val scanDirection: String = "scroll",
+    /** Next-chapter (Ahead) prefetch: always the accurate pipeline, whatever the Scan accuracy setting says. */
+    val forceAccurate: Boolean = false
 )
 
 /**
@@ -256,7 +258,7 @@ internal class WebModeExtractor(
         /** Scanning mode, accuracy first: full pipeline, nothing skipped. */
         private val scanAccurate: Boolean
             get() = !req.visibleOnly && req.ahead <= 0 && req.forceOcrSrc.isNullOrBlank() &&
-                !req.forceFreshOcr && ScanMode.accurate(wv.context)
+                !req.forceFreshOcr && (req.forceAccurate || ScanMode.accurate(wv.context))
 
         @Volatile private var fellBackToForce = false
         /** How this job really read the page: dom (image URLs), canvas (exported canvas pixels) or screen (screenshot). */
@@ -294,7 +296,8 @@ internal class WebModeExtractor(
         fun begin() {
             ensureBridge(wv)
             OcrDiag.log("JOB_BEGIN", "id=$id host=${diag.host} url=${startUrl.take(160)} visibleOnly=${req.visibleOnly} force=${req.force} " +
-                "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
+                "ahead=${req.ahead} forceSrc=${!req.forceOcrSrc.isNullOrBlank()} engine=${Prefs.get(wv.context, "ocrEngine", "mlkit")} " +
+                "accurate=$scanAccurate prefAccurate=${ScanMode.accurate(wv.context)} dir=${req.scanDirection} prefetch=${req.forceAccurate}")
             progress("Discovering chapter panels", 1)
             if ((req.force && !req.visibleOnly) || req.forceScreenOcr || scanHorizontal) {
                 worker.execute { runCatching { processForce() }.onFailure {
@@ -2491,7 +2494,7 @@ internal class WebModeExtractor(
                     val iy = blocks.indexOf(y)
                     (ix >= 0 && iy >= 0 && freeAt(ix) != freeAt(iy)) ||
                     BubbleDetectorCore.inDifferentBubbles(dets, x.cx, x.cy, y.cx, y.cy) ||
-                    OcrPost.outlineBetween(bmp, x, y) || run {
+                    OcrPost.outlineBetween(bmp, x, y, blocks) || run {
                         // Second opinion from the bubble SHAPE: lines of two different (even overlapping) bubbles are
                         // never one sentence. Unknown shape (null) keeps the geometry decision.
                         val ix = blocks.indexOf(x); val iy = blocks.indexOf(y)
@@ -2598,7 +2601,7 @@ internal class WebModeExtractor(
                 if (i !in inside) continue
                 val members = inside.filter { !consumed[it] }
                 if (i !in members) continue
-                if (!fastMode && members.size >= 2) {
+                if (members.size >= 2) {
                     // Two speech bubbles that touch or overlap can share one detected interior. Cut the lines wherever
                     // an outline (or a different detected bubble) lies between two neighbours; every piece is then its own
                     // bubble with its own cover, instead of one text over both.
@@ -2609,6 +2612,13 @@ internal class WebModeExtractor(
                     if (pieces.size > 1) {
                         OcrDiag.log("TWIN_BUBBLES", "split ${members.size} lines into ${pieces.size} bubbles")
                         for (piece in pieces) if (piece.size >= 2) joinAdjacentLines(piece.first(), piece)
+                        continue
+                    }
+                    // Sender name / header inside the same message box: its own text, not part of the message.
+                    val headerPieces = ScanMode.splitHeader(blocks, sortedMembers)
+                    if (headerPieces.size > 1) {
+                        OcrDiag.log("HEADER_SPLIT", "split ${members.size} lines into ${headerPieces.size} parts (name/body)")
+                        for (piece in headerPieces) if (piece.size >= 2) joinAdjacentLines(piece.first(), piece)
                         continue
                     }
                 }
@@ -3007,7 +3017,8 @@ internal class WebModeExtractor(
                 // This OCR runs on ns-webmode. Job.startUrl was captured on the UI thread, so never read WebView.url here.
                 val currentHost = hostOf(startUrl).lowercase().removePrefix("www.")
                 val canvasReader = currentHost == "shonenjumpplus.com" || currentHost.endsWith(".shonenjumpplus.com")
-                if (canvasReader || !Prefs.bool(wv.context, "lensAudit", false) || core.blocks.isEmpty() && fastMode) return core
+                val auditOn = Prefs.bool(wv.context, "lensAudit", false) || scanAccurate || forceFresh
+                if (canvasReader || !auditOn || core.blocks.isEmpty() && fastMode) return core
                 return try { OcrRescan.augmentRemote(engine, bmp, core, st.current, if (fastMode) 2200L else 3500L) }
                 catch (_: Exception) { core } catch (_: OutOfMemoryError) { core }
             }
