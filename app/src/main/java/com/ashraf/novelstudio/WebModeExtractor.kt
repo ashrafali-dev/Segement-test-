@@ -930,7 +930,7 @@ internal class WebModeExtractor(
                             if (silent) {
                                 LensPanelOcrAttempt(PanelOcr("", emptyList()), null)
                             } else {
-                                LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = !scanAccurate, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank(), keepCleanerFast = scanAccurate), null)
+                                LensPanelOcrAttempt(ocrBytes(bytes, panelScript, p.src, fastMode = true, forceFresh = req.forceFreshOcr || !req.forceOcrSrc.isNullOrBlank()), null)
                             }
                         } catch (e: OcrUnavailableException) {
                             LensPanelOcrAttempt(null, e)
@@ -1051,7 +1051,7 @@ internal class WebModeExtractor(
                             val bytes2 = try { fetchWithRetry(panels[i], meta.url) } catch (_: Throwable) { null }
                             if (bytes2 == null) { stillBad.add(i); continue }
                             try {
-                                val po = ocrBytes(bytes2, ScriptState(script.current), panels[i].src, fastMode = false, forceFresh = true, keepCleanerFast = true)
+                                val po = ocrBytes(bytes2, ScriptState(script.current), panels[i].src, fastMode = true, forceFresh = true)
                                 if (po == null) continue
                                 diag.decoded++
                                 val t = po.text
@@ -2107,10 +2107,7 @@ internal class WebModeExtractor(
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
-            cropFallback: Boolean = false, forceFresh: Boolean = false,
-            // Accurate scan reads thoroughly (fastMode = false) but must NOT change how the picture is cleaned:
-            // the text remover / balloon mask decision stays the one this build already made for a Lens scan.
-            keepCleanerFast: Boolean = false
+            cropFallback: Boolean = false, forceFresh: Boolean = false
         ): PanelOcr? {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
@@ -2141,7 +2138,7 @@ internal class WebModeExtractor(
                         // or while the current visible panel is waiting for a translation.
                         val tClean = SystemClock.elapsedRealtime()
                         val cleaned = WebModeTextRemover.cleanAndCache(
-                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0 && !keepCleanerFast
+                            wv.context, src, bytes, bubbles, allowAi = !fastMode && req.ahead <= 0
                         )
                         OcrDiag.log("CLEAN", "ms=${SystemClock.elapsedRealtime() - tClean} cleaned=$cleaned bubbles=${bubbles.size} thread=${Thread.currentThread().name} aiPainter=${WebModeInpainter.lastNote.ifBlank { "-" }}")
                     } catch (_: OutOfMemoryError) {
@@ -2462,27 +2459,6 @@ internal class WebModeExtractor(
                 if (i !in inside) continue
                 val members = inside.filter { !consumed[it] }
                 if (i !in members) continue
-                if (members.size >= 2) {
-                    // Two speech bubbles that touch or overlap can share one detected interior. Cut the lines wherever
-                    // an outline (or a different detected bubble) lies between two neighbours; every piece is then its own
-                    // bubble with its own cover, instead of one text over both.
-                    val sortedMembers = members.sortedWith(compareBy({ blocks[it].cy }, { blocks[it].cx }))
-                    val pieces = ScanMode.splitAtOutlines(bmp, blocks, sortedMembers) { x, y ->
-                        BubbleDetectorCore.inDifferentBubbles(dets, blocks[x].cx, blocks[x].cy, blocks[y].cx, blocks[y].cy)
-                    }
-                    if (pieces.size > 1) {
-                        OcrDiag.log("TWIN_BUBBLES", "split ${members.size} lines into ${pieces.size} bubbles")
-                        for (piece in pieces) if (piece.size >= 2) joinAdjacentLines(piece.first(), piece)
-                        continue
-                    }
-                    // Sender name / header inside the same message box: its own text, not part of the message.
-                    val headerPieces = ScanMode.splitHeader(blocks, sortedMembers)
-                    if (headerPieces.size > 1) {
-                        OcrDiag.log("HEADER_SPLIT", "split ${members.size} lines into ${headerPieces.size} parts (name/body)")
-                        for (piece in headerPieces) if (piece.size >= 2) joinAdjacentLines(piece.first(), piece)
-                        continue
-                    }
-                }
                 if (members.size < 2 && bands.isNullOrEmpty() && !fromDet) continue   // a lone, fully read line needs nothing
 
                 // The closed speech-bubble outline is stronger evidence than line spacing/alignment:
