@@ -6,6 +6,7 @@ const extractor = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebM
 const rescan = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/OcrRescan.kt", "utf8");
 const remover = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemover.kt", "utf8");
 const mainActivity = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/MainActivity.kt", "utf8");
+const layout = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
 const libMatch = extractor.match(/private const val LIB = """\r?\n([\s\S]*?)\r?\n\s*"""/);
 assert.ok(libMatch, "could not locate WebModeExtractor page-discovery JavaScript");
 const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)");
@@ -69,6 +70,34 @@ assert.ok(forceInfoAt >= 0 && forceInfoEnd > forceInfoAt, "missing viewport canv
 const forceInfoBlock = extractor.slice(forceInfoAt, forceInfoEnd);
 assert.ok(forceInfoBlock.includes("cands(sc,true,true,true)"), "manual screen OCR must retain actual canvas bounds");
 assert.ok(!forceInfoBlock.includes("c=[]"), "manual screen OCR must not scan unrelated whole-WebView UI text");
+assert.ok(mainActivity.includes("var webtoonReader=") &&
+          mainActivity.includes("function sliceTag(r,iw,ih)") &&
+          mainActivity.includes("if(!webtoonReader||!(r.height>vh*1.15&&ih>iw*1.25))return ''") &&
+          mainActivity.includes("Math.floor(Math.max(0,-r.top)/Math.max(1,vh*.55))") &&
+          mainActivity.includes("readerFrameArea") && mainActivity.includes("@slice="),
+  "a tall Webtoon image or large cross-origin reader frame must produce a new signature when its visible slice changes");
+assert.ok(mainActivity.includes("isSameTallImageSlice") &&
+          mainActivity.includes('if (!sameTallImageSlice) clearRealtimeOverlay("scroll")') &&
+          mainActivity.includes("OVERLAY_KEEP"),
+  "changing slices of the same long image must not clear its overlay before the replacement is ready");
+assert.ok(extractor.includes("val maxDriftRecaptures = if (req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())) 3 else 1") &&
+          extractor.includes("driftRetries < maxDriftRecaptures") &&
+          extractor.includes("recapture $driftRetries/$maxDriftRecaptures"),
+  "visible-only screenshot OCR must retry scroll drift instead of abandoning a new panel after one retry");
+assert.ok(extractor.includes("keepWebtoonOverlay") &&
+          extractor.includes("WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())") &&
+          extractor.includes("webtoon_anti_flicker"),
+  "only the Webtoon screenshot fallback keeps its current overlay visible during capture");
+assert.ok(layout.includes("val overlayCv: List<Float> = emptyList()") &&
+          layout.includes('put("ocv"') &&
+          layout.includes('optJSONArray("ocv")') &&
+          writer.includes("coverCv=it.cv") && writer.includes("coverCv.concat(it.ocv)") &&
+          writer.includes('put("ocv", ja)'),
+  "cover-only glyph-edge geometry must persist separately from the cleaner mask and remain isolated from Japanese cleanup");
+assert.ok(extractor.includes("if (WebtoonBubbleMaskKit.shouldHandle(startUrl))") &&
+          extractor.includes("overlaySafetyBox = intArrayOf") &&
+          !remover.includes("overlayCv"),
+  "only Webtoon routes may add the cover-only glyph box; image-cleaner mask geometry must remain unchanged");
 // Lens completeness audit must retry compact, fully missed labels (e.g. a short "Skip" button),
 // rather than filtering them out with the previous 200x80-pixel floor or inspecting one region only.
 assert.ok(rescan.includes("MIN_REMOTE_AUDIT_WIDTH = 32"), "Lens audit must allow short button labels");
@@ -107,9 +136,11 @@ assert.ok(writer.includes("b.setAttribute('data-cl',it.cl?'1':'')"),
   "bubble JSON should carry only a small cleaned-image flag");
 assert.ok(writer.includes('put("cv", ja)'),
   "detector speech-bubble mask rectangles must be passed to the overlay");
-assert.ok(writer.includes("var hasCv=!!(it.cv&&it.cv.length>=4)") &&
+assert.ok(writer.includes("var coverCv=it.cv&&it.cv.length>=4?it.cv.slice(0):[]") &&
+  writer.includes("if(it.ocv&&it.ocv.length>=4)coverCv=coverCv.concat(it.ocv)") &&
+  writer.includes("var hasCv=coverCv.length>=4") &&
   writer.includes("className='__ns_cv'") && writer.includes("cover.appendChild(cd)"),
-  "the overlay must reconstruct the detected speech-bubble silhouette from cv rectangles");
+  "the overlay must reconstruct its silhouette from cleaner cv plus the separate Webtoon-only ocv rectangles");
 assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl&&!hasCv"),
   "the small OCR-box fallback should wait for cleaned image only when no bubble mask exists");
 assert.ok(writer.includes("if(!it.cl)cover.style.opacity='1'") &&

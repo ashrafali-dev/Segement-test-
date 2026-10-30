@@ -18,6 +18,7 @@ const lensTransport = read('app/src/main/java/com/ashraf/novelstudio/LensOcrEngi
 const chapterContext = read('app/src/main/java/com/ashraf/novelstudio/WebModeChapterContext.kt');
 const writer = read('app/src/main/java/com/ashraf/novelstudio/WebModeWriter.kt');
 const bubbleSeg = read('app/src/main/java/com/ashraf/novelstudio/BubbleSegCore.kt');
+const webtoonKit = read('app/src/main/java/com/ashraf/novelstudio/WebtoonBubbleMaskKit.kt');
 
 assert.ok(routing.includes('OcrNegativeCache.hit(bitmap)'), 'negative cache must be checked before engine execution');
 const localFastStart = routing.indexOf('fun recognizeLocalFast(');
@@ -156,20 +157,45 @@ assert.ok(cleaner.includes('fillKnownBubbleShape(bitmap, bubble.cv') &&
            cleaner.includes('totalRemoved += result.changed'),
    'known bubble-shaped bands must clean only a verified flat interior, log the result, and preserve artwork when the paper-colour guard fails');
 
+assert.ok(cleaner.includes('WebtoonBubbleMaskKit.shouldHandle(pageUrl)') &&
+          cleaner.includes('WebtoonBubbleMaskKit.fillInterior(bitmap, bubble.cv') &&
+          cleaner.includes('webtoonFit?.accepted == true') &&
+          cleaner.includes('else -> fillKnownBubbleShape(bitmap, bubble.cv'),
+  'only webtoon pages may use the dedicated shape-paper cleaner; rejected fits must retain the conservative fallback');
+assert.ok(extractor.includes('fit.bands(WebtoonBubbleMaskKit.shapeBandLimit(startUrl))') &&
+          extractor.includes('BubbleSegCore.bands(') &&
+          extractor.includes('maxBands = WebtoonBubbleMaskKit.segmentationBandLimit(startUrl)'),
+  'only Webtoon pages may raise the shape and segmentation band resolution; manga must retain established defaults');
+assert.ok(webtoonKit.includes('fun shouldHandle(pageUrl: String)') &&
+          webtoonKit.includes('webtoonPath || webtoonsHost') &&
+          webtoonKit.includes('SHAPE_BANDS = 96') &&
+          webtoonKit.includes('DEFAULT_SHAPE_BANDS = 28') &&
+          webtoonKit.includes('SEGMENTATION_BANDS = 64') &&
+          webtoonKit.includes('DEFAULT_SEGMENTATION_BANDS = 14') &&
+          webtoonKit.includes('inferPaperColour') &&
+          webtoonKit.includes('interpolate(leftColour, rightColour') &&
+          webtoonKit.includes('dense_ink_or_art'),
+  'the isolated Webtoon kit must use higher shape precision, sample bubble paper, preserve mild gradients and reject dense artwork');
+
 assert.ok(cleaner.includes('MIGAN_PREFETCH') && cleaner.includes('allowed=true reason=residual>8') &&
           cleaner.includes('tryAcquireGlobalCallBudget') &&
           painter.includes('GLOBAL_CALL_LIMIT = 20') &&
           painter.includes('GLOBAL_CALL_WINDOW_MS = 60_000L'),
   'prefetch MI-GAN must be residual-gated, budgeted per panel and globally rate limited');
-assert.ok(extractor.includes('FORCE_CAPTURE') && extractor.includes('stableSamples < 3') &&
+// The Webtoon foreground path deliberately permits up to three bounded scroll-drift
+// recaptures; other reader paths retain the single-recapture limit. Do not pin this guard
+// to the old "/1" log format or it will reject the intended Webtoon-only retry policy.
+assert.ok(extractor.includes('FORCE_CAPTURE') &&
+          extractor.includes('stableSamples < 3') &&
           extractor.includes('timeoutMs = minOf(if (forceCrossOriginCanvas) 100L else 180L, remainingMs)') &&
           extractor.includes('FORCE_ABORT') &&
-          extractor.includes('recapture $driftRetries/1') &&
+          extractor.includes('val maxDriftRecaptures = if (req.visibleOnly && WebtoonBubbleMaskKit.shouldHandle(wv.url.orEmpty())) 3 else 1') &&
+          extractor.includes('recapture $driftRetries/$maxDriftRecaptures') &&
+          extractor.includes('val maxBlankRetries = if (forceCrossOriginCanvas) 1 else 3') &&
           extractor.includes('FORCE_SKIP') &&
           extractor.includes('FORCE_MODE') &&
-          extractor.includes('reason=cross_origin_canvas') &&
-          extractor.includes('maxBlankRetries = if (forceCrossOriginCanvas) 1 else 3'),
-  'FORCE capture must settle, reduce screenshot retries for cross-origin canvas, and retain diagnostics');
+          extractor.includes('reason=cross_origin_canvas'),
+  'FORCE capture must settle, use bounded Webtoon-only drift recaptures, reduce blank retries for cross-origin canvas, and retain diagnostics');
 assert.ok(cleaner.includes('LARGE_MASK_THRESHOLD = 15_000') &&
           cleaner.includes('LARGE_MASK_ALPHA = 1.00f') &&
           cleaner.includes('openCvInpaintTiled(tier1Region, rw, rh, mask)') &&
