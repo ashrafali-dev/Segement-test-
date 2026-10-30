@@ -7085,6 +7085,29 @@ return t.length>=40?'TXT:'+t:'';
      * extraction uses (prompt, glossary, chatbot, response handling, cache, prefetch).
      */
     private var deepSeekLastFailToastAtMs = 0L
+    private var skipScanAsk = false
+
+    /** Scanning mode: the three questions asked before a scan (scroll / right to left / left to right). */
+    private fun askScanOptions(onChosen: () -> Unit) {
+        val dirs = ScanDirection.values()
+        var sel = dirs.indexOf(ScanMode.direction(this)).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("How should this chapter be scanned?")
+            .setSingleChoiceItems(dirs.map { it.label }.toTypedArray(), sel) { _, which -> sel = which }
+            .setPositiveButton("Start scan") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel])
+                d.dismiss()
+                onChosen()
+            }
+            .setNeutralButton("Don't ask again") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel])
+                Prefs.putBool(this, ScanMode.PREF_ASK, false)
+                d.dismiss()
+                onChosen()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
     private fun startWebModeExtract(
         token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false,
@@ -7130,6 +7153,7 @@ return t.length>=40?'TXT:'+t:'';
             // Force Extract may scroll the screen; real-time OCR must stay viewport-only.
             force = Prefs.bool(this, "wmForce") && !realtimeViewport,
             forceFreshOcr = forceFresh,
+            scanDirection = if (!realtimeViewport && !forceFresh) ScanMode.direction(this).key else "scroll",
             isValid = { token == navToken && jobSeq == webModeJobSerial },
             onProgress = { stage, pct ->
                 if (token == navToken && jobSeq == webModeJobSerial) {
@@ -7337,6 +7361,8 @@ return t.length>=40?'TXT:'+t:'';
         val token = prefetchToken
         webModePrefetchHandle = webMode.start(WebModeRequest(
             webView = prefetchWv,
+            // The next chapter ("Ahead") is read the same way as the one on screen: same direction, same accuracy.
+            scanDirection = ScanMode.direction(this).key,
             isValid = { prefetchLoading && token == prefetchToken },
             onProgress = { stage, pct ->
                 webModePrefetchStage = stage
@@ -7411,6 +7437,13 @@ return t.length>=40?'TXT:'+t:'';
             chatWv.evaluateJavascript(Js.clearSendState(), null)
             toast("🔁 Sending the same text to the chatbot again…")
             enqueue(failed)
+            return
+        }
+        if (webModeOn() && !DeepSeekRealtimeTranslation.isEnabled(this) && !skipScanAsk && ScanMode.askBefore(this)) {
+            askScanOptions {
+                skipScanAsk = true
+                try { extractCopy() } finally { skipScanAsk = false }
+            }
             return
         }
         navToken++
