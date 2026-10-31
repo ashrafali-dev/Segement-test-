@@ -1126,7 +1126,7 @@ internal class WebModeExtractor(
             // source stream shifts every [NNN] marker and makes the first bubble unmatchable.
             val allBubblesRaw = ArrayList<WmBubble>()
             for (l in layouts) if (l != null) allBubblesRaw.addAll(l)
-            val (text, alignedBubbles) = WebModeLogic.assembleAligned(if (req.visibleOnly) "" else title, allBubblesRaw)
+            val (text, alignedBubbles) = assembleAlignedBubbles(if (req.visibleOnly) "" else title, allBubblesRaw)
             // Keep every OCR block's exact source text beside its geometry. The main thread can then
             // deduplicate bubbles across overlapping viewports and map each reply to its own box.
             val allBubbles = alignedBubbles
@@ -1734,7 +1734,7 @@ internal class WebModeExtractor(
             val title = meta.title.ifBlank { hostOf(meta.url) }
             val allBubblesRaw = ArrayList<WmBubble>()
             for (p in panels) allBubblesRaw.addAll(p.bubbles)
-            val (text, allBubbles) = WebModeLogic.assembleAligned(if (req.visibleOnly) "" else title, allBubblesRaw)
+            val (text, allBubbles) = assembleAlignedBubbles(if (req.visibleOnly) "" else title, allBubblesRaw)
             val titleOffset = if (req.visibleOnly || title.isBlank()) 0 else 1
             WebModeLayoutStore.put(wv.context, meta.url, WebModeLayout(titleOffset, allBubbles))
             val ch = Chapter(
@@ -3777,4 +3777,18 @@ var novel=q('.detail_header .subj')||q('a.subj')||q('.series-title')||q('.comic-
 return JSON.stringify({lang:document.documentElement.lang||'',url:location.href,title:title,novel:novel,next:link('next'),prev:link('prev'),imgs:c.slice(0,600)});
 """
     }
+}
+
+private val ALIGN_PARA_BREAK = Regex("\\s*\\n\\s*")
+
+/**
+ * Text for the chatbot built FROM the bubbles themselves: paragraph k is exactly bubble k, so a reply marker can never
+ * land on a neighbouring bubble. Blank bubbles are dropped from the returned list.
+ */
+private fun assembleAlignedBubbles(title: String, bubbles: List<WmBubble>): Pair<String, List<WmBubble>> {
+    val kept = bubbles.filter { it.sourceText.isNotBlank() }
+    val body = kept.joinToString("\n\n") { it.sourceText.replace(ALIGN_PARA_BREAK, " ").trim() }
+    val t = title.trim()
+    val text = if (t.isEmpty()) body else if (body.isEmpty()) t else t + "\n\n" + body
+    return text to kept
 }
