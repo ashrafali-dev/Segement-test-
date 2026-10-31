@@ -2193,6 +2193,16 @@ internal class WebModeExtractor(
             }
         }
 
+        /** Latin-only fragment of at most two characters with small lettering: noise, never speech or a sound effect. */
+        private fun isJunkFragment(b: WmBubble, text: String, imageW: Int): Boolean {
+            val t = text.trim()
+            if (t.isEmpty() || t.length > 3) return false
+            if (!t.all { it in 'A'..'Z' || it in 'a'..'z' || it.isDigit() || it == '.' || it == ' ' }) return false
+            if (t.count { it.isLetterOrDigit() } > 2) return false
+            // font is a fraction of the image width; sound-effect letters are large (e.g. a giant "S")
+            return b.font * imageW < 40f
+        }
+
         private fun ocrBytes(
             bytes: ByteArray, st: ScriptState, src: String,
             fastMode: Boolean = false, crop: WebModeOcrRegion? = null,
@@ -2212,6 +2222,15 @@ internal class WebModeExtractor(
             val texts = ArrayList<String>()
             val bubbles = ArrayList<WmBubble>()
             fun finishResult(): PanelOcr {
+                // Stray one/two-letter Latin fragments (logo pieces, credits, "N" "T" "B") are not dialogue: the chatbot
+                // skipped them and they only produced empty boxes. Keep them in the picture, out of the text.
+                if (crop == null && !forceFresh && bubbles.size == texts.size) {
+                    val keepIdx = bubbles.indices.filter { !isJunkFragment(bubbles[it], texts[it], w) }
+                    if (keepIdx.size < bubbles.size) {
+                        val nt = keepIdx.map { texts[it] }; val nb = keepIdx.map { bubbles[it] }
+                        texts.clear(); texts.addAll(nt); bubbles.clear(); bubbles.addAll(nb)
+                    }
+                }
                 // Cleaning is opt-in and limited to whole-image OCR. A force-OCR crop has a different
                 // coordinate system and must never be used to rewrite the underlying source image.
                 // NOT limited to the slow pass: realtime/visible reads (fastMode) must erase the old lettering too, otherwise every
@@ -2408,10 +2427,10 @@ internal class WebModeExtractor(
             }
             // Our own Bengali overlay can be inside a screen capture: never treat it as source text.
             val dropOwnBengali = Langs.target(wv.context) == "Bengali"
-            val blocks = OcrPost.mergeNeighbours(
+            val blocks = OcrPost.joinTiltedStacks(OcrPost.mergeNeighbours(
                 (preRecognized ?: recognize(bmp, st, fastMode, forceFresh)).blocks.filter {
                     it.text.isNotBlank() && !(dropOwnBengali && OcrPost.isMostlyBengaliScript(it.text))
-                }, bmp)
+                }, bmp))
             ocrMs = android.os.SystemClock.elapsedRealtime() - tOcr
             lineCount = blocks.size
             if (blocks.isEmpty()) return
@@ -2426,7 +2445,7 @@ internal class WebModeExtractor(
                 else if (earlyDet != null) {
                     // Non-blocking: only take a result that is already finished (thorough scans keep the full wait).
                     try { if (fastMode) earlyDet.get(9, java.util.concurrent.TimeUnit.SECONDS) else earlyDet.get() } catch (_: Exception) { try { earlyDet.cancel(false) } catch (_: Throwable) {}; null }
-                } else if (!realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp) else null
+                } else if (!realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true)) BubbleDetector.detect(wv.context, bmp, rects) else null
             // `last` is a process-global from the most recent real detection. Show it only when THIS call ran the
             // detector; otherwise it is stale (e.g. realtime skips detection) and printed a misleading 3.5s time.
             val detectRan = detectWanted || cachedDets != null || (earlyDet == null && !realtimePriority && Prefs.bool(wv.context, "wmBubbleFit", true))

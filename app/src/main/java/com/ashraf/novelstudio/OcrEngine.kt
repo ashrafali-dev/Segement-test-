@@ -70,6 +70,89 @@ internal object OcrPost {
         return x
     }
 
+    /**
+     * Lines of ONE tilted caption (phone notification, tilted sign) arrive as separate blocks; the "same bubble" tests
+     * all refuse tilted text, so each line was translated alone into its own narrow box. Join lines that carry the
+     * same tilt (within 4 degrees) and sit stacked on each other in the TEXT's own frame. Flat/vertical text is untouched.
+     */
+    fun joinTiltedStacks(blocks: List<OcrBlock>): List<OcrBlock> {
+        if (blocks.size < 2) return blocks
+        val tilted = blocks.indices.filter { i ->
+            val b = blocks[i]
+            !b.vertical && b.w > 0f && b.h > 0f && Math.abs(usableTilt(b.angle)) >= 6f
+        }
+        if (tilted.size < 2) return blocks
+        val parent = IntArray(blocks.size) { it }
+        fun find(x: Int): Int { var r = x; while (parent[r] != r) r = parent[r]; parent[x] = r; return r }
+        fun font(b: OcrBlock) = if (b.fontPx > 0f) b.fontPx else b.h
+        for (ai in tilted.indices) for (bi in ai + 1 until tilted.size) {
+            val a = blocks[tilted[ai]]; val b = blocks[tilted[bi]]
+            val ta = usableTilt(a.angle); val tb = usableTilt(b.angle)
+            if (Math.abs(ta - tb) > 4f) continue
+            val fa = font(a); val fb = font(b)
+            val ratio = fa / fb
+            if (ratio < 0.6f || ratio > 1.7f) continue
+            val m = Math.toRadians(((ta + tb) / 2f).toDouble())
+            val dx = (b.cx - a.cx).toDouble(); val dy = (b.cy - a.cy).toDouble()
+            // Accept whichever sign convention the engine used for the angle.
+            var ok = false
+            for (sgn in intArrayOf(1, -1)) {
+                val th = m * sgn
+                val u = Math.abs(dx * Math.cos(th) + dy * Math.sin(th))      // along the text
+                val v = Math.abs(-dx * Math.sin(th) + dy * Math.cos(th))     // across the lines
+                val gap = v - (a.h + b.h) / 2.0
+                if (u <= Math.max(a.w, b.w) * 0.6 && gap <= Math.max(fa, fb) * 1.0 && gap >= -Math.min(a.h, b.h) * 0.3) { ok = true; break }
+            }
+            if (ok) parent[find(tilted[ai])] = find(tilted[bi])
+        }
+        val groups = tilted.groupBy { find(it) }.values.filter { it.size in 2..6 }
+        if (groups.isEmpty()) return blocks
+        val drop = HashSet<Int>()
+        val added = ArrayList<OcrBlock>()
+        for (g in groups) {
+            val ms = g.map { blocks[it] }
+            val ang = ms.map { usableTilt(it.angle) }.average().toFloat()
+            val m = Math.toRadians(ang.toDouble())
+            var best: List<Triple<Double, Double, OcrBlock>>? = null
+            var bestSpread = Double.MAX_VALUE
+            for (sgn in intArrayOf(1, -1)) {
+                val th = m * sgn
+                val pts = ms.map { b ->
+                    Triple(b.cx * Math.cos(th) + b.cy * Math.sin(th), -b.cx * Math.sin(th) + b.cy * Math.cos(th), b)
+                }
+                val spread = (pts.maxOf { it.first } - pts.minOf { it.first })
+                if (spread < bestSpread) { bestSpread = spread; best = pts }
+            }
+            val pts = best ?: continue
+            val sgnUsed = run {
+                val p1 = ms.map { b -> b.cx * Math.cos(m) + b.cy * Math.sin(m) }
+                if (Math.abs((p1.maxOrNull() ?: 0.0) - (p1.minOrNull() ?: 0.0) - bestSpread) < 1e-6) 1 else -1
+            }
+            val th = m * sgnUsed
+            val u0 = pts.minOf { it.first - it.third.w / 2.0 }; val u1 = pts.maxOf { it.first + it.third.w / 2.0 }
+            val v0 = pts.minOf { it.second - it.third.h / 2.0 }; val v1 = pts.maxOf { it.second + it.third.h / 2.0 }
+            val uc = (u0 + u1) / 2.0; val vc = (v0 + v1) / 2.0
+            val cx = (uc * Math.cos(th) - vc * Math.sin(th)).toFloat()
+            val cy = (uc * Math.sin(th) + vc * Math.cos(th)).toFloat()
+            val ordered = pts.sortedBy { it.second }.map { it.third }
+            val fonts = ordered.map { font(it) }.sorted()
+            val text = ordered.joinToString(" ") { it.text.replace('\n', ' ').trim() }.trim()
+            if (text.isBlank()) continue
+            added.add(OcrBlock(
+                text = text, top = (cy - (v1 - v0).toFloat() / 2f).toInt(), left = (cx - (u1 - u0).toFloat() / 2f).toInt(),
+                cx = cx, cy = cy, w = (u1 - u0).toFloat(), h = (v1 - v0).toFloat(), angle = ang,
+                fontPx = fonts[fonts.size / 2], vertical = false,
+                confidence = ordered.minOf { it.confidence }, observations = ordered.sumOf { it.observations }
+            ))
+            drop.addAll(g)
+        }
+        if (drop.isEmpty()) return blocks
+        val out = ArrayList<OcrBlock>()
+        for (i in blocks.indices) if (i !in drop) out.add(blocks[i])
+        out.addAll(added)
+        return out.sortedWith(compareBy({ it.cy }, { it.cx }))
+    }
+
     fun usableTilt(a: Float): Float {
         val f = foldAngle(a)
         return if (Math.abs(f) <= MAX_TILT) f else 0f

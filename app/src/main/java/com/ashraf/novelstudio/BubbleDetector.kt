@@ -305,16 +305,16 @@ internal object BubbleDetector {
     // ---- detection ---------------------------------------------------------------------------------------------
 
     /** Detections for [bmp] in page pixels, or null when the detector is off/unavailable. Never throws. */
-    fun detect(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
+    fun detect(c: Context, bmp: Bitmap, textRects: List<IntArray>? = null): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
         if (bmp.isRecycled) return null
         cached(bmp)?.let { return it }
         OnnxHeavyGate.lock.lock()
-        try { return detectLocked(c, bmp) } finally { OnnxHeavyGate.lock.unlock() }
+        try { return detectLocked(c, bmp, textRects) } finally { OnnxHeavyGate.lock.unlock() }
     }
 
     @Synchronized
-    private fun detectLocked(c: Context, bmp: Bitmap): List<BubbleDetectorCore.Det>? {
+    private fun detectLocked(c: Context, bmp: Bitmap, textRects: List<IntArray>? = null): List<BubbleDetectorCore.Det>? {
         if (!enabled(c)) return null
         // This detector also receives OCR slices and manual crops, not only full pages. Many legitimate
         // manga narration/dialogue boxes are short and wide, so aspect-ratio and 200px side filters caused
@@ -336,7 +336,26 @@ internal object BubbleDetector {
                 sessionStamp = file.lastModified()
             }
             val t0 = SystemClock.elapsedRealtime()
-            val tiles = BubbleDetectorCore.capTiles(BubbleDetectorCore.planTiles(bmp.width, bmp.height))
+            // Each model run costs the same (~2.5-4 s on a phone) however much of it is artwork. When OCR already knows where
+            // the lettering is, run only on that band of the picture: a tall panel with one speech bubble needs one run, not two.
+            var bandTop = 0
+            var bandBottom = bmp.height
+            if (!textRects.isNullOrEmpty()) {
+                val pad = Math.max(60, (bmp.height * 0.04f).toInt())
+                val minH = Math.min(bmp.height, (bmp.width * 0.6f).toInt())
+                var top = (textRects.minOf { it[1] } - pad).coerceAtLeast(0)
+                var bot = (textRects.maxOf { it[3] } + pad).coerceAtMost(bmp.height)
+                if (bot - top < minH) {
+                    val mid = (top + bot) / 2
+                    top = (mid - minH / 2).coerceAtLeast(0)
+                    bot = (top + minH).coerceAtMost(bmp.height)
+                    top = (bot - minH).coerceAtLeast(0)
+                }
+                bandTop = top; bandBottom = bot
+            }
+            val band = BubbleDetectorCore.planTiles(bmp.width, bandBottom - bandTop)
+                .map { intArrayOf(it[0], it[1] + bandTop, it[2], it[3] + bandTop) }
+            val tiles = BubbleDetectorCore.capTiles(band)
             val all = ArrayList<BubbleDetectorCore.Det>()
             val px = IntArray(BubbleDetectorCore.SIZE * BubbleDetectorCore.SIZE)
             for (t in tiles) {
