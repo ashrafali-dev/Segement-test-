@@ -1124,12 +1124,12 @@ internal class WebModeExtractor(
             val panelTexts = texts.map { it.orEmpty() }
             // In live mode the title is metadata, not an OCR paragraph. Leaving it in the
             // source stream shifts every [NNN] marker and makes the first bubble unmatchable.
-            val text = if (req.visibleOnly) WebModeLogic.assemble("", panelTexts)
-                else WebModeLogic.assemble(title, panelTexts)
+            val allBubblesRaw = ArrayList<WmBubble>()
+            for (l in layouts) if (l != null) allBubblesRaw.addAll(l)
+            val (text, alignedBubbles) = WebModeLogic.assembleAligned(if (req.visibleOnly) "" else title, allBubblesRaw)
             // Keep every OCR block's exact source text beside its geometry. The main thread can then
             // deduplicate bubbles across overlapping viewports and map each reply to its own box.
-            val allBubbles = ArrayList<WmBubble>()
-            for (l in layouts) if (l != null) allBubbles.addAll(l)
+            val allBubbles = alignedBubbles
             val titleOffset = if (req.visibleOnly || title.isBlank()) 0 else 1
             val scanLayout = WebModeLayout(titleOffset, allBubbles)
             if (!ignoreForceSrc && !req.forceOcrSrc.isNullOrBlank() && req.forceOcrRegion != null) {
@@ -1183,7 +1183,7 @@ internal class WebModeExtractor(
                 val t0 = SystemClock.elapsedRealtime()
                 var done = 0; var upgraded = 0; var bubblesUp = 0; var sinceNotify = 0
                 try {
-                    try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) } catch (_: Throwable) {}
+                    try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LESS_FAVORABLE) } catch (_: Throwable) {}
                     for (i in srcs.indices) {
                         val f = files.getOrNull(i) ?: continue
                         val lay = panelLayouts.getOrNull(i)
@@ -1214,7 +1214,7 @@ internal class WebModeExtractor(
                 }
             }, "ns-webmode-refine")
             t.isDaemon = true
-            t.priority = Thread.MIN_PRIORITY
+            t.priority = Thread.NORM_PRIORITY - 1
             t.start()
         }
 
@@ -1732,9 +1732,9 @@ internal class WebModeExtractor(
                 diag.chars == 0 -> { fail(WebModeError.OCR_EMPTY, "Force extract: ${accs.size} images, screens=$forceShots, blank=$forceBlank; OCR found no text"); return }
             }
             val title = meta.title.ifBlank { hostOf(meta.url) }
-            val text = if (req.visibleOnly) WebModeLogic.assemble("", panelTexts) else WebModeLogic.assemble(title, panelTexts)
-            val allBubbles = ArrayList<WmBubble>()
-            for (p in panels) allBubbles.addAll(p.bubbles)
+            val allBubblesRaw = ArrayList<WmBubble>()
+            for (p in panels) allBubblesRaw.addAll(p.bubbles)
+            val (text, allBubbles) = WebModeLogic.assembleAligned(if (req.visibleOnly) "" else title, allBubblesRaw)
             val titleOffset = if (req.visibleOnly || title.isBlank()) 0 else 1
             WebModeLayoutStore.put(wv.context, meta.url, WebModeLayout(titleOffset, allBubbles))
             val ch = Chapter(
