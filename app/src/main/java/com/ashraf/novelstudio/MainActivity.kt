@@ -7125,6 +7125,8 @@ return t.length>=40?'TXT:'+t:'';
             forceFreshOcr = forceFresh,
             scanDirection = if (!realtimeViewport && !forceFresh) ScanMode.direction(this).key else "scroll",
             isValid = { token == navToken && jobSeq == webModeJobSerial },
+            refineAlive = { u -> token == navToken && cleanUrl(novelWv.url.orEmpty()) == cleanUrl(u) },
+            onRefined = { u -> redrawRefinedOverlay(u) },
             onProgress = { stage, pct ->
                 if (token == navToken && jobSeq == webModeJobSerial) {
                     webModeLastProgressAtMs = android.os.SystemClock.elapsedRealtime()
@@ -7335,6 +7337,7 @@ return t.length>=40?'TXT:'+t:'';
             scanDirection = ScanMode.direction(this).key,
             forceAccurate = true,
             isValid = { prefetchLoading && token == prefetchToken },
+            refineAlive = { _ -> token == prefetchToken },
             onProgress = { stage, pct ->
                 webModePrefetchStage = stage
                 webModePrefetchPct = pct
@@ -9452,6 +9455,57 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
         }
     }
 
+    /** Background bubble-shape refinement finished a batch: redraw the translation with the improved shapes. */
+    private fun redrawRefinedOverlay(url: String) {
+        if (!webModeOn()) return
+        val ch = lastChapter ?: return
+        if (cleanUrl(ch.url) != cleanUrl(url) || cleanUrl(novelWv.url.orEmpty()) != cleanUrl(url)) return
+        if (!shownTranslated) return
+        if (running != null || activePlacementIds.isNotEmpty()) {
+            handler.postDelayed({ redrawRefinedOverlay(url) }, 2000L)
+            return
+        }
+        val layout = WebModeLayoutStore.get(this, url) ?: return
+        val values = layout.bubbles.map { it.translatedText.takeIf { v -> v.isNotBlank() } }
+        if (values.none { it != null }) return
+        val placementId = beginTranslationPlacement()
+        novelWv.evaluateJavascript(
+            WebModeWriter.bubbleScript(layout, values, Prefs.fontFile(this), pageKey(url))
+        ) { finishTranslationPlacement(placementId) }
+    }
+
+    // Whole-chapter scan reply left real dialogue bubbles empty (the chatbot skipped them). The read-ahead path
+    // already retried such bubbles once; the scan path never did, so e.g. 47 of 198 bubbles stayed untranslated.
+    private val scanMissingRetried = HashSet<String>()
+
+    private fun retryMissingScanBubbles(ch: Chapter, layout: WebModeLayout, placed: List<String?>) {
+        val key = cleanUrl(ch.url)
+        if (!scanMissingRetried.add(key)) return
+        val missing = layout.bubbles.filterIndexed { i, b ->
+            placed.getOrNull(i).isNullOrBlank() &&
+                !UiChromeFilter.isChrome(b.sourceText) &&
+                b.sourceText.count { it.isLetter() } >= 3 &&
+                b.translatedText.isBlank()
+        }
+        OcrDiag.log("ALIGN_SCAN_RETRY", "scan reply left ${missing.size} real-text bubbles empty of ${layout.bubbles.size}")
+        if (missing.isEmpty()) return
+        handler.postDelayed({
+            if (lastChapter !== ch || cleanUrl(novelWv.url.orEmpty()) != key) return@postDelayed
+            if (running != null || queue.isNotEmpty() || activePlacementIds.isNotEmpty()) {
+                handler.postDelayed({ scanMissingRetried.remove(key); retryMissingScanBubbles(ch, layout, placed) }, 1500L)
+                return@postDelayed
+            }
+            val full = WebModeLayoutStore.getScan(ch.url) ?: layout
+            val batchLayout = WebModeLayout(0, missing)
+            val chapter = ch.copy(text = missing.joinToString("\n\n") { it.sourceText.trim() }, contentSel = "")
+            // Merge target must stay the full chapter layout; the retry batch only carries the missing bubbles.
+            WebModeLayoutStore.replace(this, ch.url, WebModeLayout.translated(full, placed))
+            WebModeLayoutStore.setScan(chapter.url, batchLayout)
+            registerRealtimeBatch(chapter, emptySet(), batchLayout)
+            handleChapter(chapter, useSavedTranslation = false)
+        }, 800L)
+    }
+
     private fun applyTranslation(ch: Chapter, text: String, retry: Boolean) {
         // Web Mode (image chapters): there is no text node to replace, so show a reader panel instead.
         if (webModeOn() && ch.contentSel.isBlank()) {
@@ -9508,6 +9562,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     hasTr = true
                     shownTranslated = true
                     updatePill()
+                    if (!livePanelBatch && wmLayout != null && wmPlaced != null) retryMissingScanBubbles(ch, wmLayout, wmPlaced)
                 } else {
                     if (livePanelBatch) releaseDeepSeekHashBatch(ch)
                     toast("⚠️ Could not show the translation on this page; it is saved in the library")

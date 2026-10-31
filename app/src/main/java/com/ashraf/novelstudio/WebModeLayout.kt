@@ -154,6 +154,43 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             return prefix + bytes.joinToString("") { "%02x".format(it) }
         }
 
+        /**
+         * Background geometry refinement (the detector runs AFTER the fast text scan). Only the SHAPE data of a bubble is
+         * replaced, and only when the refined pass read the very same text at about the same place. List order, size and
+         * [WmBubble.sourceText]/[WmBubble.translatedText] never change, so a translation that is being aligned by index
+         * stays valid. Returns the new list and how many bubbles were upgraded.
+         */
+        fun refineBubbles(old: List<WmBubble>, src: String, refined: List<WmBubble>): Pair<List<WmBubble>, Int> {
+            if (refined.isEmpty()) return old to 0
+            val want = WebModeLogic.normalizeUrl(src)
+            val used = BooleanArray(refined.size)
+            var n = 0
+            val out = old.map { b ->
+                if (WebModeLogic.normalizeUrl(b.src) != want) return@map b
+                val key = normalizeOcrText(b.sourceText)
+                if (key.isEmpty()) return@map b
+                var best = -1
+                var bestD = 0.12f
+                for (j in refined.indices) {
+                    if (used[j]) continue
+                    val r = refined[j]
+                    if (normalizeOcrText(r.sourceText) != key) continue
+                    val d = Math.hypot((r.cx - b.cx).toDouble(), (r.cy - b.cy).toDouble()).toFloat()
+                    if (d <= bestD) { bestD = d; best = j }
+                }
+                if (best < 0) return@map b
+                used[best] = true
+                n++
+                val r = refined[best]
+                b.copy(
+                    cx = r.cx, cy = r.cy, w = r.w, h = r.h, angle = r.angle, font = r.font,
+                    bg = r.bg, fg = r.fg, fg2 = r.fg2, soft = r.soft, stroke = r.stroke,
+                    tcx = r.tcx, tcy = r.tcy, tbw = r.tbw, tbh = r.tbh, cv = r.cv, free = r.free
+                )
+            }
+            return out to n
+        }
+
         /** Map the current reply to the current scan, then retain the result on the matching bubbles. */
         fun translated(layout: WebModeLayout, values: List<String?>): WebModeLayout =
             WebModeLayout(layout.titleOffset, layout.bubbles.mapIndexed { i, b ->
@@ -535,6 +572,31 @@ internal object WebModeLayoutStore {
         mem[key(url)] = merged
         persist(ctx, url)
         return merged
+    }
+
+    /** The stored bubbles that belong to image [src] of [url] (current shapes, used to clean the picture). */
+    @Synchronized
+    fun bubblesForSrc(ctx: Context, url: String, src: String): List<WmBubble> {
+        val l = mem[key(url)] ?: scans[key(url)] ?: get(ctx, url) ?: return emptyList()
+        val want = WebModeLogic.normalizeUrl(src)
+        return l.bubbles.filter { WebModeLogic.normalizeUrl(it.src) == want && it.sourceText.isNotBlank() }
+    }
+
+    /** Upgrade the shape data of already-scanned bubbles of [src] (see [WebModeLayout.refineBubbles]). */
+    @Synchronized
+    fun refineGeometry(ctx: Context, url: String, src: String, refined: List<WmBubble>): Int {
+        val k = key(url)
+        var changed = 0
+        scans[k]?.let { l ->
+            val (list, n) = WebModeLayout.refineBubbles(l.bubbles, src, refined)
+            if (n > 0) { scans[k] = WebModeLayout(l.titleOffset, list); changed = maxOf(changed, n) }
+        }
+        val m = mem[k] ?: get(ctx, url)
+        if (m != null) {
+            val (list, n) = WebModeLayout.refineBubbles(m.bubbles, src, refined)
+            if (n > 0) { mem[k] = WebModeLayout(m.titleOffset, list); changed = maxOf(changed, n); persist(ctx, url) }
+        }
+        return changed
     }
 
     /** Replace the stored layout for a deliberate whole-page Web Mode translation. */
