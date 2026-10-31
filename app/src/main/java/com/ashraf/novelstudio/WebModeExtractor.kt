@@ -1448,6 +1448,62 @@ internal class WebModeExtractor(
         private val screenSeen = HashSet<String>()
         @Volatile private var forceShots = 0
 
+        /**
+         * Re-captures until two frames 220 ms apart look the same (max 3 extra tries), so a page-turn animation in progress is
+         * not read. Returns the settled bitmap; [first] is recycled when it is replaced.
+         */
+        private fun settleScanFrame(first: Bitmap): Bitmap {
+            var cur = first
+            var curKey = ScanMode.quickKey(cur)
+            for (i in 0 until 3) {
+                try { Thread.sleep(220L) } catch (_: InterruptedException) { return cur }
+                val next = captureView() ?: return cur
+                val nextKey = ScanMode.quickKey(next)
+                if (nextKey == curKey) { next.recycle(); return cur }
+                cur.recycle(); cur = next; curKey = nextKey
+            }
+            return cur
+        }
+
+        /** A real touch (not a synthetic JS event, which canvas readers often ignore) on the page edge that turns forward. */
+        private fun nativeEdgeTap(rtl: Boolean) {
+            val x = wv.width * (if (rtl) 0.1f else 0.9f)
+            val y = wv.height * 0.5f
+            val latch = CountDownLatch(1)
+            handler.post {
+                try {
+                    val t = SystemClock.uptimeMillis()
+                    val down = android.view.MotionEvent.obtain(t, t, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                    wv.dispatchTouchEvent(down); down.recycle()
+                } catch (_: Throwable) {} finally { latch.countDown() }
+            }
+            latch.await(1, TimeUnit.SECONDS)
+            try { Thread.sleep(50L) } catch (_: InterruptedException) { return }
+            val latch2 = CountDownLatch(1)
+            handler.post {
+                try {
+                    val t = SystemClock.uptimeMillis()
+                    val up = android.view.MotionEvent.obtain(t - 50L, t, android.view.MotionEvent.ACTION_UP, x, y, 0)
+                    wv.dispatchTouchEvent(up); up.recycle()
+                } catch (_: Throwable) {} finally { latch2.countDown() }
+            }
+            latch2.await(1, TimeUnit.SECONDS)
+        }
+
+        /** A real arrow key press: left = next page for right-to-left readers, right = next page for left-to-right. */
+        private fun nativeArrowKey(rtl: Boolean) {
+            val code = if (rtl) android.view.KeyEvent.KEYCODE_DPAD_LEFT else android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+            val latch = CountDownLatch(1)
+            handler.post {
+                try {
+                    wv.requestFocus()
+                    wv.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, code))
+                    wv.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, code))
+                } catch (_: Throwable) {} finally { latch.countDown() }
+            }
+            latch.await(1, TimeUnit.SECONDS)
+        }
+
         /** JPEG copy of a page screenshot (quality 97, text edges stay sharp); null when it cannot be encoded. */
         private fun encodeScanShot(bmp: Bitmap): ByteArray? = try {
             val out = java.io.ByteArrayOutputStream(256 * 1024)
@@ -1523,10 +1579,53 @@ internal class WebModeExtractor(
             var stable = 0
             var driftRetries = 0
             var steps = 0
-            // Page-by-page scan: captured pages wait here (JPEG) until the last page is reached; see the capture block below.
-            val shots = ArrayList<ScanShot>()
+            // Page-by-page scan. Reading runs on a small pool WHILE the next pages are still being captured, and several pages
+            // are read at once: the Lens round trip of page N+1 overlaps with the (serial, local) bubble detector of page N.
+            // The detector stays serial on purpose (one model run at a time on the phone); more threads would only hold
+            // more bitmaps in memory without finishing sooner.
+            val shotKeys = ArrayList<Long>()
             var pagesAdvanced = 0
             val scanStartedAt = SystemClock.elapsedRealtime()
+            val readPool: ExecutorService? = if (scanHorizontal) {
+                java.util.concurrent.ThreadPoolExecutor(
+                    SCAN_READ_THREADS, SCAN_READ_THREADS, 20L, TimeUnit.SECONDS,
+                    java.util.concurrent.LinkedBlockingQueue<Runnable>(),
+                    java.util.concurrent.ThreadFactory { r -> Thread(r, "ns-scan-read").apply { isDaemon = true } }
+                )
+                    .also { it.allowCoreThreadTimeOut(true) }
+            } else null
+            val readFutures = ArrayList<java.util.concurrent.Future<*>>()
+            val readDone = AtomicInteger(0)
+            val readError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+            if (scanHorizontal && Prefs.get(wv.context, "ocrEngine", "mlkit") == "lens") {
+                runCatching {
+                    (engine as? RoutingOcrEngine)?.let { it.configure(wv.context); it.prepareForConcurrentLens(script.current) }
+                    LensFailure.resetSession()
+                }
+            }
+            /** Reads ONE captured page (from [bmpIn] or the JPEG) into its own accumulators, then merges them in. */
+            fun readPage(bmpIn: Bitmap?, jpg: ByteArray?, info: JSONObject, pageNo: Int) {
+                val b = bmpIn ?: try { jpg?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } } catch (_: Throwable) { null }
+                if (b == null) { OcrDiag.log("SCAN_PAGE", "page $pageNo could not be decoded; skipped"); return }
+                val local = LinkedHashMap<String, ForceAcc>()
+                try {
+                    forceOcr(b, info, ScriptState(script.current), local, pageNo)
+                } catch (e: OcrUnavailableException) {
+                    readError.compareAndSet(null, e)
+                } catch (e: Throwable) {
+                    // One page that fails to read must not lose the other pages.
+                    OcrDiag.log("SCAN_PAGE", "page $pageNo read failed: ${e.javaClass.simpleName}: ${e.message?.take(100)}")
+                } finally {
+                    try { b.recycle() } catch (_: Throwable) {}
+                }
+                synchronized(accs) { accs.putAll(local) }
+            }
+            /** True once the page is no longer the chapter that was scanned (a tap opened another episode / the home page). */
+            fun chapterLeft(): Boolean {
+                val here = evalWait(wrap("return JSON.stringify({u:location.href});")) { parseJson(it)?.optString("u").orEmpty() }
+                return here.isNotBlank() && startUrl.isNotBlank() &&
+                    WebModeLogic.normalizeUrl(here) != WebModeLogic.normalizeUrl(startUrl)
+            }
             while (true) {
                 if (!alive()) { forceFail(WebModeError.NAVIGATION_INVALIDATED); return }
                 if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; forceFail(WebModeError.TIMEOUT); return }
@@ -1611,27 +1710,31 @@ internal class WebModeExtractor(
                         Log.w(TAG, "JS_FORCE_INFO returned no data; OCRing the visible WebView bitmap directly")
                         JSONObject().put("vw", bmp.width.toFloat()).put("imgs", JSONArray())
                     } else null
-                    if (scanHorizontal) shotKey = ScanMode.quickKey(bmp)
                     if (scanHorizontal) {
-                        // Page-by-page scan = capture ONLY while turning pages. Reading each page right after its capture made the
-                        // phone wait for OCR + detector (about 6 s/page) before it could turn to the next one. The pages are kept
-                        // as JPEG bytes and all read together after the last page, in page order.
+                        // A page-turn animation can still be running when the screenshot is taken. Re-capture until two frames
+                        // 220 ms apart agree, so a half-turned page is never read (it looked like "same page" or garbled text).
+                        bmp = settleScanFrame(bmp)
+                        shotKey = ScanMode.quickKey(bmp)
+                    }
+                    if (scanHorizontal) {
+                        // Reading starts at once on the pool (see readPage) while the next pages are still being captured.
                         val repeatOfPrev = shotKey != 0L && shotKey == lastShotKey
                         if (!repeatOfPrev && steps > 0) pagesAdvanced++
+                        var handedOff = false
                         if (scanInfo != null && !repeatOfPrev) {
+                            val pageNo = steps
                             val jpg = encodeScanShot(bmp)
-                            if (jpg != null) shots.add(ScanShot(steps, jpg, scanInfo))
-                            else {
-                                // Cannot keep it in memory: read it right now rather than lose the page.
-                                forceStepNo = steps
-                                screenSeen.clear()
-                                try { forceOcr(bmp, scanInfo, script, accs) }
-                                catch (e: OcrUnavailableException) {
-                                    forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
-                                }
+                            shotKeys.add(shotKey)
+                            if (jpg != null) {
+                                readFutures.add(readPool!!.submit(Runnable { readPage(null, jpg, scanInfo, pageNo); readDone.incrementAndGet() }))
+                            } else {
+                                // Cannot keep it as JPEG: hand the bitmap itself to the reader (it recycles it).
+                                val handBmp: Bitmap = bmp
+                                handedOff = true
+                                readFutures.add(readPool!!.submit(Runnable { readPage(handBmp, null, scanInfo, pageNo); readDone.incrementAndGet() }))
                             }
                         }
-                        bmp.recycle()
+                        if (!handedOff) bmp.recycle()
                     } else if (scanInfo != null) {
                         try { forceOcr(bmp, scanInfo, script, accs) }
                         catch (e: OcrUnavailableException) {
@@ -1639,20 +1742,31 @@ internal class WebModeExtractor(
                         } finally { bmp.recycle() }
                     } else bmp.recycle()
                 }
-                if (scanHorizontal) progress("Scanning page ${steps + 1} (${shots.size} captured)", 5 + minOf(40, steps * 2))
+                if (scanHorizontal) progress("Scanning page ${steps + 1} (${readDone.get()} read)", 5 + minOf(40, steps * 2))
                 else progress("Reading screen ${steps + 1} (${accs.size} images)", 5 + minOf(90, steps * 3))
                 if (req.visibleOnly) break
                 if (scanHorizontal) {
-                    if (shots.size >= MAX_SCAN_PAGES) { OcrDiag.log("SCAN_PAGE", "page limit $MAX_SCAN_PAGES reached; stopping capture"); break }
+                    if (shotKeys.size >= MAX_SCAN_PAGES) { OcrDiag.log("SCAN_PAGE", "page limit $MAX_SCAN_PAGES reached; stopping capture"); break }
                     // Page-by-page reader: turn the page sideways, then compare screenshots. The same picture three
                     // times in a row = last page reached (the DOM cannot tell us that on a canvas reader).
                     val same = shotKey != 0L && shotKey == lastShotKey
                     lastShotKey = shotKey
                     stable = if (same) stable + 1 else 0
-                    if (stable >= 2) break
-                    val turn = evalWait(wrap(LIB + ScanMode.jsPageTurn(scanDir == ScanDirection.RTL))) { parseJson(it) }
-                    OcrDiag.log("SCAN_PAGE", "dir=${scanDir.key} step=$steps same=$same moved=${turn?.optBoolean("moved", false)} mode=${turn?.optString("mode")}")
-                    try { Thread.sleep(650L) } catch (_: InterruptedException) { return }   // page-turn animation
+                    // Three identical screens in a row = last page. Two plain pages in a row used to end the scan early, and some
+                    // readers ignore the page-turn made of synthetic JS events: when a turn did not change the screen, the next
+                    // attempts use REAL (trusted) input, first a tap on the page edge, then the arrow key.
+                    if (stable >= 3) break
+                    val rtl = scanDir == ScanDirection.RTL
+                    var turnMode = "js"
+                    if (stable >= 1 && chapterLeft()) { OcrDiag.log("SCAN_PAGE", "chapter URL changed while turning; stopping capture"); break }
+                    if (stable == 1) { nativeEdgeTap(rtl); turnMode = "native-tap" }
+                    else if (stable == 2) { nativeArrowKey(rtl); turnMode = "native-key" }
+                    else {
+                        val turn = evalWait(wrap(LIB + ScanMode.jsPageTurn(rtl))) { parseJson(it) }
+                        turnMode = "js:" + turn?.optString("mode") + "/moved=" + turn?.optBoolean("moved", false)
+                    }
+                    OcrDiag.log("SCAN_PAGE", "dir=${scanDir.key} step=$steps same=$same stable=$stable turn=$turnMode")
+                    try { Thread.sleep(800L) } catch (_: InterruptedException) { return }   // page-turn animation
                     steps++
                     continue
                 }
@@ -1662,37 +1776,57 @@ internal class WebModeExtractor(
                 steps++
             }
             if (scanHorizontal) {
-                OcrDiag.log("SCAN_PAGE", "capture done: pages=${shots.size} advanced=$pagesAdvanced ms=${SystemClock.elapsedRealtime() - scanStartedAt}")
+                OcrDiag.log("SCAN_PAGE", "capture done: pages=${shotKeys.size} advanced=$pagesAdvanced ms=${SystemClock.elapsedRealtime() - scanStartedAt}")
                 // 1) Put the reader back on the page it was on when the scan started (the webtoon scan already does this with
                 //    JS_RESTORE). The scan used to leave the user on the LAST page. One turn back per turn that really moved.
+                // Counting turns alone is not safe: one over-counted turn made the reader tap "previous" ON the first page,
+                // which opened the previous episode / the home page and lost the whole scan result. So every step first looks
+                // at the screen: stop as soon as it shows the first captured page again, and never turn once the page URL
+                // is no longer the chapter that was scanned.
                 val back = pagesAdvanced.coerceIn(0, MAX_SCAN_PAGES + 20)
-                for (k in 0 until back) {
-                    if (!alive()) break
-                    progress("Returning to your page ${k + 1}/$back", 46)
+                val firstKey = shotKeys.firstOrNull() ?: 0L
+                // A first-page fingerprint shared with another page (e.g. two plain pages) cannot prove "I am home":
+                // then it only counts near the end of the expected turns.
+                val firstKeyUnique = firstKey != 0L && shotKeys.count { it == firstKey } == 1
+                var returned = 0
+                var stopReason = "count"
+                while (returned < back) {
+                    if (!alive()) { stopReason = "dead"; break }
+                    val here = evalWait(wrap("return JSON.stringify({u:location.href});")) { parseJson(it)?.optString("u").orEmpty() }.orEmpty()
+                    if (here.isNotBlank() && startUrl.isNotBlank() && WebModeLogic.normalizeUrl(here) != WebModeLogic.normalizeUrl(startUrl)) {
+                        stopReason = "url-changed"; break
+                    }
+                    if (firstKey != 0L && returned > 0 && (firstKeyUnique || returned >= back - 3)) {
+                        val look = captureView()
+                        val nowKey = try { if (look != null) ScanMode.quickKey(look) else 0L } finally { try { look?.recycle() } catch (_: Throwable) {} }
+                        if (nowKey != 0L && nowKey == firstKey) { stopReason = "first-page"; break }
+                    }
+                    progress("Returning to your page ${returned + 1}/$back", 46)
                     evalWait(wrap(LIB + ScanMode.jsPageTurn(scanDir != ScanDirection.RTL))) { null }
+                    returned++
                     try { Thread.sleep(450L) } catch (_: InterruptedException) { return }
                 }
-                if (back > 0) OcrDiag.log("SCAN_PAGE", "returned $back pages to the starting page")
+                OcrDiag.log("SCAN_PAGE", "returned $returned of $back pages to the starting page (stop=$stopReason)")
                 evalWait(wrap(LIB + JS_RESTORE)) { null }
                 if (!req.visibleOnly) evalWait(wrap(JS_FORCE_SHOW)) { null }
                 if (!alive()) { fail(WebModeError.NAVIGATION_INVALIDATED); return }
-                // 2) Read all captured pages in page order. Every page has its own accumulator (see forceOcr), so one page's
-                //    lettering can no longer end up on another page.
-                val totalShots = shots.size
-                for ((n, shot) in shots.withIndex()) {
-                    if (!alive()) { fail(WebModeError.NAVIGATION_INVALIDATED); return }
-                    if (elapsed() > JOB_MAX_MS) { diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
-                    progress("Reading page ${n + 1}/$totalShots", 46 + (n * 52) / totalShots.coerceAtLeast(1))
-                    val pageBmp = try { BitmapFactory.decodeByteArray(shot.jpg, 0, shot.jpg.size) } catch (_: Throwable) { null }
-                    if (pageBmp == null) { OcrDiag.log("SCAN_PAGE", "page ${shot.index} could not be decoded again; skipped"); continue }
-                    forceStepNo = shot.index
-                    screenSeen.clear()
-                    try { forceOcr(pageBmp, shot.info, script, accs) }
-                    catch (e: OcrUnavailableException) {
-                        forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
-                    } finally { try { pageBmp.recycle() } catch (_: Throwable) {} }
+                // 2) Wait for the pages still being read (reading began during capture; it usually only has the tail left).
+                //    Every page has its own accumulator (see forceOcr), so one page's lettering can no longer land on another page.
+                val totalPages = readFutures.size
+                for ((n, f) in readFutures.withIndex()) {
+                    if (!alive()) { readPool?.shutdownNow(); fail(WebModeError.NAVIGATION_INVALIDATED); return }
+                    val left = JOB_MAX_MS - elapsed()
+                    if (left <= 0L) { readPool?.shutdownNow(); diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
+                    progress("Reading page ${n + 1}/$totalPages", 46 + (n * 52) / totalPages.coerceAtLeast(1))
+                    try { f.get(left, TimeUnit.MILLISECONDS) }
+                    catch (e: java.util.concurrent.TimeoutException) { readPool?.shutdownNow(); diag.timedOut = true; fail(WebModeError.TIMEOUT); return }
+                    catch (_: InterruptedException) { readPool?.shutdownNow(); return }
+                    catch (_: Exception) { /* readPage already logged this page's failure */ }
                 }
-                shots.clear()
+                readPool?.shutdown()
+                readError.get()?.let { e ->
+                    forceFail(WebModeError.OCR_MODEL_UNAVAILABLE, e.message ?: WebModeError.OCR_MODEL_UNAVAILABLE.label); return
+                }
             } else {
                 evalWait(wrap(LIB + JS_RESTORE)) { null }
                 if (!req.visibleOnly) evalWait(wrap(JS_FORCE_SHOW)) { null }
@@ -1731,7 +1865,7 @@ internal class WebModeExtractor(
         }
 
         /** OCR the on-screen part of every loaded image in one screenshot of the WebView. */
-        private fun forceOcr(bmp: Bitmap, info: JSONObject, st: ScriptState, accs: MutableMap<String, ForceAcc>) {
+        private fun forceOcr(bmp: Bitmap, info: JSONObject, st: ScriptState, accs: MutableMap<String, ForceAcc>, pageNo: Int = forceStepNo) {
             data class PendingCrop(
                 val bitmap: Bitmap,
                 val src: String,
@@ -1780,7 +1914,7 @@ internal class WebModeExtractor(
                         (bandPx == 0 || ((it.top + it.h).toInt() > upper && it.top < lower)) }
                     .sortedWith(compareBy<OcrBlock>({ it.top }, { it.left }))
                 val letters = blocks.sumOf { block -> block.text.count { ch -> ch.isLetterOrDigit() } }
-                OcrDiag.log("SCREEN_OCR", "step=$forceStepNo ${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0} " +
+                OcrDiag.log("SCREEN_OCR", "step=$pageNo ${bmp.width}x${bmp.height} ms=${SystemClock.elapsedRealtime() - t0} " +
                     "rawBlocks=${result.blocks.size} afterNoiseFilter=${blocks.size} letters=$letters " +
                     "droppedAsNoise=[${result.blocks.filter { noisy(it) }.take(3).joinToString(" / ") { OcrDiag.snip(it.text, 14) }}] " +
                     "first=[${OcrDiag.snip(blocks.firstOrNull()?.text)}]")
@@ -1803,13 +1937,14 @@ internal class WebModeExtractor(
                     screenModeOn = true
                     // A page-by-page scan reads each page once from its own screenshot, so a short line repeated on a later
                     // page ("...", an SFX, "Yes.") is real text, not overlap: only scrolling scans de-duplicate across screens.
-                    if (scanHorizontal) screenSeen.clear()
-                    val fresh = texts.filter { t -> screenSeen.add(t.filter { ch -> ch.isLetterOrDigit() }) }
+                    // Page scan: pages are read on several threads, so each page gets its own (empty) seen-set.
+                    val seenSet = if (scanHorizontal) HashSet<String>() else screenSeen
+                    val fresh = texts.filter { t -> seenSet.add(t.filter { ch -> ch.isLetterOrDigit() }) }
                     if (fresh.isNotEmpty()) {
                         val acc = ForceAcc()
-                        acc.top = forceStepNo * (if (scanHorizontal) 100_000 else 10_000)
+                        acc.top = pageNo * (if (scanHorizontal) 100_000 else 10_000)
                         acc.texts.addAll(fresh)
-                        accs[SCREEN_OCR_SOURCE + "#" + forceStepNo] = acc
+                        accs[SCREEN_OCR_SOURCE + "#" + pageNo] = acc
                     }
                 }
                 Log.i(TAG, "SCREEN_OCR_FALLBACK_OK size=${bmp.width}x${bmp.height} blocks=${blocks.size} letters=$letters route=${Prefs.get(wv.context, "ocrEngine", "mlkit")}")
@@ -1852,9 +1987,9 @@ internal class WebModeExtractor(
                 // "ns-canvas:left,top,WxH" is IDENTICAL on every page. Keyed by it, page 1 and page 2 shared one accumulator
                 // and their lines were mixed or dropped. Each captured page gets its own accumulator and its own sort slot
                 // (page index * 100000 + offset), so text always stays on the page it was read from and in reading order.
-                val accKey = if (scanHorizontal) "$src#p$forceStepNo" else src
+                val accKey = if (scanHorizontal) "$src#p$pageNo" else src
                 val acc = accs.getOrPut(accKey) { ForceAcc() }
-                acc.top = (if (scanHorizontal) forceStepNo * 100_000 else 0) + p.optInt("t")
+                acc.top = (if (scanHorizontal) pageNo * 100_000 else 0) + p.optInt("t")
                 if (isCanvasPage) canvasCrops++
                 pending.add(
                     PendingCrop(
@@ -1958,7 +2093,7 @@ internal class WebModeExtractor(
             // If none of those crops yielded text, give the full viewport one fast OCR pass.
             val noNewText = accs.values.sumOf { it.texts.size } == textBefore
             val noTextAtAll = accs.values.none { acc -> acc.texts.any { it.isNotBlank() } }
-            OcrDiag.log("CROP_OCR", "step=$forceStepNo crops=${pending.size} newText=${!noNewText} textAnywhere=${!noTextAtAll} screenMode=$screenModeOn")
+            OcrDiag.log("CROP_OCR", "step=$pageNo crops=${pending.size} newText=${!noNewText} textAnywhere=${!noTextAtAll} screenMode=$screenModeOn")
             // A canvas page WAS cropped (the real page the user reads) but has no text (picture-only page):
             // reading the whole screen now would only return header / banner / app-UI noise as "chapter text".
             if (canvasCrops > 0 && noNewText) {
@@ -3056,8 +3191,6 @@ internal class WebModeExtractor(
     private class BubbleLine(var cy: Float, var text: String)
     private class DecodeException : Exception()
     private class ForceAcc { var top = 0; val texts = ArrayList<String>(); val bubbles = ArrayList<WmBubble>() }
-    /** One captured page of a page-by-page scan: its index, the screenshot (JPEG) and the DOM crop info measured with it. */
-    private class ScanShot(val index: Int, val jpg: ByteArray, val info: JSONObject)
     private class PanelOcr(val text: String, val bubbles: List<WmBubble>)
     private class LensPanelOcrAttempt(val panel: PanelOcr?, val error: Throwable?)
     private class PageMeta(val url: String, val lang: String, val title: String, val novel: String, val next: String?, val prev: String?)
@@ -3071,6 +3204,8 @@ internal class WebModeExtractor(
         private const val MAX_TICKS = 400
         /** Captured pages are held as JPEG (about 150-250 KB each) until the scan reaches the last page. */
         private const val MAX_SCAN_PAGES = 150
+        /** Pages read at the same time during a page scan: enough to keep the serial detector busy while others wait on Lens. */
+        private const val SCAN_READ_THREADS = 3
         private const val MAX_BYTES = 25 * 1024 * 1024
         private const val FETCH_THREADS = 4
         private const val FETCH_AHEAD = 4
