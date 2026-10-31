@@ -9,13 +9,11 @@ internal object WebModeLogic {
 
     fun normalizeUrl(u: String): String = u.substringBefore('#').trim()
 
-    /** Remove duplicate image URLs and order panels by their position in the page. */
+    /** Remove duplicate panel elements at the same geometry and order them by document position. */
     fun dedupeAndOrder(refs: List<PanelRef>): List<PanelRef> {
-        val ordered = refs.distinctBy { normalizeUrl(it.src) }
-            .sortedWith(compareBy<PanelRef>({ it.top }, { it.left }))
-        // Lazy-loading pages keep a clone of the same picture at exactly the same position (the URL differs only in its
-        // query string). The clone was downloaded and OCR-ed again, and its failed download sent the whole job to the
-        // 17-20 s screen-capture fallback.
+        // Do not dedupe by URL alone: virtualized readers can reuse the same image URL at several
+        // document offsets, and those offsets represent different panels / canvas generations.
+        val ordered = refs.sortedWith(compareBy<PanelRef>({ it.top }, { it.left }))
         val out = ArrayList<PanelRef>(ordered.size)
         for (r in ordered) {
             val twin = out.any { o ->
@@ -44,18 +42,24 @@ internal object WebModeLogic {
         val dominantHost = byHost.maxByOrNull { (_, v) -> v.sumOf { it.w.toLong() * it.h } }?.key ?: return refs
         val dom = byHost[dominantHost].orEmpty()
         if (dominantHost.isEmpty() || dom.isEmpty()) return refs
-        val areas = dom.map { it.w.toLong() * it.h }.sorted()
+        // Build the reference statistics from actual panel-sized images only. A short strip/banner
+        // can be a legitimate page image from the dominant CDN, but must not lower min-height enough
+        // to make a square comment avatar from another host look like a comic panel.
+        val panelEvidence = dom.filter { it.w >= 120 && it.h >= 100 }
+        val evidence = panelEvidence.ifEmpty { dom }
+        val areas = evidence.map { it.w.toLong() * it.h }.sorted()
         val medianDom = areas[areas.size / 2]
         if (medianDom <= 0L) return refs
-        val domWidth = dom.maxOf { it.w }
+        val domWidth = evidence.maxOf { it.w }
+        val minPanelHeight = evidence.minOf { it.h }
         return refs.filter { r ->
             if (hostOfUrl(r.src) == dominantHost) return@filter true
             val area = r.w.toLong() * r.h
             val tiny = r.w < 120 || r.h < 100
             val smallerThanPanels = area < medianDom * 0.6
             val narrowerThanPanels = r.w < domWidth * 0.9
-            // keep it when it is as big as a panel (a chapter that really mixes CDNs)
-            !(tiny || (smallerThanPanels && (narrowerThanPanels || r.h < 0.5 * dom.minOf { it.h })) || r.h < r.w * 0.3)
+            // Keep similarly sized panels from mixed CDNs; drop small square avatars and promo furniture.
+            !(tiny || (smallerThanPanels && (narrowerThanPanels || r.h < 0.5 * minPanelHeight)) || r.h < r.w * 0.3)
         }
     }
 

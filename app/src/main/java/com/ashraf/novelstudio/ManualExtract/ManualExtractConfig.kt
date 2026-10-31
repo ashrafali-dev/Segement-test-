@@ -33,11 +33,14 @@ internal object ManualExtractConfig {
 
     // ---- timing caps (ms) ----------------------------------------------------------------------
     const val TOTAL_CAP_MS = 4000L
-    const val OCR_CAP_MS = 1500L
+    // A manual crop is explicitly selected by the user: allow slow Lens responses instead of timing out at 1.5 s.
+    const val OCR_CAP_MS = 30_000L
     const val TRANSLATE_CAP_MS = 2200L
 
     // ---- caches --------------------------------------------------------------------------------
-    /** Bounded LRU of translations keyed by (crop hash + script). */
+    /** Manual extraction must reflect the current selected crop; don't reuse a potentially stale translation. */
+    const val USE_TRANSLATION_CACHE = false
+    /** Bounded cache capacity retained for controlled experiments; bypassed while USE_TRANSLATION_CACHE is false. */
     const val TRANSLATION_CACHE_ENTRIES = 64
 
     /** Log tag for every per-step timing line. */

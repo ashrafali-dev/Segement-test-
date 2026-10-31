@@ -1125,7 +1125,9 @@ class MainActivity : Activity() {
         val pageUrl: String,
         val layout: WebModeLayout,
         val top: Int = 0,
-        val attempts: Int = 0
+        val attempts: Int = 0,
+        /** Canvas generation captured when this batch was queued, so old replies cannot populate a recycled page. */
+        val canvasVersions: Map<String, Long> = emptyMap()
     )
 
     /** Visible panels are accumulated so slow/unavailable read-ahead does not force one-bubble requests. */
@@ -1161,6 +1163,12 @@ class MainActivity : Activity() {
     private val rtAheadTranslationCache = object : LinkedHashMap<String, String>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 1800
     }
+    // Slots confirmed to contain Japanese glyphs in a synthetic canvas OCR result. This is page-local
+    // and bounded; only these slots use spatial cache identity instead of the general text-only cache.
+    private val rtJapaneseCanvasSources = linkedSetOf<String>()
+    // After one targeted retry, keep empty/noise replies out of automatic read-ahead until navigation.
+    // This is separate from translation cache state and is not consulted by the visible/manual selection path.
+    private val rtAheadSkippedBubbleHashes = LinkedHashMap<String, String>()
 
     // The ahead translator uses its own invisible WebView so it never overwrites the visible chat
     // conversation or blocks the foreground panel's send/poll callbacks.
@@ -1181,11 +1189,36 @@ class MainActivity : Activity() {
     // the first usable panel arrives. Panels completed during that window are batched together.
     // Lens gets a short collection window so its completed OCR does not inherit ML Kit batch latency.
     private val REALTIME_AHEAD_COLLECT_FLUSH_MS: Long get() = if (lensRealtimeFastPath()) 450L else longArrayOf(2000L, 3500L, 6000L, 9000L)[rtBatchLevel()]
+    private var lastAheadBudgetLogAtMs = 0L
 
     private fun startAheadOcr() {
         if (rtPausedForReOcr || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
-        val n = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
+        val configuredN = (Prefs.get(this, "rtAheadOcr", "3").toIntOrNull() ?: 3).coerceIn(0, 12)
+        val runtime = Runtime.getRuntime()
+        val maxHeapMb = runtime.maxMemory() / 1_048_576L
+        val freeHeapMb = (runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())) / 1_048_576L
+        val am = getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val memoryInfo = android.app.ActivityManager.MemoryInfo()
+        try { am?.getMemoryInfo(memoryInfo) } catch (_: Throwable) {}
+        // Keep look-ahead deliberately small on low-heap phones: one whole panel is enough to overlap remote
+        // Lens/chat latency, while a 3-panel read-ahead wave can retain several decoded images and OCR layouts.
+        // If the heap/system is already pressured, skip speculative work entirely and protect the visible panel.
+        val n = when {
+            configuredN == 0 -> 0
+            memoryInfo.lowMemory || freeHeapMb < 72L -> 0
+            maxHeapMb <= 192L -> minOf(configuredN, 1)
+            maxHeapMb <= 256L -> minOf(configuredN, 2)
+            else -> configuredN
+        }
         deepSeekAheadAtMs = System.currentTimeMillis()
+        if (n != configuredN && System.currentTimeMillis() - lastAheadBudgetLogAtMs >= 5_000L) {
+            lastAheadBudgetLogAtMs = System.currentTimeMillis()
+            OcrDiag.log(
+                "AHEAD_BUDGET",
+                "configured=" + configuredN + " effective=" + n + " maxHeapMB=" + maxHeapMb +
+                    " freeHeapMB=" + freeHeapMb + " systemLowMemory=" + memoryInfo.lowMemory
+            )
+        }
         if (n == 0) return
         val token = navToken
         val seq = ++aheadOcrSeq
@@ -1234,7 +1267,10 @@ class MainActivity : Activity() {
                     // Clear stale visible text immediately, even while the chatbot is busy.
                     clearCanvasTransitionOverlay(novelWv.url.orEmpty())
                     for (panel in panels) {
-                        val key = WebModeLogic.normalizeUrl(panel.src)
+                        val source = WebModeLogic.normalizeUrl(panel.src)
+                        // The same URL can appear at multiple document offsets on virtualized readers.
+                        // Match WebModeExtractor's ahead-cache key (URL + top), so one panel cannot hide another.
+                        val key = if (source.isBlank()) "" else "$source@${panel.top}"
                         if (key.isNotBlank()) collectedPanels.putIfAbsent(key, panel)
                     }
                     // Full batches go immediately; a smaller batch gets only one 300 ms chance
@@ -1337,8 +1373,23 @@ class MainActivity : Activity() {
         // (bounded, so real-time never waits long). This is what keeps three bubbles in ONE request.
         val heldFor = android.os.SystemClock.elapsedRealtime() - rtVisibleOcrFirstAtMs
         val ocrStillReading = webModeHandle != null && heldFor < rtVisibleOcrMaxHoldMs
-        // Scan geometry and lastChapter are shared across page writes. Wait for the visible
-        // chatbot job queue and any async overlay insertion to finish before replacing either.
+        // The visible viewport always wins over speculative read-ahead. If its OCR is ready while a
+        // hidden-WebView ahead request is still generating, stop that request and requeue it; otherwise
+        // the current panel can sit waiting for the entire background answer despite being higher priority.
+        if (rtAheadWorkerBusy) {
+            val preemptAt = System.currentTimeMillis()
+            val previousWaitMs = (nextChatbotRequestAtMs - preemptAt).coerceAtLeast(0L)
+            // The hidden request's cooldown was reserved before it was actually finished. Let the urgent visible
+            // request take the next slot, but retain rtAheadNextSendAtMs so background work cannot immediately restart.
+            nextChatbotRequestAtMs = minOf(nextChatbotRequestAtMs, preemptAt + 100L)
+            OcrDiag.log(
+                "REALTIME",
+                "visible batch preempts read-ahead; bubbles=${pending.bubbles.size} cooldownReducedMs=${(previousWaitMs - 100L).coerceAtLeast(0L)}"
+            )
+            cancelRealtimeAheadWorker(requeue = true)
+        }
+        // Scan geometry and lastChapter are shared across page writes. Wait for ordinary foreground
+        // jobs and any async overlay insertion to finish before replacing either.
         if (ocrStillReading || running != null || queue.isNotEmpty() || activePlacementIds.isNotEmpty()) {
             rtVisibleOcrFlush?.let { handler.removeCallbacks(it) }
             val seq = ++rtVisibleOcrBatchSeq
@@ -1395,23 +1446,71 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun rtAheadTaskId(pageUrl: String, layout: WebModeLayout): String {
-        val material = WebModeLogic.normalizeUrl(pageUrl) + "|" +
+    private fun rtAheadTaskId(
+        pageUrl: String,
+        layout: WebModeLayout,
+        canvasVersions: Map<String, Long> = WebModeLayoutStore.canvasCacheVersions(pageUrl, layout)
+    ): String {
+        // A recycled canvas can show identical text in identical geometry on the next manga page.
+        // Include the captured generation so the next page does not collide with the prior queued/suppressed task.
+        val versions = canvasVersions.toSortedMap().entries.joinToString("|") { "${it.key}=${it.value}" }
+        val material = WebModeLogic.normalizeUrl(pageUrl) + "|" + versions + "|" +
             layout.bubbles.map { WebModeLayout.fingerprint(it) }.sorted().joinToString("|")
         return java.security.MessageDigest.getInstance("SHA-256")
             .digest(material.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }.take(24)
     }
 
-    /** Stable cross-quality identity: OCR models can shift bubble geometry by a few pixels. */
-    // The cache key is the bubble's TEXT only. Image URLs change between visits (signed/tokenised CDN
-    // links, different image hosts) and OCR box positions shift slightly between fast/detailed passes,
-    // so either of them used to cause cache misses for a bubble that was already translated.
-    // Punctuation/spacing are ignored so tiny OCR differences still hit the cache.
+    /** Japanese canvas slots use a spatial ID; other pages keep the existing cross-quality text cache. */
+    private fun containsJapaneseKana(text: String): Boolean =
+        text.any { it.code in 0x3040..0x30FF }
+
+    /** Only synthetic canvas slots and short-lived blob-backed panels get Japanese spatial cache keys. */
+    private fun rtJapaneseCanvasSourceKey(src: String): String? {
+        val normalized = WebModeLogic.normalizeUrl(src)
+        val slot = WebModeLayoutStore.canvasSourceSlot(normalized)
+        if (slot != null) return "canvas:$slot"
+        if (normalized.startsWith("blob:", ignoreCase = true)) return "blob:$normalized"
+        return null
+    }
+
+    private fun rememberJapaneseCanvasSources(panels: List<WebModeAheadPanel>) {
+        // Detect Japanese once for the visible/read-ahead window, then mark every canvas/blob panel in that
+        // window. Some dialogue bubbles contain only kanji and would otherwise accidentally fall back to a
+        // text-only global cache even though they belong to the same Japanese manga page.
+        val pageHasJapaneseKana = panels.any { panel ->
+            panel.bubbles.any {
+                rtJapaneseCanvasSourceKey(it.src) != null && containsJapaneseKana(it.sourceText)
+            }
+        }
+        if (pageHasJapaneseKana) {
+            panels.asSequence().flatMap { it.bubbles.asSequence() }
+                .mapNotNull { rtJapaneseCanvasSourceKey(it.src) }
+                .forEach { rtJapaneseCanvasSources.add(it) }
+        }
+        while (rtJapaneseCanvasSources.size > 64) {
+            rtJapaneseCanvasSources.remove(rtJapaneseCanvasSources.first())
+        }
+    }
+
     private fun rtAheadBubbleCacheKey(bubble: WmBubble): String {
         val text = WebModeLayout.normalizeOcrText(bubble.sourceText)
+        val sourceKey = rtJapaneseCanvasSourceKey(bubble.src)
+        if (sourceKey != null && sourceKey in rtJapaneseCanvasSources) {
+            WebModeLayout.canvasBubbleCacheIdentity(bubble)?.let { return it }
+        }
         val letters = text.filter { it.isLetterOrDigit() }
         return if (letters.isNotEmpty()) letters else text
+    }
+
+    private fun rememberSkippedAheadBubbles(bubbles: List<WmBubble>) {
+        bubbles.forEach {
+            rtAheadSkippedBubbleHashes[WebModeLayout.fingerprint(it)] = WebModeLogic.normalizeUrl(it.src)
+        }
+        while (rtAheadSkippedBubbleHashes.size > 600) {
+            val iterator = rtAheadSkippedBubbleHashes.entries.iterator()
+            if (iterator.hasNext()) { iterator.next(); iterator.remove() } else break
+        }
     }
 
     /**
@@ -1500,9 +1599,14 @@ class MainActivity : Activity() {
         refreshRtScroll()
         if (!DeepSeekRealtimeTranslation.isEnabled(this) || !webModeOn() || !Prefs.auto(this) || !Prefs.bool(this, "rtAutoOcrEnabled", true)) return
         val page = cleanUrl(pageUrl)
-        if (page != rtAheadHoldPage) { rtAheadHold.clear(); rtAheadHoldPage = page }
+        if (page != rtAheadHoldPage) {
+            rtAheadHold.clear()
+            rtAheadHoldPage = page
+            rtJapaneseCanvasSources.clear()
+        }
         if (page.isBlank() || page != cleanUrl(novelWv.url.orEmpty()) ||
             (panels.isEmpty() && rtAheadHold.isEmpty())) return
+        rememberJapaneseCanvasSources(panels)
 
         // Do not queue a bubble that is already cached, already queued, being translated, or
         // already completed. This also prevents overlapping read-ahead windows from resending
@@ -1534,7 +1638,7 @@ class MainActivity : Activity() {
                     fp in deepSeekInFlightTextHashes || fp in deepSeekTranslatedTextHashes
                 }
                 if (cacheKey in rtAheadTranslationCache ||
-                    cacheKey in pendingBubbleKeys || isTextReserved) continue
+                    cacheKey in pendingBubbleKeys || fp in rtAheadSkippedBubbleHashes || isTextReserved) continue
                 batch.add(bubble)
                 batchTop.add(panel.top)
                 pendingBubbleKeys.add(cacheKey)
@@ -1558,7 +1662,8 @@ class MainActivity : Activity() {
                 val rb = ArrayList<WmBubble>(); val rt = ArrayList<Int>()
                 for ((b, t) in reclaimed) {
                     val k = rtAheadBubbleCacheKey(b)
-                    if (k in rtAheadTranslationCache || !have.add(k)) continue
+                    val fp = WebModeLayout.fingerprint(b)
+                    if (k in rtAheadTranslationCache || fp in rtAheadSkippedBubbleHashes || !have.add(k)) continue
                     rb.add(b); rt.add(t)
                 }
                 batch.addAll(0, rb)
@@ -1574,7 +1679,8 @@ class MainActivity : Activity() {
             val heldTops = ArrayList<Int>()
             for ((hb, ht) in rtAheadHold) {
                 val k = rtAheadBubbleCacheKey(hb)
-                if (k in rtAheadTranslationCache || k in have) continue
+                val fp = WebModeLayout.fingerprint(hb)
+                if (k in rtAheadTranslationCache || fp in rtAheadSkippedBubbleHashes || k in have) continue
                 val queued = rtAheadTranslationQueue.any { t -> t.layout.bubbles.any { rtAheadBubbleCacheKey(it) == k } } ||
                     rtAheadTranslationTasksByJobKey.values.any { t -> t.layout.bubbles.any { rtAheadBubbleCacheKey(it) == k } }
                 if (queued) continue
@@ -1587,17 +1693,36 @@ class MainActivity : Activity() {
         }
         if (batch.isEmpty()) return
 
-        // Prefer one complete request for the whole ahead window. A 10-panel comic usually fits in
-        // one 30-bubble request; only unusually dialogue-heavy windows are split into bounded chunks.
-        val chunkSize = (Prefs.get(this, "rtAheadBatch", "40").toIntOrNull() ?: 40).coerceIn(15, 40)
-        val chunks = ArrayList<MutableList<Int>>()
-        var i = 0
-        while (i < batch.size) {
-            chunks.add((i until minOf(i + chunkSize, batch.size)).toMutableList())
-            i += chunkSize
+        // Translate a small local window ahead, not 30-40 bubbles at once. Long responses arrive too late to be
+        // useful before scrolling reaches them. Keep a panel intact so a sentence/dialogue and its pronoun references
+        // are not split across chatbot requests; combine adjacent panels only while the batch stays under the cap.
+        val chunkSize = (Prefs.get(this, "rtAheadBatch", "10").toIntOrNull() ?: 10).coerceIn(8, 12)
+        val panelGroups = LinkedHashMap<String, MutableList<Int>>()
+        for (index in batch.indices) {
+            val panelKey = WebModeLogic.normalizeUrl(batch[index].src) + "@" + batchTop[index]
+            panelGroups.getOrPut(panelKey) { ArrayList() }.add(index)
         }
+        val chunks = ArrayList<MutableList<Int>>()
+        var currentChunk = ArrayList<Int>()
+        for (group in panelGroups.values) {
+            if (currentChunk.isNotEmpty() && currentChunk.size + group.size > chunkSize) {
+                chunks.add(currentChunk)
+                currentChunk = ArrayList()
+            }
+            currentChunk.addAll(group)
+            if (currentChunk.size >= chunkSize) {
+                chunks.add(currentChunk)
+                currentChunk = ArrayList()
+            }
+        }
+        if (currentChunk.isNotEmpty()) chunks.add(currentChunk)
         // One WmBubble = one translation unit; OCR line grouping (BubbleGrouping) decides how many there are.
-        Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} requests=${chunks.size} chunkSize=$chunkSize")
+        OcrDiag.log(
+            "AHEAD_QUEUE",
+            "bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize sizes=" +
+                chunks.joinToString(",") { it.size.toString() }
+        )
+        Log.i("NovelStudioOCR", "translationQueue bubbles=${batch.size} panels=${panelGroups.size} requests=${chunks.size} cap=$chunkSize")
         val minChunk = minOf(4, chunkSize)
         if (chunks.isNotEmpty() && chunks.last().size < minChunk) {
             if (!force) {
@@ -1627,12 +1752,25 @@ class MainActivity : Activity() {
         }
         for (chunk in chunks) {
             val layout = WebModeLayout(0, chunk.map { batch[it] })
-            val id = rtAheadTaskId(page, layout)
+            val isJapaneseCanvasTask = layout.bubbles.any { bubble ->
+                rtJapaneseCanvasSourceKey(bubble.src)?.let { it in rtJapaneseCanvasSources } == true
+            }
+            // The additional source/generation routing is deliberately limited to Japanese canvas/blob panels.
+            // Other canvas sites continue using their existing cache/placement behavior.
+            val canvasVersions = if (isJapaneseCanvasTask)
+                WebModeLayoutStore.canvasCacheVersions(page, layout) else emptyMap()
+            val id = rtAheadTaskId(page, layout, canvasVersions)
             if (id in rtAheadTranslationQueuedIds || id in rtAheadTranslationSuppressedIds ||
                 rtAheadTranslationTasksByJobKey.values.any { it.id == id }) continue
             rtAheadTranslationQueuedIds.add(id)
             rtAheadTranslationQueue.add(
-                RtAheadTranslationTask(id, page, layout, chunk.minOf { batchTop[it] })
+                RtAheadTranslationTask(
+                    id = id,
+                    pageUrl = page,
+                    layout = layout,
+                    top = chunk.minOf { batchTop[it] },
+                    canvasVersions = canvasVersions
+                )
             )
         }
         if (rtAheadHold.isEmpty()) {
@@ -1782,17 +1920,21 @@ Every marker is one piece of text read from a comic image: speech, narration, a 
 ${Langs.sfxRule(this)}
 markers' text under one marker.
 A marker normally holds a WHOLE speech bubble (all its lines already joined): translate all of it,
-every word, and drop nothing. Only when a sentence clearly continues across consecutive markers
-(for example "...THE" / "HERO'S LIFE..."), read them together and translate each marker as only the
-part it carries.
+every word, and drop nothing. When a sentence clearly continues across consecutive markers
+(for example "...THE" / "HERO'S LIFE..."), read the nearby markers together, then translate each marker
+with only the part that belongs to that bubble.
+Use surrounding dialogue as context to resolve pronouns, omitted subjects, speaker/addressee, tone and
+sentence continuations. Keep pronoun references consistent with the scene when the evidence supports it;
+if gender or identity is genuinely unclear, prefer natural neutral wording instead of guessing.
+Context is for understanding, not for copying: never insert another bubble's words or facts into this
+bubble's translation, and never invent dialogue that OCR did not read.
 Website names, URLs, chatbot controls, app UI labels, and scan-group watermarks are not dialogue:
 keep their marker but leave the text after it empty.
 If a marker is meaningless OCR noise (random letters or symbols), keep the marker and leave its text empty.
 Never use "~", "-", or another placeholder to represent unreadable or non-dialogue text.
-Do not invent text. Keep each translation short enough to fit a speech bubble.
-Translate ONLY the words that are written under each marker. Never add names, sentences or meaning from the
-story, from other markers or from your own guess; a one-word marker (a shout, a sound effect, a title) gets a
-one-word translation. Each marker must stay faithful to its own ${Langs.source(this)} text, word for word in meaning.
+Keep each translation concise enough to fit a speech bubble, but do not force a one-word translation when
+the target language needs a subject or pronoun for natural, accurate meaning.
+Each marker must remain faithful to its own ${Langs.source(this)} text in meaning.
 """.trimIndent()
         // This is a separate chatbot page with no prior prompt in its conversation, so always include
         // the full active translation prompt, even if the visible-chat option normally sends it once.
@@ -1850,6 +1992,11 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 rtAheadTranslationSuppressedIds.add(queued.id)
                 continue
             }
+            if (!WebModeLayoutStore.canvasVersionsStillCurrent(queued.canvasVersions)) {
+                rtAheadTranslationSuppressedIds.add(queued.id)
+                OcrDiag.log("CANVAS_STALE", "dropped queued read-ahead task after canvas generation changed")
+                continue
+            }
             val remaining = queued.layout.bubbles.filter { bubble ->
                 val fp = WebModeLayout.fingerprint(bubble)
                 !rtAheadTranslationCache.containsKey(rtAheadBubbleCacheKey(bubble)) &&
@@ -1873,7 +2020,7 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
                 continue
             }
             val layout = WebModeLayout(0, remaining)
-            val baseId = rtAheadTaskId(queued.pageUrl, layout)
+            val baseId = rtAheadTaskId(queued.pageUrl, layout, queued.canvasVersions)
             val id = if (queued.attempts > 0 || queued.id.endsWith("-r")) "$baseId-r" else baseId
             val task = queued.copy(id = id, layout = layout)
             val base = lastChapter?.takeIf { cleanUrl(it.url) == currentUrl }
@@ -2093,9 +2240,14 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
         rtAheadWorkerBusy = false
         rtAheadWorkerTask = null
         rtAheadWorkerJobKey = ""
-        if (task.attempts < 1 && cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
+        val canvasStillCurrent = WebModeLayoutStore.canvasVersionsStillCurrent(task.canvasVersions)
+        if (!canvasStillCurrent) {
+            OcrDiag.log("CANVAS_STALE", "failed read-ahead task belonged to an older canvas generation; not retrying")
+        }
+        if (task.attempts < 1 && canvasStillCurrent &&
+            cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
             queueRtAheadTask(task.copy(
-                id = rtAheadTaskId(task.pageUrl, task.layout) + "-r",
+                id = rtAheadTaskId(task.pageUrl, task.layout, task.canvasVersions) + "-r",
                 attempts = task.attempts + 1
             ), front = true)
         }
@@ -2144,6 +2296,12 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
     }
 
     private fun finishRealtimeAheadTranslation(jobKey: String, task: RtAheadTranslationTask, raw: String) {
+        if (!WebModeLayoutStore.canvasVersionsStillCurrent(task.canvasVersions)) {
+            OcrDiag.log("CANVAS_STALE", "discarded completed read-ahead reply after canvas generation changed")
+            cancelRealtimeAheadWorker(requeue = false)
+            handler.postDelayed({ pumpRealtimeAheadTranslation() }, 100L)
+            return
+        }
         val aligned = WebModeLayout.alignWithFallback(cleanReply(raw), task.layout)
         if (aligned == null) {
             val nums = Regex("\\[(\\d{3,})\\]").findAll(raw).map { it.groupValues[1] }.take(30).joinToString(",")
@@ -2171,10 +2329,14 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
             cleanUrl(task.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
             val retryLayout = WebModeLayout(0, missing)
             queueRtAheadTask(task.copy(
-                id = rtAheadTaskId(task.pageUrl, retryLayout) + "-r",
+                id = rtAheadTaskId(task.pageUrl, retryLayout, task.canvasVersions) + "-r",
                 layout = retryLayout,
                 attempts = task.attempts + 1
             ), front = true)
+            OcrDiag.log("ALIGN_RETRY", "retrying only missing/noise bubbles count=${missing.size} once")
+        } else if (missing.isNotEmpty()) {
+            rememberSkippedAheadBubbles(missing)
+            OcrDiag.log("ALIGN_SKIP", "left untranslated count=${missing.size}; manual region selection remains available")
         }
         val cooldownUntil = System.currentTimeMillis() + chatbotRequestGapMs
         nextChatbotRequestAtMs = maxOf(nextChatbotRequestAtMs, cooldownUntil)
@@ -2196,6 +2358,8 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
         rtAheadTranslationTasksByJobKey.clear()
         rtAheadTranslationCache.clear()
         rtAheadTranslationSuppressedIds.clear()
+        rtJapaneseCanvasSources.clear()
+        rtAheadSkippedBubbleHashes.clear()
         rtAheadHold.clear()
     }
 
@@ -2297,8 +2461,14 @@ one-word translation. Each marker must stay faithful to its own ${Langs.source(t
 var v=[],seen={},now=Date.now(),vw=window.innerWidth||0,vh=window.innerHeight||0,hasLargeImage=false;
 var LAZY=['data-src','data-lazy-src','data-original','data-original-src','data-src-original','data-image','data-img','data-bg','data-background','data-background-image','data-url','data-ks-lazyload','data-cfsrc'];
 var PH=/placeholder|blank\.|spacer|loading|lazy[-_.]?(img|load)|1x1|transparen|pixel\.gif/i;
+function blockedTracker(s){
+ try{
+  var h=new URL(String(s||'').trim(),document.baseURI).hostname.toLowerCase();
+  return /(^|\.)(?:doubleclick\.net|googleadservices\.com|googlesyndication\.com|amazon-adsystem\.com|adsrvr\.org|criteo\.com|adnxs\.com|scorecardresearch\.com|treasuredata\.com)$/.test(h);
+ }catch(e){return false;}
+}
 function absolute(s){try{return s?new URL(String(s).trim(),document.baseURI).href:'';}catch(e){return '';}}
-function good(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s);}
+function good(s){s=String(s||'').trim();return !!s&&!/^data:image\/(gif|svg)/i.test(s)&&!PH.test(s)&&!/^about:blank/i.test(s)&&!blockedTracker(s);}
 function srcset(ss){
  if(!ss)return '';
  var best='',score=-1,parts=String(ss).split(',');
@@ -2319,7 +2489,7 @@ function imageSrc(e){
  return absolute(primary);
 }
 function add(kind,s,r,extra){
- s=absolute(s);if(!s||seen[kind+':'+s])return;
+ s=absolute(s);if(!s||blockedTracker(s)||seen[kind+':'+s])return;
  seen[kind+':'+s]=1;
  v.push(kind+':'+s+'@'+Math.round(r.width)+'x'+Math.round(r.height)+(extra||''));
 }
@@ -2709,7 +2879,6 @@ return t.length>=40?'TXT:'+t:'';
             !WebModeInpainter.isReady(this) -> "not installed"
             !Prefs.bool(this, "wmAiInpaint", true) -> "off"
             Prefs.get(this, "wmAiInpaintCrashed", "") == "1" -> "OFF (crashed before)"
-            !android.os.Process.is64Bit() && Prefs.get(this, "wmAiForce32", "") != "1" -> "OFF (32-bit phone)"
             WebModeInpainter.tooSlow -> "paused (slow)"
             WebModeInpainter.isLoaded() -> "ON" + (WebModeInpainter.lastNote.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
             else -> "loading"
@@ -5763,6 +5932,29 @@ return t.length>=40?'TXT:'+t:'';
             else -> "Auto (guess from page)"
         }
 
+    private fun menuScanDirLabel(): String {
+        val d = ScanMode.direction(this)
+        val short = when (d) { ScanDirection.SCROLL -> "Top → Bottom"; ScanDirection.RTL -> "Right → Left"; ScanDirection.LTR -> "Left → Right" }
+        return "🧭 Scan direction: $short" + if (ScanMode.askBefore(this)) " (asks on ⚡)" else " (no question)"
+    }
+
+    /** Menu: pick the scan direction for good and decide whether ⚡ asks before every scan. */
+    private fun scanDirectionDialog(onDone: () -> Unit) {
+        val dirs = ScanDirection.values()
+        var sel = dirs.indexOf(ScanMode.direction(this)).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Scanning direction")
+            .setSingleChoiceItems(dirs.map { it.label }.toTypedArray(), sel) { _, which -> sel = which }
+            .setPositiveButton("Save & ask each time") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel]); Prefs.putBool(this, ScanMode.PREF_ASK, true); d.dismiss(); onDone()
+            }
+            .setNeutralButton("Save, don't ask") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel]); Prefs.putBool(this, ScanMode.PREF_ASK, false); d.dismiss(); onDone()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun menuRealtimeAutoOcrLabel(): String =
         if (Prefs.bool(this, "rtAutoOcrEnabled", true)) "✅ ⚡ Auto Real-time OCR"
         else "⬜ ⚡ Auto Real-time OCR — off (manual tap mode)"
@@ -6863,6 +7055,29 @@ return t.length>=40?'TXT:'+t:'';
      * extraction uses (prompt, glossary, chatbot, response handling, cache, prefetch).
      */
     private var deepSeekLastFailToastAtMs = 0L
+    private var skipScanAsk = false
+
+    /** Scanning mode: the three questions asked before a scan (scroll / right to left / left to right). */
+    private fun askScanOptions(onChosen: () -> Unit) {
+        val dirs = ScanDirection.values()
+        var sel = dirs.indexOf(ScanMode.direction(this)).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("How should this chapter be scanned?")
+            .setSingleChoiceItems(dirs.map { it.label }.toTypedArray(), sel) { _, which -> sel = which }
+            .setPositiveButton("Start scan") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel])
+                d.dismiss()
+                onChosen()
+            }
+            .setNeutralButton("Don't ask again") { d, _ ->
+                ScanMode.setDirection(this, dirs[sel])
+                Prefs.putBool(this, ScanMode.PREF_ASK, false)
+                d.dismiss()
+                onChosen()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
     private fun startWebModeExtract(
         token: Int, useSaved: Boolean = false, realtimeViewport: Boolean = false, forceFresh: Boolean = false,
@@ -6908,6 +7123,7 @@ return t.length>=40?'TXT:'+t:'';
             // Force Extract may scroll the screen; real-time OCR must stay viewport-only.
             force = Prefs.bool(this, "wmForce") && !realtimeViewport,
             forceFreshOcr = forceFresh,
+            scanDirection = if (!realtimeViewport && !forceFresh) ScanMode.direction(this).key else "scroll",
             isValid = { token == navToken && jobSeq == webModeJobSerial },
             onProgress = { stage, pct ->
                 if (token == navToken && jobSeq == webModeJobSerial) {
@@ -7115,6 +7331,9 @@ return t.length>=40?'TXT:'+t:'';
         val token = prefetchToken
         webModePrefetchHandle = webMode.start(WebModeRequest(
             webView = prefetchWv,
+            // The next chapter ("Ahead") is read the same way as the one on screen: same direction, same accuracy.
+            scanDirection = ScanMode.direction(this).key,
+            forceAccurate = true,
             isValid = { prefetchLoading && token == prefetchToken },
             onProgress = { stage, pct ->
                 webModePrefetchStage = stage
@@ -7189,6 +7408,13 @@ return t.length>=40?'TXT:'+t:'';
             chatWv.evaluateJavascript(Js.clearSendState(), null)
             toast("🔁 Sending the same text to the chatbot again…")
             enqueue(failed)
+            return
+        }
+        if (webModeOn() && !DeepSeekRealtimeTranslation.isEnabled(this) && !skipScanAsk && ScanMode.askBefore(this)) {
+            askScanOptions {
+                skipScanAsk = true
+                try { extractCopy() } finally { skipScanAsk = false }
+            }
             return
         }
         navToken++
@@ -7516,7 +7742,13 @@ return t.length>=40?'TXT:'+t:'';
                     val cur = cleanUrl(novelWv.url.orEmpty())
                     if (cur != oldUrl && novelWv.progress >= 100) {
                         hideNavLoading()
-                        if (autoExtract) handler.postDelayed({ if (token == navToken) extractCopy() }, 700L)
+                        if (autoExtract) handler.postDelayed({
+                            if (token == navToken) {
+                                // Auto-scan of the next chapter: use the saved direction, never pop the question.
+                                skipScanAsk = true
+                                try { extractCopy() } finally { skipScanAsk = false }
+                            }
+                        }, 700L)
                     } else if (n < 50) {
                         waitUrl(n + 1)
                     } else {
@@ -8875,9 +9107,11 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             rtAheadTranslationQueuedIds.remove(aheadTask.id)
             rtAheadTranslationSuppressedIds.add(aheadTask.id)
             running = null
-            if (aheadTask.attempts < 1 && cleanUrl(aheadTask.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
+            if (aheadTask.attempts < 1 &&
+                WebModeLayoutStore.canvasVersionsStillCurrent(aheadTask.canvasVersions) &&
+                cleanUrl(aheadTask.pageUrl) == cleanUrl(novelWv.url.orEmpty())) {
                 queueRtAheadTask(aheadTask.copy(
-                    id = rtAheadTaskId(aheadTask.pageUrl, aheadTask.layout) + "-r",
+                    id = rtAheadTaskId(aheadTask.pageUrl, aheadTask.layout, aheadTask.canvasVersions) + "-r",
                     attempts = aheadTask.attempts + 1
                 ))
             } else {
@@ -9128,6 +9362,34 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
     private fun clearCanvasTransitionOverlay(url: String) {
         val changed = WebModeLayoutStore.takeCanvasTransitions(url)
         if (changed.isEmpty()) return
+
+        // Invalidate cached Japanese-canvas translations for every recycled slot, and stop an in-flight
+        // read-ahead request if it captured an older generation. Blob URLs are immutable identities and are
+        // handled by their exact source key; ns-canvas slots need this explicit generation invalidation.
+        val changedJapaneseSources = changed.filter {
+            rtJapaneseCanvasSourceKey(it)?.let { key -> key in rtJapaneseCanvasSources } == true
+        }.toSet()
+        val changedCachePrefixes = changedJapaneseSources
+            .mapNotNull { WebModeLayout.canvasBubbleCachePrefix(it) }.toSet()
+        if (changedCachePrefixes.isNotEmpty()) {
+            val staleCacheKeys = rtAheadTranslationCache.keys
+                .filter { key -> changedCachePrefixes.any { prefix -> key.startsWith(prefix) } }
+                .toList()
+            staleCacheKeys.forEach { rtAheadTranslationCache.remove(it) }
+        }
+        val changedJapaneseSourceKeys = changedJapaneseSources.mapNotNull { rtJapaneseCanvasSourceKey(it) }.toSet()
+        rtJapaneseCanvasSources.removeAll(changedJapaneseSourceKeys)
+        val skippedForChangedSources = rtAheadSkippedBubbleHashes
+            .filterValues { it in changedJapaneseSources }
+            .keys
+            .toList()
+        skippedForChangedSources.forEach { rtAheadSkippedBubbleHashes.remove(it) }
+        val activeAhead = rtAheadWorkerTask
+        if (rtAheadWorkerBusy && activeAhead != null &&
+            !WebModeLayoutStore.canvasVersionsStillCurrent(activeAhead.canvasVersions)) {
+            OcrDiag.log("CANVAS_STALE", "interrupting in-flight read-ahead for recycled canvas")
+            cancelRealtimeAheadWorker(requeue = false)
+        }
 
         // A not-yet-flushed OCR batch may already contain bubbles from the old contents of this
         // recycled canvas. Remove only those entries before the queue is allowed to send a request.
@@ -9806,7 +10068,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             "🧠 What the App Learned About This Site",
             "🔬 OCR Log — copy everything",
             "🧹 Clear OCR Log (then reproduce the problem)",
-            menuDetectorLabel(), menuRealtimeAutoOcrLabel()
+            menuDetectorLabel(), menuRealtimeAutoOcrLabel(), menuScanDirLabel()
         )
         // Rows that are not offered here. Their underlying features and code remain unchanged.
         val hidden = setOf(2, 6, 8, 10, 11, 13, 17, 18, 25)
@@ -9815,14 +10077,14 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
             7 to Ic.RELOAD, 9 to Ic.MOON, 12 to Ic.SPARK, 14 to Ic.BOLT, 15 to Ic.SHIELD,
             16 to Ic.RELOAD, 19 to Ic.BOOK, 20 to Ic.TEXT, 21 to Ic.SLIDERS, 23 to Ic.TEXT, 24 to Ic.LOCK,
             27 to Ic.SHIELD, 28 to Ic.TEXT, 29 to Ic.SLIDERS, 30 to Ic.BOLT, 31 to Ic.GLOBE, 32 to Ic.SPARK, 33 to Ic.SPARK, 34 to Ic.BOLT, 35 to Ic.SPARK, 36 to Ic.TEXT, 37 to Ic.TEXT, 38 to Ic.TEXT,
-            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH, 61 to Ic.BOLT
+            39 to Ic.RELOAD, 40 to Ic.CLOCK, 41 to Ic.CLOCK, 22 to Ic.SEARCH, 42 to Ic.SEARCH, 43 to Ic.BOLT, 44 to Ic.CLOCK, 45 to Ic.SEARCH, 46 to Ic.SPARK, 47 to Ic.SPARK, 48 to Ic.BOLT, 49 to Ic.RELOAD, 50 to Ic.SEARCH, 51 to Ic.SPARK, 52 to Ic.SEARCH, 53 to Ic.SLIDERS, 54 to Ic.SPARK, 55 to Ic.BOLT, 56 to Ic.SHARE, 57 to Ic.SEARCH, 58 to Ic.SEARCH, 59 to Ic.RELOAD, 60 to Ic.SEARCH, 61 to Ic.BOLT, 62 to Ic.BOLT
         )
         // Everyday rows stay open; everything technical lives behind one ADVANCED fold.
         val daily = listOf(
             "COMMUNITY" to listOf(56),
             "LIBRARY" to listOf(0, 4, 1, 3),
             "TRANSLATE" to listOf(5, 33, 54, 7),
-            "OCR" to listOf(53, 50, 57, 58, 59, 60),
+            "OCR" to listOf(62, 53, 50, 57, 58, 59, 60),
             "READER" to listOf(9, 20, 23),
             "APP" to listOf(55)
         )
@@ -10029,6 +10291,7 @@ Do not invent text. Keep each translation short enough to fit a speech bubble.
                     toast("🔬 OCR log copied (" + (full.length / 1000) + " KB) — paste it to Claude")
                 }
                 60 -> { detectorDialog { refresh(i, menuDetectorLabel()) } }
+                62 -> { scanDirectionDialog { refresh(i, menuScanDirLabel()) } }
                 61 -> { setRealtimeAutoOcrEnabled(!Prefs.bool(this, "rtAutoOcrEnabled", true)); refresh(i, menuRealtimeAutoOcrLabel()) }
                 59 -> {
                     OcrDiag.clear()
@@ -10640,9 +10903,9 @@ ${rows.take(220).joinToString("\n")}
             WebModeInpainter.isDownloading() -> "downloading…"
             WebModeInpainter.tooSlow -> "installed · paused for a few minutes (this phone was too slow)"
             WebModeInpainter.isReady(this) -> "installed · used automatically for lettering on artwork"
-            else -> "not installed · tap to download (≈ 37 MB)"
+            else -> "not installed · tap to download (≈ 16.3 MB)"
         }
-        return "🎨 AI text eraser (LaMa)\n" + state
+        return "🎨 AI text eraser (MI-GAN)\n" + state
     }
 
     private fun inpaintDialog() {

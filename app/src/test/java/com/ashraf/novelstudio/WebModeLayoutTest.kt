@@ -1,6 +1,8 @@
 package com.ashraf.novelstudio
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -100,5 +102,122 @@ class WebModeSamePositionTest {
 
     @Test fun differentSizeIsNotTheSameBubble() {
         assertFalse(WebModeLayoutStore.samePosition(b(0.5f, 0.5f, 0.6f, 0.008f), b(0.5f, 0.5f, 0.6f, 0.02f)))
+    }
+}
+
+
+/** Marker parser regression tests: skipped OCR noise must not shift or cancel valid replies. */
+class WebModePartialAlignmentTest {
+    private val src = "ns-canvas:0,0,800x1200"
+
+    private fun bubble(text: String, index: Int) = WmBubble(
+        src = src, cx = 0.2f + index * 0.2f, cy = 0.2f, w = 0.12f, h = 0.08f,
+        angle = 0f, font = 0.02f, bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
+        sourceText = text
+    )
+
+    private fun layout(n: Int = 3) = WebModeLayout(0, (1..n).map { bubble("source $it", it) })
+
+    @Test fun blankMarkerDoesNotDiscardOtherTranslations() {
+        val aligned = WebModeLayout.align("[001] হ্যালো\n\n[002]   \n\n[003] কেমন আছো", layout())
+        assertEquals(listOf("হ্যালো", null, "কেমন আছো"), aligned)
+    }
+
+    @Test fun omittedMarkerLeavesItsOwnSlotEmptyWithoutShiftingLaterAnswers() {
+        val aligned = WebModeLayout.align("[001] প্রথম\n\n[003] তৃতীয়", layout())
+        assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
+    }
+
+    @Test fun outOfOrderMarkersStillMapByTheirExplicitIds() {
+        val aligned = WebModeLayout.align("[003] তৃতীয়\n\n[001] প্রথম", layout())
+        assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
+    }
+
+    @Test fun duplicateMarkerOnlyInvalidatesThatAmbiguousSlot() {
+        val aligned = WebModeLayout.align(
+            "[001] প্রথম উত্তর\n\n[001] অন্য উত্তর\n\n[002] দ্বিতীয়\n\n[003] তৃতীয়",
+            layout()
+        )
+        assertEquals(listOf(null, "দ্বিতীয়", "তৃতীয়"), aligned)
+    }
+
+    @Test fun tildePlaceholderDoesNotDiscardOtherTranslations() {
+        val aligned = WebModeLayout.align("[001] প্রথম\n\n[002] ~\n\n[003] তৃতীয়", layout())
+        assertEquals(listOf("প্রথম", null, "তৃতীয়"), aligned)
+    }
+
+    @Test fun allEmptyEntriesAreRejectedRatherThanReportedAsSuccess() {
+        assertNull(WebModeLayout.align("[001]\n\n[002]\n\n[003] ~", layout()))
+    }
+}
+
+
+/** Stable identities for Japanese canvas caching must distinguish repeated dialogue at different positions. */
+class WebModeCanvasBubbleCacheIdentityTest {
+    private fun bubble(src: String, text: String, cx: Float, cy: Float) = WmBubble(
+        src = src, cx = cx, cy = cy, w = 0.2f, h = 0.08f,
+        angle = 0f, font = 0.02f, bg = 0xFFFFFFFF.toInt(), fg = 0xFF000000.toInt(),
+        sourceText = text
+    )
+
+    @Test fun repeatedTextInDifferentBubblePositionsHasDifferentIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.3f, 0.2f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.3f, 0.7f)
+        )
+        assertTrue(first != null && second != null && first != second)
+    }
+
+    @Test fun resizeAndSmallBoxJitterKeepCanvasIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.301f, 0.202f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,900x1280", "待って!", 0.304f, 0.204f)
+        )
+        assertEquals(first, second)
+    }
+
+    @Test fun differentCanvasSlotsDoNotShareIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,47,420x597", "待って！", 0.3f, 0.2f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("ns-canvas:0,647,420x597", "待って！", 0.3f, 0.2f)
+        )
+        assertTrue(first != second)
+    }
+
+    @Test fun blobPanelsWithSameTextDoNotShareIdentity() {
+        val first = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("blob:https://reader.example/one", "待って！", 0.3f, 0.2f)
+        )
+        val second = WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("blob:https://reader.example/two", "待って！", 0.3f, 0.2f)
+        )
+        assertTrue(first != null && second != null && first != second)
+    }
+    @Test fun canvasCachePrefixIsStableAcrossResolutionChanges() {
+        val first = WebModeLayout.canvasBubbleCachePrefix("ns-canvas:0,47,420x597")
+        val second = WebModeLayout.canvasBubbleCachePrefix("ns-canvas:0,47,900x1280")
+        assertEquals(first, second)
+        assertTrue(first?.startsWith("jcanvas:") == true)
+    }
+
+    @Test fun readAheadCanCaptureGenerationBeforeCanvasBecomesVisible() {
+        val layout = WebModeLayout(0, listOf(
+            bubble("ns-canvas:0,947,420x597", "行こう！", 0.3f, 0.2f)
+        ))
+        val versions = WebModeLayoutStore.canvasCacheVersions("https://unseen-reader.test/chapter", layout)
+        assertEquals(1, versions.size)
+        assertTrue(versions.values.single() != Long.MIN_VALUE)
+    }
+
+    @Test fun ordinaryImageDoesNotUseCanvasIdentity() {
+        assertNull(WebModeLayout.canvasBubbleCacheIdentity(
+            bubble("https://cdn.example.test/panel.jpg", "待って！", 0.3f, 0.2f)
+        ))
     }
 }

@@ -5,6 +5,7 @@ on:
     branches:
       - fix/lens-ocr-model-routing-manual-extract-20261024
       - fix/canvas-page-overlay-lifecycle-20261025
+      - experiment/migan-inpainting-rt-ocr-20261028
   workflow_dispatch:
 
 permissions:

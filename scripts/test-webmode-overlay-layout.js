@@ -12,6 +12,52 @@ const decorativeSource = extractFunction(libMatch[1], "function decorativeUrl(s)
 const decorativeUrl = new Function(decorativeSource + "; return decorativeUrl;")();
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/link_slot_abc.jpg"), true, "link-slot promotional art must not be treated as a manga panel");
 assert.equal(decorativeUrl("https://cdn-ak-img.shonenjumpplus.com/public/uploaded-content/manga_page_abc.jpg"), false, "actual manga assets must remain eligible");
+new Function(libMatch[1]); // Compile all current page-discovery JavaScript, including URL/source selection.
+
+const discovery = new Function("document", "window", "URL",
+  libMatch[1] + "; return { imageSrc: imageSrc, looksLikeImageDownloadUrl: looksLikeImageDownloadUrl };"
+)({ baseURI: "https://reader.example/chapter", scrollingElement: {}, documentElement: {} }, {}, URL);
+
+function fakeImage(attrs, currentSrc, naturalWidth, href) {
+  const attributes = Object.assign({ src: currentSrc }, attrs || {});
+  const anchor = href ? { href: href, getAttribute: name => name === "href" ? href : null } : null;
+  return {
+    currentSrc,
+    src: currentSrc,
+    naturalWidth: naturalWidth || 0,
+    parentElement: null,
+    getAttribute: name => attributes[name] || null,
+    closest: selector => selector === "a[href]" ? anchor : null
+  };
+}
+const thumb = "https://cdn.example.test/thumb/panel_thumb.jpg";
+const original = "https://cdn.example.test/original/panel_full.jpg";
+assert.equal(
+  discovery.imageSrc(fakeImage({ "data-original": original }, thumb, 420)),
+  original,
+  "data-original must win over a lower-quality thumbnail URL"
+);
+const linkedFullImage = "https://cdn.example.test/download/chapter/panel.jpg?sig=abc";
+assert.equal(
+  discovery.imageSrc(fakeImage({ "data-original": original }, thumb, 420, linkedFullImage)),
+  linkedFullImage,
+  "a direct image-download href must be used when an image is wrapped by a full-resolution link"
+);
+assert.equal(
+  discovery.imageSrc(fakeImage({}, thumb, 420, "https://reader.example/chapter/next")),
+  thumb,
+  "a normal chapter/navigation link must never replace the image URL"
+);
+assert.equal(
+  discovery.looksLikeImageDownloadUrl("https://cdn.example.test/chapter/next"),
+  false,
+  "ordinary HTML chapter URLs must not be treated as direct image links"
+);
+
+const visibleHitSource = extractFunction(libMatch[1], "function candidateVisibleAt(panel,x,y)");
+assert.ok(visibleHitSource.includes("var outerHit=document.elementFromPoint(x,y);") &&
+  visibleHitSource.includes("if(outerHit!==frame)return false;"),
+  "a same-origin iframe image must also be visible at the outer page stacking layer, not just inside its own document");
 assert.ok(mainActivity.includes("source.lowercase().contains(\"/public/uploaded-content/link_slo\")"), "manual OCR must recognize the Shonen Jump+ link-slot false target");
 assert.ok(mainActivity.includes("forceScreenOcr = forceScreenOcr"), "a link-slot selection must switch to viewport OCR");
 assert.ok(extractor.includes("forceFresh = req.forceFreshOcr || req.forceScreenOcr"), "manual viewport fallback must bypass OCR cache and use thorough mode");
@@ -32,9 +78,89 @@ assert.ok(rescan.includes("{ if (it.anchor == null) 0 else 1 }"), "fully missed 
 assert.ok(remover.includes("estimateFlatBackground(region, rw, rh, ix0, iy0, ix1, iy1)"),
   "text remover must estimate local background outside the OCR box");
 assert.ok(remover.includes("Non-AI fast path"), "text remover must have a non-AI flat-background path");
+assert.ok(remover.includes('"CLEAN_JP_AUDIT"') && remover.includes('unmatched='),
+  "Japanese OCR bubbles that were not cleaned must be visible in compact diagnostics");
 assert.ok(remover.includes("val grow = (fontPx * 0.035f).toInt().coerceIn(1, 2)"),
   "flat-background erasure must expand the mask to clear anti-aliased text edges");
 assert.ok(remover.includes("onionFill(region, mask, rw, rh"), "text remover must retain non-AI fill for non-flat artwork");
+assert.ok(!remover.includes("wipeInterior(bitmap, bubble.cv"),
+  "text removal must not flatten the full speech-bubble interior");
+assert.ok(remover.includes('sourceUrl.startsWith("blob:", true)') && remover.includes("storeInlineCleanedBytes"),
+  "blob-backed panels must use a bounded real cleaned replacement rather than advertise the original blob URL");
+const removalCache = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeTextRemovalCache.kt", "utf8");
+assert.ok(removalCache.includes("MAX_INLINE_CLEAN_URL_CHARS = 450_000") &&
+  removalCache.includes("MAX_INLINE_CLEAN_TOTAL_CHARS = 750_000"),
+  "inline cleaned images must have strict per-image and total memory caps");
+assert.ok(writer.includes('var cleanSources=__CLEAN_SOURCES__') &&
+  writer.includes('.replace("__CLEAN_SOURCES__", cleanSources.toString())'),
+  "a cleaned image URL must be sent once per source, not repeated for every bubble");
+assert.ok(writer.includes("b.setAttribute('data-cl',it.cl?'1':'')"),
+  "bubble JSON should carry only a small cleaned-image flag");
+assert.ok(writer.includes('put("cv", ja)'),
+  "detector speech-bubble mask rectangles must be passed to the overlay");
+assert.ok(writer.includes("var hasCv=!!(it.cv&&it.cv.length>=4)") &&
+  writer.includes("className='__ns_cv'") && writer.includes("cover.appendChild(cd)"),
+  "the overlay must reconstruct the detected speech-bubble silhouette from cv rectangles");
+assert.ok(writer.includes("cover.__nsWaitClean=!!it.cl&&!hasCv"),
+  "the small OCR-box fallback should wait for cleaned image only when no bubble mask exists");
+const layoutSource = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/WebModeLayout.kt", "utf8");
+assert.ok(layoutSource.includes("fun canvasBubbleCachePrefix(sourceUrl: String)"),
+  "canvas cache keys need a source prefix that can be invalidated after a page transition");
+assert.ok(layoutSource.includes("fun canvasCacheVersions(url: String, layout: WebModeLayout?)"),
+  "read-ahead must capture canvas generation without requiring the panel to be visible already");
+assert.ok(mainActivity.includes("canvasVersionsStillCurrent(queued.canvasVersions)") &&
+  mainActivity.includes("canvasVersionsStillCurrent(task.canvasVersions)"),
+  "queued and completed read-ahead replies must be rejected after the canvas generation changes");
+assert.ok(mainActivity.includes("changedCachePrefixes") &&
+  mainActivity.includes("rtJapaneseCanvasSources.removeAll(changedJapaneseSourceKeys)"),
+  "canvas changes must invalidate source-scoped Japanese translation cache entries");
+assert.ok(mainActivity.includes("nextChatbotRequestAtMs = minOf(nextChatbotRequestAtMs, preemptAt + 100L)"),
+  "a visible realtime batch must not wait for the hidden read-ahead request's reserved cooldown");
+assert.ok(mainActivity.includes("rtAheadSkippedBubbleHashes") &&
+  mainActivity.includes("rememberSkippedAheadBubbles"),
+  "unresolved read-ahead noise must not create an endless retry loop");
+assert.ok(libMatch[1].includes("var imgKey=src+'@'") &&
+  libMatch[1].includes("var iframeKey=fsrc+'@'"),
+  "panel discovery must deduplicate duplicate DOM clones by geometry, not by source URL alone");
+assert.ok(mainActivity.includes('else "$source@${panel.top}"'),
+  "read-ahead collection must preserve two panels that reuse the same image URL at different offsets");
+
+assert.ok(extractor.includes("fun submitFetch(i: Int, skipKnownAhead: Boolean = true)") &&
+  !extractor.includes("for (k in 0 until minOf(FETCH_AHEAD, total)) submitFetch(k)"),
+  "realtime scans must not eagerly download panels before checking ahead OCR cache");
+assert.ok(extractor.includes("hasAheadResult || alreadyReadingAhead || recentlyBlank"),
+  "prefetch slots must skip panels already cached, being read ahead, or recently known blank");
+assert.ok(extractor.includes("val realtimePriority = fastMode || req.ahead > 0") &&
+  extractor.includes("allowAi = !fastMode && req.ahead <= 0"),
+  "read-ahead OCR must never launch AI inpainting even if a caller changes the fastMode flag");
+assert.ok(extractor.includes("!realtimePriority && remoteDet && detOk && scanDetect") &&
+  extractor.includes("else if (!realtimePriority && Prefs.bool(wv.context, \"wmBubbleFit\", true))"),
+  "realtime and read-ahead OCR must not start RT-DETR or mask segmentation");
+assert.ok(mainActivity.includes("maxHeapMb <= 192L -> minOf(configuredN, 1)") &&
+  mainActivity.includes("memoryInfo.lowMemory || freeHeapMb < 72L -> 0"),
+  "ahead OCR must be reduced to one panel on low-heap devices and paused under memory pressure");
+assert.ok(extractor.includes('normalizedSource.contains("/link-slot-")') &&
+  extractor.includes('normalizedSource.contains("/link_slot_")'),
+  "promotional link-slot images must be excluded even when iframe collection bypasses page-script filtering");
+assert.ok(mainActivity.includes("Use surrounding dialogue as context to resolve pronouns, omitted subjects") &&
+  mainActivity.includes("Context is for understanding, not for copying"),
+  "realtime translation should resolve pronouns from nearby context without copying another bubble's words");
+assert.ok(extractor.includes("Number(x.vl)") && extractor.includes("(x=${it.left})"),
+  "panel diagnostics must report viewport coordinates to investigate overlapping iframe/image candidates");
+const bubbleSeg = fs.readFileSync("app/src/main/java/com/ashraf/novelstudio/BubbleSegDetector.kt", "utf8");
+assert.ok(bubbleSeg.includes('Thread(r, "ns-mask-release")') &&
+  bubbleSeg.includes("releaseExecutor.execute"),
+  "idle mask-session release must not block the Android main thread");
+assert.ok(bubbleSeg.includes("expectedGeneration == releaseGeneration"),
+  "a queued idle cleanup must not release a mask session that was used again");
+assert.ok(bubbleSeg.includes("idleReleaseExpectedGeneration = releaseGeneration") &&
+  bubbleSeg.includes("val expectedGeneration = idleReleaseExpectedGeneration"),
+  "the idle-release generation must be captured when its timer is scheduled, not when it fires");
+assert.ok(remover.includes('"AI_PAINT"') && remover.includes('"AI_PANEL"') &&
+  remover.includes("aiCallsAttempted") && remover.includes("aiTotalMs"),
+  "MI-GAN diagnostics must distinguish actual region calls and per-panel elapsed time");
+assert.ok(remover.includes('"CLEAN_JP_AUDIT"'),
+  "Japanese text-cleaning outcomes must be measurable without logging dialogue content");
 const recognizeAt = extractor.indexOf("private fun recognizeInner(");
 const recognizeEnd = extractor.indexOf("private fun recognizeCore(", recognizeAt);
 assert.ok(recognizeAt >= 0 && recognizeEnd > recognizeAt, "could not locate OCR routing function");

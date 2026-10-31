@@ -96,6 +96,8 @@ internal object WebModeWriter {
     var textLayer=document.createElement('div'); textLayer.id='__ns_wm_text_layer';
     textLayer.style.cssText='position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2;';
     w.appendChild(textLayer);
+    // Per-source cleaned-image URLs are passed once, not repeated in every bubble item (important for low-memory phones).
+    var cleanSources=__CLEAN_SOURCES__||Object.create(null);
     var cleanImgs=Object.create(null);
     var holes=Object.create(null);   // per picture: rectangles (image fractions) where the ORIGINAL must show through
     function ensureCleanImage(im,s,url,r,o0){
@@ -137,7 +139,7 @@ internal object WebModeWriter {
       if(it.hole){var hk=norm(it.s);(holes[hk]=holes[hk]||[]);for(var hq=0;hq<it.r.length;hq++)holes[hk].push(it.r[hq]);continue;}
       var b=document.createElement('div'); b.className='__ns_b';
       b.setAttribute('data-s',it.s);
-      b.setAttribute('data-cl',it.cl||'');
+      b.setAttribute('data-cl',it.cl?'1':'');
       // Erased in place (canvas panel): the old lettering is already gone from the page pixels, so no cover box.
       b.setAttribute('data-er',it.er?'1':'');
       b.setAttribute('data-bg',it.bg);
@@ -179,13 +181,14 @@ internal object WebModeWriter {
       b.appendChild(t);
       var cover=null;
       var hasCv=!!(it.cv&&it.cv.length>=4);
-      // Bubbles with a real balloon MASK always paint it (paper colour inside the outline): erasing does not depend on
-      // the cleaned picture. Other bubbles with a cleaned picture get a cover too, shown only until that picture loads.
+      // Restore the speech-bubble silhouette from the detector's mask rectangles. These are local cover shapes,
+      // not text-removal pixels: the cleaner below still erases only the detected glyph mask and its small margin.
+      // If no reliable silhouette exists, use the small OCR-box cover as a conservative fallback.
       if(!it.er){
         cover=document.createElement('div');cover.className='__ns_cover';
         cover.style.cssText='position:absolute;left:0;top:0;display:none;box-sizing:border-box;overflow:visible;'
-          +'pointer-events:none;will-change:transform;background:'+((it.cv&&it.cv.length>=4)?'transparent':it.bg)+';';
-        if(it.cv&&it.cv.length>=4){
+          +'pointer-events:none;will-change:transform;background:'+(hasCv?'transparent':it.bg)+';';
+        if(hasCv){
           for(var ci=0;ci+3<it.cv.length;ci+=4){
             var cd=document.createElement('div');cd.className='__ns_cv';
             cd.style.cssText='position:absolute;pointer-events:none;margin:0;padding:0;left:'+(it.cv[ci]*100)+'%;top:'+(it.cv[ci+1]*100)+'%;'
@@ -757,7 +760,7 @@ internal object WebModeWriter {
         var r=im.getBoundingClientRect();
         if(r.width<8){if(b.style.display!=='none')b.style.display='none';if(b.__nsCover&&b.__nsCover.style.display!=='none')b.__nsCover.style.display='none';continue;}
         // Keep original DOM nodes intact so srcset, lazy loading and site click handlers keep working.
-        var cleanUrl=b.getAttribute('data-cl');
+        var cleanUrl=b.getAttribute('data-cl')?cleanSources[norm(b.getAttribute('data-s'))]||'':'';
         if(cleanUrl)ensureCleanImage(im,b.getAttribute('data-s'),cleanUrl,r,o);
         var g=b.getAttribute('data-g').split(',');
         var bw=g[2]*r.width,bh=g[3]*r.height;
@@ -1274,17 +1277,6 @@ internal object WebModeWriter {
                 .put("cx", r5(b.cx)).put("cy", r5(b.cy)).put("w", r5(b.w)).put("h", r5(b.h))
                 .put("a", r5(b.angle)).put("f", r5(b.font))
                 .apply {
-                    if (b.cv.size >= 4 && b.w > 0f && b.h > 0f) {
-                        val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
-                        val ja = JSONArray()
-                        var q = 0
-                        while (q + 3 < b.cv.size) {
-                            ja.put(r5((b.cv[q] - bl) / b.w)).put(r5((b.cv[q + 1] - bt) / b.h))
-                                .put(r5((b.cv[q + 2] - bl) / b.w)).put(r5((b.cv[q + 3] - bt) / b.h))
-                            q += 4
-                        }
-                        put("cv", ja)
-                    }
                     if (b.tbw > 0f && b.tbh > 0f && b.w > 0f && b.h > 0f) {
                         val bl = b.cx - b.w / 2f; val bt = b.cy - b.h / 2f
                         val tl = b.tcx - b.tbw / 2f; val tt = b.tcy - b.tbh / 2f
@@ -1297,31 +1289,55 @@ internal object WebModeWriter {
                     }
                 }
                 .put("bg", css(b.bg)).put("fg", css(b.fg)).put("g2", css(b.fg2)).put("sf", b.soft).put("o", if (b.stroke != 0) css(b.stroke) else "")
-                // Transparent translation only where THIS bubble's old lettering was really erased; a bubble the
-                // cleaner skipped keeps its cover box, so the old text never shows through the translation.
-                .put("cl", if (WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
-                    WebModeTextRemovalCache.urlFor(b.src).orEmpty() else "")
-                // A canvas panel has no image URL, so `er` is its only way to drop the cover box. It must stay
-                // limited to canvas sources: an ordinary panel whose cleaned image is not cached (evicted, or a
-                // different job's erased marks) would otherwise lose its cover box with the original lettering
-                // still on the page — the translation then sits on top of the untranslated text.
+                // If the source image was cleaned, keep the local text-box cover until the replacement really loads.
+                // The clean image removes only the recognized lettering patch; failed/unsupported sources retain the
+                // small text-box cover instead of flattening the whole speech-bubble interior.
+                .put("cl", WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
                 .put("er", b.src.startsWith("ns-canvas:", true) &&
-                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b))))
+                    WebModeTextRemovalCache.isErased(b.src, WebModeTextRemovalCache.bubbleKey(b)))
+                .apply {
+                    if (b.cv.size >= 4 && b.w > 0f && b.h > 0f) {
+                        val bl = b.cx - b.w / 2f
+                        val bt = b.cy - b.h / 2f
+                        val ja = JSONArray()
+                        var q = 0
+                        while (q + 3 < b.cv.size) {
+                            ja.put(r5((b.cv[q] - bl) / b.w)).put(r5((b.cv[q + 1] - bt) / b.h))
+                                .put(r5((b.cv[q + 2] - bl) / b.w)).put(r5((b.cv[q + 3] - bt) / b.h))
+                            q += 4
+                        }
+                        put("cv", ja)
+                    }
+                })
         }
         // The translated text goes in last, so nothing in it can be mistaken for a placeholder.
         val sources = JSONArray()
+        val cleanSources = JSONObject()
         // Pass every OCR source, including bubbles with no translation. Otherwise an off-screen
         // query-ID variant could be mistaken for the one translated item still in the DOM.
-        layout.bubbles.asSequence()
+        // Cleaned URLs (especially data: URLs) appear only once per source; bubble items carry a small boolean flag.
+        val sourceList = layout.bubbles.asSequence()
             .map { WebModeLogic.normalizeUrl(it.src) }
             .filter { it.isNotBlank() }
             .distinct()
-            .forEach { sources.put(it) }
+            .toList()
+        val erasedSources = layout.bubbles.asSequence()
+            .filter { WebModeTextRemovalCache.isErased(it.src, WebModeTextRemovalCache.bubbleKey(it)) }
+            .map { WebModeLogic.normalizeUrl(it.src) }
+            .filter { it.isNotBlank() }
+            .toSet()
+        for (src in sourceList) {
+            sources.put(src)
+            if (src in erasedSources) {
+                WebModeTextRemovalCache.urlFor(src)?.takeIf { it.isNotBlank() }?.let { cleanSources.put(src, it) }
+            }
+        }
         return "try{document.documentElement.style.setProperty('--ns-bi','" + bottomInsetPx + "px');}catch(e){};" + BUBBLES
             .replace("__FONT__", JSONObject.quote(font))
             .replace("__PID__", JSONObject.quote(pageId))
             .replace("__ITEMS__", arr.toString())
             .replace("__SOURCES__", sources.toString())
+            .replace("__CLEAN_SOURCES__", cleanSources.toString())
     }
 }
 

@@ -27,25 +27,28 @@ class ScanQualityRegressionTest {
         val a=line("first",200f,100f,30f);val b=line("second",200f,134f,30f)
         assertEquals(2,OcrPost.mergeNeighbours(listOf(a,b),verticalOnly=true).size)
     }
-    @Test fun incompleteReplyCannotBeSuccessful() {
-        assertNull(WebModeLayout.align("[001] one [002] two [003] three",layout(4)))
+    @Test fun incompleteReplyKeepsPresentMarkersInTheirOwnSlots() {
+        assertEquals(listOf("one", "two", "three", null),
+            WebModeLayout.align("[001] one [002] two [003] three", layout(4)))
     }
-    @Test fun duplicateMarkerIsAmbiguousEvenWithFullCoverage() {
-        assertNull(WebModeLayout.align("[001] one [001] wrong [002] two",layout(2)))
+    @Test fun duplicateMarkerOnlyInvalidatesItsOwnSlot() {
+        assertEquals(listOf(null, "two"),
+            WebModeLayout.align("[001] one [001] wrong [002] two", layout(2)))
     }
-    @Test fun missingBubbleCannotBeHiddenByTitleMarker() {
-        assertNull(WebModeLayout.align("[001] title [002] one [003] two [004] three",layout(4,1)))
+    @Test fun titleMarkerDoesNotShiftLaterPartialTranslations() {
+        assertEquals(listOf("one", "two", "three", null),
+            WebModeLayout.align("[001] title [002] one [003] two [004] three", layout(4, 1)))
     }
     @Test fun exactMarkersKeepTheirOwnBoxes() {
         assertEquals(listOf("one","two"),WebModeLayout.align("[001] one [002] two",layout(2)))
     }
-    @Test fun outOfOrderOrExtraMarkersAreRejected() {
-        assertNull(WebModeLayout.align("[002] two [001] one",layout(2)))
-        assertNull(WebModeLayout.align("[001] one [002] two [003] extra",layout(2)))
+    @Test fun outOfOrderOrExtraMarkersNeverShiftKnownEntries() {
+        assertEquals(listOf("one", "two"), WebModeLayout.align("[002] two [001] one", layout(2)))
+        assertEquals(listOf("one", "two"), WebModeLayout.align("[001] one [002] two [003] extra", layout(2)))
     }
-    @Test fun singleBubbleDoesNotSwallowMarkedMultipleAnswers() {
-        assertNull(WebModeLayout.alignWithFallback("[001] one [002] other",layout(1)))
-        assertEquals(listOf("one"),WebModeLayout.alignWithFallback("one",layout(1)))
+    @Test fun singleBubbleUsesItsExplicitMarkerWithoutMergingExtraMarkers() {
+        assertEquals(listOf("one"), WebModeLayout.alignWithFallback("[001] one [002] other", layout(1)))
+        assertEquals(listOf("one"), WebModeLayout.alignWithFallback("one", layout(1)))
     }
     @Test fun generationSuffixKeepsStableSlotButDistinctFingerprint() {
         val a="ns-canvas:0,0,800x1200@1_3_800_1200"
@@ -70,6 +73,25 @@ class ScanQualityRegressionTest {
         WebModeTextRemovalCache.storeCanvasCleaned(a,"data:image/png;base64,TEST_A")
         assertEquals("data:image/png;base64,TEST_A",WebModeTextRemovalCache.urlFor(a))
         assertNull(WebModeTextRemovalCache.urlFor(b))
+    }
+    @Test fun cleanedBlobUsesAnExactInlineReplacementKey() {
+        val a = "blob:https://reader.test/panel-a"
+        val b = "blob:https://reader.test/panel-b"
+        assertTrue(WebModeTextRemovalCache.storeBlobCleaned(a, "data:image/webp;base64,TEST_A"))
+        assertEquals("data:image/webp;base64,TEST_A", WebModeTextRemovalCache.urlFor(a))
+        assertNull(WebModeTextRemovalCache.urlFor(b))
+    }
+
+    @Test fun inlineCleanedUrlCacheIsBoundedByTotalStringSize() {
+        val a = "blob:https://reader.test/large-a"
+        val b = "blob:https://reader.test/large-b"
+        val prefix = "data:image/webp;base64,"
+        val first = prefix + "A".repeat(390_000)
+        val second = prefix + "B".repeat(390_000)
+        assertTrue(WebModeTextRemovalCache.storeBlobCleaned(a, first))
+        assertTrue(WebModeTextRemovalCache.storeBlobCleaned(b, second))
+        assertNull(WebModeTextRemovalCache.urlFor(a))
+        assertEquals(second, WebModeTextRemovalCache.urlFor(b))
     }
     @Test fun manualRecoveryIsNotCappedAtOneAndHalfSeconds() {
         assertTrue(com.ashraf.novelstudio.manualextract.ManualExtractConfig.OCR_CAP_MS >= 30_000)

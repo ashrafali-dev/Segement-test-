@@ -194,7 +194,7 @@ internal object OcrPost {
      * Blocks that sit right under each other, overlap horizontally and have the same text size and
      * tilt are one sentence: join them into one block.
      */
-    fun mergeNeighbours(blocks: List<OcrBlock>, image: Bitmap? = null): List<OcrBlock> {
+    fun mergeNeighbours(blocks: List<OcrBlock>, image: Bitmap? = null, verticalOnly: Boolean = false): List<OcrBlock> {
         if (blocks.size < 2) return blocks
         val work = ArrayList(blocks.sortedWith(compareBy({ it.cy }, { it.cx })))
         // outlineBetween() samples pixels (slow). The loop restarts after every merge, so remember which
@@ -207,6 +207,7 @@ internal object OcrPost {
                 for (j in i + 1 until work.size) {
                     val a = work[i]; val b = work[j]
                     if (vetoed[a]?.containsKey(b) == true) continue
+                    if (verticalOnly && (!a.vertical || !b.vertical)) continue
                     if (!joinable(a, b)) continue
                     // NEVER join two lines across a third block that sits between them. That is exactly how the
                     // middle line of a 3-line bubble vanished: top+bottom were fused, the middle one stayed
@@ -214,7 +215,7 @@ internal object OcrPost {
                     if (hasBlockBetween(work, a, b)) continue
                     // Two stacked speech bubbles are close enough to look like one paragraph by geometry alone.
                     // If the picture shows a bubble outline / artwork between the two texts they are separate.
-                    if (image != null && !a.vertical && outlineBetween(image, a, b)) {
+                    if (image != null && !a.vertical && outlineBetween(image, a, b, work)) {
                         vetoed.getOrPut(a) { java.util.IdentityHashMap() }[b] = true
                         continue
                     }
@@ -235,7 +236,7 @@ internal object OcrPost {
      * strip differs from the strip's own typical brightness. Returns false (= keep the geometry decision)
      * whenever the strip cannot be sampled.
      */
-    fun outlineBetween(img: Bitmap, a: OcrBlock, b: OcrBlock): Boolean {
+    fun outlineBetween(img: Bitmap, a: OcrBlock, b: OcrBlock, others: List<OcrBlock> = emptyList()): Boolean {
         try {
             val top = if (a.cy <= b.cy) a else b
             val bot = if (top === a) b else a
@@ -284,7 +285,8 @@ internal object OcrPost {
                 if (n >= 6 && off * 100 >= n * 60) return true
                 y++
             }
-            return false
+            // No straight dark row: curved / touching outlines are found by walking the fill (flood fill).
+            return ScanMode.closedOff(img, a, b, others)
         } catch (_: Exception) {
             return false
         }
@@ -394,6 +396,7 @@ internal object OcrPost {
     private fun joinable(a: OcrBlock, b: OcrBlock): Boolean {
         if (a.vertical != b.vertical) return false
         if (a.vertical) return joinableColumns(a, b)
+        if (BubbleGrouping.isAsidePair(a, b)) return false
         if (Math.abs(a.angle) >= 6f || Math.abs(b.angle) >= 6f) return false   // clearly tilted text stays as it is
         val fa = if (a.fontPx > 0f) a.fontPx else a.h
         val fb = if (b.fontPx > 0f) b.fontPx else b.h

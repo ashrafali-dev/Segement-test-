@@ -119,7 +119,7 @@ internal class ManualExtractPipeline(
             if (bubbles.isEmpty()) return fail(m, "no text")
             val paragraph = bubbles.joinToString("\n\n") { it.sourceText }
             val cacheKey = ManualExtractCache.key(paragraph, script.name)
-            val cached = ManualExtractCache.get(cacheKey)
+            val cached = if (ManualExtractConfig.USE_TRANSLATION_CACHE) ManualExtractCache.get(cacheKey) else null
             m.mark("build")
             if (cancelled()) return fail(m, "cancelled")
             if (cached != null) {
@@ -130,7 +130,7 @@ internal class ManualExtractPipeline(
             }
             // Translation is asynchronous on the Activity side; this call starts it and records the step.
             host.translateAndPlace(bubbles, paragraph, script) { translated ->
-                if (translated.isNotBlank()) ManualExtractCache.put(cacheKey, translated)
+                if (ManualExtractConfig.USE_TRANSLATION_CACHE && translated.isNotBlank()) ManualExtractCache.put(cacheKey, translated)
             }
             m.mark("translate_started")
             m.log(true, "started")

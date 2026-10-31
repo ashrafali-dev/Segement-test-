@@ -52,18 +52,34 @@ internal object WebModeTextRemover {
             else decoded.copy(Bitmap.Config.ARGB_8888, true).also { decoded.recycle() }
                 ?: run { decoded.recycle(); return false }
 
+        val panelStartedMs = android.os.SystemClock.elapsedRealtime()
+        var aiCallsAttempted = 0
+        var aiCallsSucceeded = 0
+        var aiTotalMs = 0L
+        var aiPolicy = "not-evaluated"
+        var panelRemovedForLog = 0
         try {
             var totalRemoved = 0
             // AI inpainting (optional, downloaded on request; used automatically once installed) is slow on a phone:
             // only a few artwork bubbles / free-text boxes per image.
             var aiBudget = 6
-            var aiWanted = allowAi && Prefs.bool(context, "wmAiInpaint", true) && WebModeInpainter.isReady(context) &&
-                !WebModeInpainter.tooSlow
+            val aiEnabledPref = Prefs.bool(context, "wmAiInpaint", true)
+            val aiModelReady = WebModeInpainter.isReady(context)
+            val aiCoolingDown = WebModeInpainter.tooSlow
+            var aiWanted = allowAi && aiEnabledPref && aiModelReady && !aiCoolingDown
+            aiPolicy = when {
+                !allowAi -> "disallowed-by-fast-path"
+                !aiEnabledPref -> "disabled-in-settings"
+                !aiModelReady -> "model-not-ready"
+                aiCoolingDown -> "cooldown-after-slow-run"
+                else -> "ready"
+            }
             if (aiWanted && !WebModeInpainter.isLoaded()) {
                 // Loading the model takes several seconds: do it in the background; THIS image uses the fast cleaner
                 // so the page never waits for it.
                 WebModeInpainter.warmUpAsync(context)
                 aiWanted = false
+                aiPolicy = "model-warming-in-background"
             }
             val aiStartMs = android.os.SystemClock.elapsedRealtime()
             var aiLastMs = 0L
@@ -75,20 +91,10 @@ internal object WebModeTextRemover {
                 .take(500)
                 .toList()
 
-            // Step 1 - bubbles whose SHAPE is known (closed flat speech bubble): paint the whole interior with the paper
-            // colour. This does not depend on the lettering test below, so Japanese columns, bold SFX and lettering the
-            // recogniser missed are wiped too, and the bubble counts as cleaned. (Before, any bubble that failed one of the
-            // strict glyph checks kept its old text and fell back to an ugly background box.)
-            // `soft` only says the ring around the OCR box is textured; the bubble interior itself can still be
-            // flat paper. Dense Japanese/Korean columns touch the ring and were tagged soft, which skipped this
-            // whole pass — the old lettering then stayed under the translation. wipeInterior() already refuses
-            // when the interior is mostly dark/coloured, so it is safe to try it for soft bubbles too.
-            for (bubble in boundedBubbles) {
-                if (bubble.cv.size < 4) continue
-                val n = try { wipeInterior(bitmap, bubble.cv, width, height, opaque(bubble.bg)) } catch (_: Exception) { 0 }
-                if (n > 0) { totalRemoved += n; erased.add(WebModeTextRemovalCache.bubbleKey(bubble)) }
-            }
-
+            // Do NOT paint the entire speech-bubble interior from cv: that flattens paper texture/gradients and
+            // can turn the bubble into a visibly boxy patch. cv is contour/placement guidance, not a text mask.
+            // The loop below edits only pixels selected as lettering inside the OCR box plus a small safety margin.
+            // If the local glyph mask is not confident, leave this bubble for the writer's conservative fallback.
             for (bubble in boundedBubbles) {
                 val cx = bubble.cx * width
                 val cy = bubble.cy * height
@@ -342,9 +348,18 @@ internal object WebModeTextRemover {
                 if (soft && aiWanted && aiBudget > 0 &&
                     (android.os.SystemClock.elapsedRealtime() - aiStartMs) + aiLastMs < 8000L) {
                     val t0 = android.os.SystemClock.elapsedRealtime()
+                    aiCallsAttempted++
                     aiFill = try { WebModeInpainter.fill(context, bitmap, x0, y0, rw, rh, mask) } catch (_: Throwable) { null }
                     aiLastMs = android.os.SystemClock.elapsedRealtime() - t0
-                    if (aiFill != null) aiBudget--
+                    aiTotalMs += aiLastMs
+                    if (aiFill != null) {
+                        aiBudget--
+                        aiCallsSucceeded++
+                    }
+                    OcrDiag.log(
+                        "AI_PAINT",
+                        "region src=${sourceUrl.take(80)} box=${rw}x$rh result=${if (aiFill != null) "ok" else "skipped/failed"} ms=$aiLastMs"
+                    )
                 }
                 // Free lettering (sound effects on artwork) is only erased when the AI inpainter really did it: the
                 // onion-peel fill smears artwork, and an untouched original under the overlay is the safer result.
@@ -395,6 +410,26 @@ internal object WebModeTextRemover {
                 totalRemoved += selectedCount
                 erased.add(WebModeTextRemovalCache.bubbleKey(bubble))
             }
+            panelRemovedForLog = totalRemoved
+            // Compact Japanese-script audit: show whether Lens/OCR found a bubble but the local cleaner
+            // skipped it. This distinguishes OCR geometry/color-mask misses from MI-GAN timing without
+            // logging the dialogue itself or emitting a separate line for every bubble.
+            val japaneseBubbles = boundedBubbles.filter { bubble ->
+                bubble.sourceText.any { ch ->
+                    ch.code in 0x3040..0x30FF || ch.code in 0x3400..0x9FFF
+                }
+            }
+            if (japaneseBubbles.isNotEmpty()) {
+                val erasedJapanese = japaneseBubbles.count {
+                    WebModeTextRemovalCache.bubbleKey(it) in erased
+                }
+                OcrDiag.log(
+                    "CLEAN_JP_AUDIT",
+                    "src=${sourceUrl.take(80)} detected=${japaneseBubbles.size} erased=$erasedJapanese " +
+                        "unmatched=${japaneseBubbles.size - erasedJapanese} " +
+                        "soft=${japaneseBubbles.count { it.soft }} allowAi=$allowAi aiPolicy=$aiPolicy"
+                )
+            }
             if (totalRemoved < 8) return false
 
             val bytesOut = ByteArrayOutputStream()
@@ -411,15 +446,12 @@ internal object WebModeTextRemover {
             val cleaned = bytesOut.toByteArray()
             if (cleaned.isEmpty() || cleaned.size > MAX_BYTES) return false
             val mime = if (modern) "image/webp" else "image/png"
-            // A canvas panel has no image URL: its picture is drawn by page JS, so the overlay had nothing to
-            // swap in and the old lettering stayed visible under the translation. Hand the cleaned pixels to the
-            // overlay as a data: URL. Canvas entries stay in memory only (a new multi-MB file per scroll
-            // position would grow the disk cache without bound) and are keyed by the stable canvas slot.
-            if (sourceUrl.startsWith("ns-canvas:", true)) {
-                WebModeTextRemovalCache.storeCanvasCleaned(
-                    sourceUrl,
-                    "data:$mime;base64," + android.util.Base64.encodeToString(cleaned, android.util.Base64.NO_WRAP)
-                )
+            // Canvas and blob URLs cannot be replaced by the file-backed request interceptor. Keep only a small,
+            // size-bounded inline data URL so the writer can show the locally cleaned pixels without retaining large
+            // pages in memory. Oversized items use the small OCR-box cover instead of a false "cleaned" success.
+            if (sourceUrl.startsWith("ns-canvas:", true) || sourceUrl.startsWith("blob:", true)) {
+                val stored = WebModeTextRemovalCache.storeInlineCleanedBytes(sourceUrl, cleaned, mime)
+                if (!stored) return false
                 WebModeTextRemovalCache.setErased(sourceUrl, erased)
                 return true
             }
@@ -431,6 +463,12 @@ internal object WebModeTextRemover {
         } catch (_: Exception) {
             return false
         } finally {
+            OcrDiag.log(
+                "AI_PANEL",
+                "src=${sourceUrl.take(100)} allowAi=$allowAi policy=$aiPolicy calls=$aiCallsAttempted " +
+                    "ok=$aiCallsSucceeded aiMs=$aiTotalMs elapsedMs=${android.os.SystemClock.elapsedRealtime() - panelStartedMs} " +
+                    "removedPixels=$panelRemovedForLog"
+            )
             bitmap.recycle()
         }
     }
@@ -515,40 +553,6 @@ internal object WebModeTextRemover {
         val mean = sum.toDouble() / n
         val variance = sum2.toDouble() / n - mean * mean
         return variance <= 20.0 * 20.0
-    }
-
-    private fun wipeInterior(bitmap: Bitmap, cv: List<Float>, width: Int, height: Int, bg: Int): Int {
-        val rects = ArrayList<IntArray>()
-        var q = 0
-        while (q + 3 < cv.size) {
-            val l = (cv[q] * width).toInt().coerceIn(0, width)
-            val t = (cv[q + 1] * height).toInt().coerceIn(0, height)
-            val r = ceil(cv[q + 2] * width).toInt().coerceIn(l, width)
-            val b = ceil(cv[q + 3] * height).toInt().coerceIn(t, height)
-            if (r - l >= 2 && b - t >= 2 && (r - l).toLong() * (b - t) <= 2_500_000L) rects.add(intArrayOf(l, t, r, b))
-            q += 4
-        }
-        if (rects.isEmpty()) return 0
-        var total = 0L
-        var ink = 0L
-        for (rc in rects) {
-            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
-            for (p in px) { total++; if (distance(p, bg) >= 60f) ink++ }
-        }
-        if (total == 0L || ink * 100 > total * 45) return 0
-        val paper = opaque(bg)
-        var changed = 0
-        for (rc in rects) {
-            val w = rc[2] - rc[0]; val h = rc[3] - rc[1]
-            val px = IntArray(w * h)
-            bitmap.getPixels(px, 0, w, rc[0], rc[1], w, h)
-            var any = false
-            for (i in px.indices) if (distance(px[i], bg) >= 4f) { px[i] = paper; changed++; any = true }
-            if (any) bitmap.setPixels(px, 0, w, rc[0], rc[1], w, h)
-        }
-        return changed
     }
 
     /** Colour for one erased pixel on artwork: inverse-distance blend of the nearest kept pixel in each of 8 directions (1/d² weights: no streaks, no pulling in far colours). */

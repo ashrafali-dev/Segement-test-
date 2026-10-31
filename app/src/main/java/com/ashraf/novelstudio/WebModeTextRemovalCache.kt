@@ -2,6 +2,7 @@ package com.ashraf.novelstudio
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import android.webkit.WebResourceResponse
 import java.io.File
 import java.io.FileInputStream
@@ -20,6 +21,9 @@ internal object WebModeTextRemovalCache {
     private const val MARKER = "__ns_cleaned"
     private const val MAX_BYTES = 64L * 1024 * 1024
     private const val MAX_ENTRIES = 80
+    // Inline replacements are needed for recycled canvas/blob sources, but must stay strictly bounded on low-memory phones.
+    private const val MAX_INLINE_CLEAN_URL_CHARS = 450_000
+    private const val MAX_INLINE_CLEAN_TOTAL_CHARS = 750_000
 
     private data class Entry(val file: File, val mime: String, val bytes: Long)
     private val entries = LinkedHashMap<String, Entry>(16, 0.75f, true)
@@ -83,32 +87,64 @@ internal object WebModeTextRemovalCache {
     }
 
     /**
-     * Cleaned pixels for a canvas panel, as a data: URL, keyed by the canvas slot.
-     *
-     * Canvas panels have no image URL to store a file under and their synthetic source changes with every
-     * scroll position, so these live in memory only and are bounded. Without this the overlay had nothing to
-     * draw and the original Japanese lettering stayed visible under the translation.
+     * Cleaned images for canvas/blob sources are kept inline because file interception cannot replace those URLs.
+     * The cache is bounded by actual URL-string size, not only item count, to avoid a memory spike on older phones.
      */
-    private val canvasUrls = object : LinkedHashMap<String, String>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 12
+    private val inlineCleanedUrls = LinkedHashMap<String, String>(8, 0.75f, true)
+    private var inlineCleanedChars = 0
+
+    @Synchronized
+    fun storeInlineCleanedBytes(sourceUrl: String, encodedImage: ByteArray, mime: String): Boolean {
+        val identity = WebModeLogic.normalizeUrl(sourceUrl)
+        if ((!identity.startsWith("ns-canvas:") && !identity.startsWith("blob:", true)) || encodedImage.isEmpty()) return false
+        val header = "data:$mime;base64,"
+        val estimatedChars = header.length.toLong() + ((encodedImage.size.toLong() + 2L) / 3L) * 4L
+        if (estimatedChars > MAX_INLINE_CLEAN_URL_CHARS) {
+            OcrDiag.log("CLEAN", "inline replacement exceeds per-image memory cap chars=$estimatedChars")
+            return false
+        }
+        val dataUrl = header + Base64.encodeToString(encodedImage, Base64.NO_WRAP)
+        return storeInlineUrl(identity, dataUrl)
     }
 
     @Synchronized
     fun storeCanvasCleaned(sourceUrl: String, dataUrl: String) {
-        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return
-        canvasUrls[slot] = dataUrl
+        val identity = WebModeLogic.normalizeUrl(sourceUrl)
+        if (!identity.startsWith("ns-canvas:")) return
+        storeInlineUrl(identity, dataUrl)
     }
 
     @Synchronized
-    private fun canvasUrlFor(sourceUrl: String): String? {
-        val slot = WebModeLayoutStore.canvasSourceSlot(sourceUrl) ?: return null
-        return canvasUrls[slot]
+    fun storeBlobCleaned(sourceUrl: String, dataUrl: String): Boolean {
+        val identity = WebModeLogic.normalizeUrl(sourceUrl)
+        if (!identity.startsWith("blob:", true)) return false
+        return storeInlineUrl(identity, dataUrl)
     }
+
+    @Synchronized
+    private fun storeInlineUrl(sourceUrl: String, dataUrl: String): Boolean {
+        val identity = WebModeLogic.normalizeUrl(sourceUrl)
+        if (identity.isBlank() || dataUrl.isBlank() || dataUrl.length > MAX_INLINE_CLEAN_URL_CHARS) return false
+        inlineCleanedUrls.remove(identity)?.let { inlineCleanedChars -= it.length }
+        inlineCleanedUrls[identity] = dataUrl
+        inlineCleanedChars += dataUrl.length
+        val iterator = inlineCleanedUrls.entries.iterator()
+        while (inlineCleanedChars > MAX_INLINE_CLEAN_TOTAL_CHARS && iterator.hasNext()) {
+            val entry = iterator.next()
+            inlineCleanedChars -= entry.value.length
+            iterator.remove()
+        }
+        return inlineCleanedUrls.containsKey(identity)
+    }
+
+    @Synchronized
+    private fun inlineUrlFor(sourceUrl: String): String? =
+        inlineCleanedUrls[WebModeLogic.normalizeUrl(sourceUrl)]
 
     @Synchronized
     fun urlFor(sourceUrl: String): String? {
-        // A canvas panel is served from the in-memory table, not the on-disk cache.
-        canvasUrlFor(sourceUrl)?.let { return it }
+        // Canvas/blob panels are served from the bounded in-memory table, not the on-disk cache.
+        inlineUrlFor(sourceUrl)?.let { return it }
         // has() verifies the file is still there, so the overlay never receives a URL whose bytes are gone
         // (that left a broken <img>: no cleaned picture AND no cover box, original lettering showing through).
         if (!has(sourceUrl)) return null
@@ -157,6 +193,8 @@ internal object WebModeTextRemovalCache {
         entries.values.forEach { runCatching { it.file.delete() } }
         entries.clear()
         erasedSoft.clear()
+        inlineCleanedUrls.clear()
+        inlineCleanedChars = 0
         usedBytes = 0L
         val dir = root ?: File(context.cacheDir, "wm_text_removed")
         runCatching { if (dir.exists()) dir.deleteRecursively() }

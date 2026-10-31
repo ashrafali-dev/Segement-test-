@@ -124,6 +124,36 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
             return bytes.joinToString("") { "%02x".format(it) }
         }
 
+        /**
+         * Cache identity for text read from a recycled canvas. Unlike the general text cache, it
+         * includes the stable canvas slot and coarse normalized geometry so two equal dialogues on
+         * different visible panels cannot borrow one another's translation. Coordinates are
+         * quantized to 1% of the image to tolerate small OCR-box jitter between scan passes.
+         */
+        /**
+         * Stable cache prefix for one canvas slot or exact blob URL. Keeping the source identity readable in
+         * the key lets canvas-transition handling invalidate stale entries without scanning every layout.
+         */
+        fun canvasBubbleCachePrefix(sourceUrl: String): String? {
+            val normalizedSrc = WebModeLogic.normalizeUrl(sourceUrl)
+            val sourceIdentity = WebModeLayoutStore.canvasSourceSlot(normalizedSrc)
+                ?: normalizedSrc.takeIf { it.startsWith("blob:", ignoreCase = true) }
+                ?: return null
+            return "jcanvas:$sourceIdentity|"
+        }
+
+        fun canvasBubbleCacheIdentity(b: WmBubble): String? {
+            val prefix = canvasBubbleCachePrefix(b.src) ?: return null
+            val text = normalizeOcrText(b.sourceText)
+            val geometry = listOf(b.cx, b.cy, b.w, b.h).joinToString(",") {
+                Math.round(it * 100f).toInt().toString()
+            }
+            val material = "$geometry|$text"
+            val bytes = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(material.toByteArray(Charsets.UTF_8))
+            return prefix + bytes.joinToString("") { "%02x".format(it) }
+        }
+
         /** Map the current reply to the current scan, then retain the result on the matching bubbles. */
         fun translated(layout: WebModeLayout, values: List<String?>): WebModeLayout =
             WebModeLayout(layout.titleOffset, layout.bubbles.mapIndexed { i, b ->
@@ -135,61 +165,77 @@ internal class WebModeLayout(val titleOffset: Int, val bubbles: List<WmBubble>) 
         private val NL = Regex("\\s*\\n\\s*")
 
         /**
-         * Align the chatbot's marked reply to exact OCR bubbles. A markerless reply has no stable
-         * bubble identity; matching it by paragraph count can silently put every translation in
-         * the wrong box after the model merges, reorders, or drops one paragraph. In that case the
-         * caller must show the reader view, never guess placement.
+         * Align translations by their explicit marker number, not by response position.
+         * A missing/empty/noise marker leaves only that bubble untranslated; it must not
+         * discard good answers for other bubbles. Duplicate IDs are ambiguous for that ID
+         * only. Never shift later translations to fill a skipped slot.
          */
         fun align(text: String, layout: WebModeLayout): List<String?>? {
             val n = layout.bubbles.size
             if (n == 0) return null
-            val ms = MARK.findAll(text).toList()
-            if (ms.isEmpty()) return null
 
-            val expectedLast = n + layout.titleOffset
-            val byNo = HashMap<Int, String>()
-            val seenNumbers = HashSet<Int>()
-            var outOfRange = 0; var dup = 0; var empty = 0
-            val order = ArrayList<Int>()
-            for ((k, m) in ms.withIndex()) {
-                val no = m.groupValues[1].toIntOrNull() ?: continue
-                // A marker that is out of range, repeated or empty only loses ITS OWN bubble (the old rule threw the
-                // whole reply away for one such marker)...
-                if (no < 1 || no > expectedLast) { outOfRange++; continue }
-                if (!seenNumbers.add(no)) { dup++; continue }   // a number that appears twice is ambiguous: keep the first answer
-                val end = if (k + 1 < ms.size) ms[k + 1].range.first else text.length
-                val body = text.substring(m.range.last + 1, end).trim()
-                // Older prompts/models used a tilde as a fake translation for skipped OCR.
-                if (body.isNotEmpty() && !body.matches(Regex("[~\\uFF5E]+"))) { byNo[no] = body; order.add(no) } else empty++
+            val markers = MARK.findAll(text).toList()
+            if (markers.isEmpty()) {
+                OcrDiag.log("ALIGN", "bubbles=$n markers=0 -> REJECT (no markers)")
+                return null
             }
-            // ...but a reply that answers only a FRACTION of the bubbles, or whose numbers run out of order, shows the
-            // model lost track of the numbering (merged / renumbered / re-ordered paragraphs). Putting such a reply on the
-            // page prints lines in the wrong bubbles and leaves the rest permanently untranslated, so it is rejected and
-            // the caller retries instead (that is what the old 70 % rule protected).
-            val need = if (n <= 2) n else Math.ceil(n * 0.75).toInt()
-            val ascending = order.zipWithNext().all { (x, y) -> y > x }
-            val ok = byNo.size >= need && ascending
-            OcrDiag.log("ALIGN", "bubbles=$n markers=${ms.size} placed=${byNo.size} need=$need outOfRange=$outOfRange dup=$dup empty=$empty ascending=$ascending -> ${if (ok) "ACCEPT" else "REJECT"}")
-            if (!ok) return null
 
-            // Marker numbers are positional IDs, looked up by number. A missing ID leaves ONLY its own bubble blank.
-            val out = List(n) { i -> byNo[i + 1 + layout.titleOffset]?.replace(NL, " ") }
-            return if (out.any { !it.isNullOrBlank() }) out else null
+            val expectedFirst = 1 + layout.titleOffset
+            val expectedLast = expectedFirst + n - 1
+            val byNo = HashMap<Int, String>()
+            val seen = HashSet<Int>()
+            val duplicates = HashSet<Int>()
+            var skipped = 0
+            var unknown = 0
+
+            for ((i, marker) in markers.withIndex()) {
+                val number = marker.groupValues[1].toIntOrNull() ?: continue
+                val end = if (i + 1 < markers.size) markers[i + 1].range.first else text.length
+                val body = text.substring(marker.range.last + 1, end).trim()
+                if (number !in expectedFirst..expectedLast) {
+                    unknown++
+                    continue
+                }
+                if (!seen.add(number)) {
+                    duplicates.add(number)
+                    byNo.remove(number)
+                    skipped++
+                    continue
+                }
+                // Empty and legacy tilde-only bodies mean "skip this bubble", not "reject batch".
+                if (body.isEmpty() || body.matches(Regex("[~\\uFF5E]+"))) {
+                    skipped++
+                    continue
+                }
+                byNo[number] = body
+            }
+
+            duplicates.forEach { byNo.remove(it) }
+            val out = List(n) { i -> byNo[expectedFirst + i]?.replace(NL, " ") }
+            val placed = out.count { !it.isNullOrBlank() }
+            if (placed == 0) {
+                OcrDiag.log("ALIGN", "bubbles=$n markers=${markers.size} -> REJECT (no usable entries)")
+                return null
+            }
+            val missing = n - placed
+            OcrDiag.log(
+                "ALIGN",
+                "bubbles=$n markers=${markers.size} placed=$placed missing=$missing skipped=$skipped duplicates=${duplicates.size} unknown=$unknown -> ACCEPT_PARTIAL"
+            )
+            return out
         }
 
         /**
-         * Marker alignment, then a safe fallback when it fails.
-         *
-         * A single-bubble layout (every manual tap, and most realtime bubbles) has exactly one text box, so the
-         * reply belongs there no matter what the model did with the marker: renumbered it, dropped it, wrapped
-         * it, or answered in prose. Refusing to place it was the "marker not found, so nothing appears" bug.
-         *
-         * Multi-bubble layouts keep the strict rule: with several boxes, guessing the order can print the wrong
-         * line in the wrong place, and the reader view is the honest result.
+         * Partial marker alignment handles known IDs first. Fallback is allowed only for a single-bubble layout
+         * when the reply has at most one marker. Multi-bubble prose without reliable IDs stays unplaced.
+         * This avoids rejecting a good batch because of one empty entry, while also avoiding guessed shifted placement.
          */
         fun alignWithFallback(text: String, layout: WebModeLayout): List<String?>? {
             align(text, layout)?.let { return it }
             if (layout.bubbles.size != 1) return null
+            // A single bubble may safely recover a markerless or singly-renumbered answer, but two
+            // marker groups mean the model returned multiple answers. Never concatenate them into one bubble.
+            if (ANY_MARK.findAll(text).count() > 1) return null
             val answer = stripMarkers(text)
             if (answer.isBlank()) return null
             return listOf(answer)
@@ -434,6 +480,26 @@ internal object WebModeLayoutStore {
             (canvasGenerationBySource[sourceKey] ?: 0L) == generation
         }
 
+    /**
+     * Capture current generations for read-ahead batches without requiring their bubbles to be the current
+     * visible snapshot. Ahead OCR can legitimately describe a panel that has not reached the viewport yet.
+     * The stricter canvasVersions() above remains for visible placement validation.
+     */
+    @Synchronized
+    fun canvasCacheVersions(url: String, layout: WebModeLayout?): Map<String, Long> {
+        if (!hasCanvasSources(layout)) return emptyMap()
+        val currentLayout = layout ?: return emptyMap()
+        val sources = currentLayout.bubbles.asSequence()
+            .map { WebModeLogic.normalizeUrl(it.src) }
+            .filter { it.startsWith("ns-canvas:") }
+            .distinctBy { canvasSourceSlot(it) ?: it }
+            .toList()
+        return sources.associate { src ->
+            val generationKey = canvasIdentityKey(url, src)
+            generationKey to (canvasGenerationBySource[generationKey] ?: 0L)
+        }
+    }
+
     @Synchronized
     fun setScan(url: String, layout: WebModeLayout) { scans[key(url)] = layout }
 
@@ -593,7 +659,7 @@ internal object WebModeLayoutStore {
         } == true
 
     private val CANVAS_SLOT = Regex(
-        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)$"
+        "^ns-canvas:(-?\\d+),(-?\\d+),(?:\\d+(?:\\.\\d+)?)x(?:\\d+(?:\\.\\d+)?)(?:@[^\\s]+)?$"
     )
 
     /** Stable identity for a recycled canvas independent of the current bitmap dimensions. */

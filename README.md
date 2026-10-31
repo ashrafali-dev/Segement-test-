@@ -18,6 +18,12 @@ ToonSensei is an Android reading app that works as a middleman between the page 
 
 ToonSensei uses a chatbot's web interface rather than shipping its own general-purpose translation model. It does not host or redistribute the website's original chapters. Some features can save translated text locally, such as the translation library.
 
+### How ToonSensei works
+
+ToonSensei streamlines a process readers can already do manually: copy text from a website into a chatbot, or send a screenshot to a chatbot and ask for a translation. The app brings those steps into a WebView-based workflow, extracts text or reads visible image text, sends it through the chosen chatbot workflow, and overlays the translation on the page.
+
+**ToonSensei does not provide a library of third-party novels or webtoons.** Readers choose the websites and content themselves. The app is a reading and translation assistant, not a story-hosting or redistribution service. Some features may save translated text locally on the reader's device; that is different from ToonSensei hosting a public content library.
+
 ## What it can do
 
 ### Web novels
@@ -137,8 +143,8 @@ Actual speed can vary with the phone, available memory, network, number and qual
 - **Platform:** Android, Kotlin, minSdk 24 (Android 7.0 or later); Java/Kotlin target 17.
 - **Page integration:** Android WebView with a JavaScript bridge.
 - **OCR:** ML Kit recognizers for Latin, Chinese, Japanese, and Korean; optional Google Lens OCR.
-- **Text placement:** OCR text blocks and their geometry, bubble/layout analysis, and an HTML/JavaScript overlay.
-- **Optional image cleanup:** ONNX Runtime supports optional detection/inpainting components. The LaMa inpainting model is downloaded separately rather than bundled in the APK; whether it can be used depends on device resources and model availability.
+- **Bubble detection and placement:** RT-DETR-based bubble detection, YOLO11n-seg bubble-mask refinement as an optional second stage, OCR text geometry, layout/grouping logic, and an HTML/JavaScript overlay. The optional segmentation stage is skipped in constrained/real-time paths to avoid extra memory and latency.
+- **Text cleanup and inpainting:** OCR-guided conservative pixel cleanup is used for suitable simple backgrounds; the current branch also includes MI-GAN inpainting via LiteRT/TFLite for image restoration. Availability and results depend on model availability, device memory, and the selected workflow. Do not assume every model is bundled or enabled on every device.
 - **Translation:** The chatbot web interface configured by the reader; translation behavior depends on that service and the prompt.
 
 These are implementation details, not a claim that every optional model is installed or enabled on every device.
